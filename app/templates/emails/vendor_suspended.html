@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Siiqo - Storefront Suspended</title>
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px; color: #334155; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #ef4444; }
+        .header h1 { color: #ffffff; margin: 0; font-size: 28px; font-weight: 900; letter-spacing: -0.5px; }
+        .header span { color: #ef4444; }
+        .content { padding: 40px; text-align: center; }
+        .content h2 { color: #0f172a; margin-top: 0; font-size: 22px; font-weight: 700; }
+        .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 24px; }
+        .highlight-box { background-color: #fef2f2; border: 2px dashed #fca5a5; border-radius: 12px; padding: 20px; margin: 30px 0; text-align: center; }
+        .btn { display: inline-block; background-color: #ef4444; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin-top: 10px; }
+        .btn:hover { background-color: #dc2626; }
+        .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+        .footer p { margin: 5px 0; }
+        .footer a { color: #ef4444; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Siiqo<span>.</span></h1>
+        </div>
+        <div class="content">
+            <h2>Important Account Notice</h2>
+            <p>Hi {{ first_name }},<br><br>We are writing to inform you that your vendor account and storefront <strong>{{ store_name }}</strong> have been suspended following a review by our administration team.</p>
+            
+            <div class="highlight-box">
+                <p style="margin: 0; font-weight: 600; color: #991b1b;">Your storefront is currently hidden from the marketplace and you cannot accept new orders.</p>
+            </div>
+            
+            <p>If you believe this is an error or wish to appeal this decision, please contact our vendor support team immediately.</p>
+            
+            <a href="https://siiqo.com/contact" class="btn">Contact Support</a>
+        </div>
+        <div class="footer">
+            <p>&copy; 2026 Siiqo Technologies. All rights reserved.</p>
+            <p>This is an automated message. Please do not reply directly to this email.</p>
+        </div>
+    </div>
+</body>
+</html>

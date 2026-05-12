@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Siiqo - System Notice</title>
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px; color: #334155; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #E0921C; }
+        .header h1 { color: #ffffff; margin: 0; font-size: 28px; font-weight: 900; letter-spacing: -0.5px; }
+        .header span { color: #E0921C; }
+        .content { padding: 40px; text-align: left; }
+        .content h2 { color: #0f172a; margin-top: 0; font-size: 22px; font-weight: 700; text-align: center; }
+        .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 24px; }
+        .highlight-box { background-color: #f1f5f9; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 20px; margin: 30px 0; text-align: left; }
+        .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+        .footer p { margin: 5px 0; }
+        .footer a { color: #E0921C; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Siiqo<span>.</span></h1>
+        </div>
+        <div class="content">
+            <h2>Important Notice</h2>
+            <p>Hi {{ first_name }},</p>
+            
+            <div class="highlight-box">
+                <p style="margin: 0; font-weight: 500; color: #0f172a;">{{ notice_text | safe }}</p>
+            </div>
+            
+            <p>If you have any questions, please reach out to our support team.</p>
+        </div>
+        <div class="footer">
+            <p>&copy; 2026 Siiqo Technologies. All rights reserved.</p>
+            <p>This is an automated message. Please do not reply directly to this email.</p>
+        </div>
+    </div>
+</body>
+</html>

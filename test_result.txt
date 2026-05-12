@@ -1,0 +1,160 @@
+
+Step 0: Checking backend is reachable at http://127.0.0.1:5000/api
+  BACKEND IS UP: {'status': 'healthy', 'version': '2.0.0'}
+
+Step 1: Register stillwalker689@gmail.com
+
+============================================================
+  REGISTER
+  Status  : 409
+  Response: {
+    "message": "An account with this email already exists"
+}
+============================================================
+  User already exists — resending OTP...
+
+============================================================
+  RESEND OTP
+  Status  : 200
+  Response: {
+    "message": "If that email is registered, a new code has been sent."
+}
+============================================================
+
+Step 2: Reading OTP from database...
+  User found in DB:
+    ID        : 111
+    Email     : stillwalker689@gmail.com
+    Role      : BUYER
+    Verified  : True
+    OTP       : 842214  <-- USE THIS
+    OTP Expiry: 2026-05-11 11:12:20.612258
+
+Step 3: Verifying email with OTP: 842214
+
+============================================================
+  VERIFY EMAIL
+  Status  : 200
+  Response: {
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmcmVzaCI6ZmFsc2UsImlhdCI6MTc3ODQ5NzM2MywianRpIjoiMmU0NTRhYjMtOTM4ZC00NTkxLWI1MzEtNzFkNTViMTE1YWI1IiwidHlwZSI6ImFjY2VzcyIsInN1YiI6IjExMSIsIm5iZiI6MTc3ODQ5NzM2MywiY3NyZiI6ImYwY2EzNWRiLWI1NTktNGJiOS1iMDY3LTU3N2UxNWI4NGQ2NiIsImV4cCI6MTc3ODUwMDk2M30.kpzPfyZ6AO0EdJDxtEDMYLVD43CZ0bPsRYwmdFfcKj8",
+    "message": "Email verified successfully. Welcome to Siiqo!",
+    "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmcmVzaCI6ZmFsc2UsImlhdCI6MTc3ODQ5NzM2MywianRpIjoiOGJmZTRlNTUtMTcwZC00NTQyLWFiNjktZWZlNTNiZTZhMTU4IiwidHlwZSI6InJlZnJlc2giLCJzdWIiOiIxMTEiLCJuYmYiOjE3Nzg0OTczNjMsImNzcmYiOiJmMjQ3ZWRhZS03NzA3LTRiZmQtYjFkNy1mYTA2MDJiNjc0NDQiLCJleHAiOjE3ODEwODkzNjN9.XwRrCIqsp2CwCLFGNRK-SrKaD_ZAJ041sLIzPjLftFQ",
+    "status": "success",
+    "user": {
+        "city": null,
+        "email": "stillwalker689@gmail.com",
+        "first_name": "Still",
+        "has_storefront": false,
+        "id": 111,
+        "is_active": true,
+        "is_verified": true,
+        "last_name": "Walker",
+        "phone": null,
+        "points_balance": 0.0,
+        "profile_pic": null,
+        "referral_code": "AECA658F",
+        "role": "BUYER",
+        "state": null,
+        "storefront_published": false,
+        "storefront_slug": null,
+        "storefront_verified": false
+    }
+}
+============================================================
+  Token received: YES
+
+Step 4: Login...
+
+============================================================
+  LOGIN
+  Status  : 200
+  Response: {
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmcmVzaCI6ZmFsc2UsImlhdCI6MTc3ODQ5NzM2NSwianRpIjoiYTlhNWIyNmMtZmFlNi00MTQ5LTkyODAtM2VhM2JjMWI1MmM2IiwidHlwZSI6ImFjY2VzcyIsInN1YiI6IjExMSIsIm5iZiI6MTc3ODQ5NzM2NSwiY3NyZiI6IjU4NjIwOWFjLTAxN2MtNDNlOC1iNjNkLTRiNjk1NjhjMmExYSIsImV4cCI6MTc3ODUwMDk2NX0.T2HEEhATEGzu_ZgmTU7mqbNlEo07UZzBv5soKttKgf4",
+    "message": "Login successful",
+    "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmcmVzaCI6ZmFsc2UsImlhdCI6MTc3ODQ5NzM2NSwianRpIjoiMTc2ZjBiMmUtYzk5ZC00Y2RlLWJjZTQtMTUwNTlhOTE4ZDM0IiwidHlwZSI6InJlZnJlc2giLCJzdWIiOiIxMTEiLCJuYmYiOjE3Nzg0OTczNjUsImNzcmYiOiI1M2NiMjMzMy1kYjg5LTRkZTYtODYzOC02YWE0YzdiMmJmNzYiLCJleHAiOjE3ODEwODkzNjV9.RmUw1G38dFB25J6roqhk8i8jzXJndZy2esmuGFq3Gzg",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmcmVzaCI6ZmFsc2UsImlhdCI6MTc3ODQ5NzM2NSwianRpIjoiYTlhNWIyNmMtZmFlNi00MTQ5LTkyODAtM2VhM2JjMWI1MmM2IiwidHlwZSI6ImFjY2VzcyIsInN1YiI6IjExMSIsIm5iZiI6MTc3ODQ5NzM2NSwiY3NyZiI6IjU4NjIwOWFjLTAxN2MtNDNlOC1iNjNkLTRiNjk1NjhjMmExYSIsImV4cCI6MTc3ODUwMDk2NX0.T2HEEhATEGzu_ZgmTU7mqbNlEo07UZzBv5soKttKgf4",
+    "user": {
+        "city": null,
+        "email": "stillwalker689@gmail.com",
+        "first_name": "Still",
+        "has_storefront": false,
+        "id": 111,
+        "is_active": true,
+        "is_verified": true,
+        "last_name": "Walker",
+        "phone": null,
+        "points_balance": 0.0,
+        "profile_pic": null,
+        "referral_code": "AECA658F",
+        "role": "BUYER",
+        "state": null,
+        "storefront_published": false,
+        "storefront_slug": null,
+        "storefront_verified": false
+    }
+}
+============================================================
+  Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ...
+
+Step 5: Fetching profile...
+
+============================================================
+  PROFILE
+  Status  : 200
+  Response: {
+    "city": null,
+    "email": "stillwalker689@gmail.com",
+    "first_name": "Still",
+    "has_storefront": false,
+    "id": 111,
+    "is_active": true,
+    "is_verified": true,
+    "last_name": "Walker",
+    "phone": null,
+    "points_balance": 0.0,
+    "profile_pic": null,
+    "referral_code": "AECA658F",
+    "role": "BUYER",
+    "state": null,
+    "storefront_published": false,
+    "storefront_slug": null,
+    "storefront_verified": false
+}
+============================================================
+
+Step 6: Testing unverified login is blocked...
+
+============================================================
+  UNVERIFIED LOGIN (expect 403)
+  Status  : 403
+  Response: {
+    "email": "unverified_temp@siiqo.com",
+    "message": "Please verify your email first. A new code has been sent.",
+    "requires_verification": true
+}
+============================================================
+  PASS: Unverified login correctly blocked!
+  Cleaned up temp user.
+
+Step 7: Testing wrong password (expect 401)...
+
+============================================================
+  WRONG PASSWORD (expect 401)
+  Status  : 401
+  Response: {
+    "message": "Invalid email or password"
+}
+============================================================
+  PASS: Wrong password correctly rejected!
+
+============================================================
+  ALL TESTS COMPLETE
+============================================================
+
+  Test account ready:
+  Email    : stillwalker689@gmail.com
+  Password : 123456789Still
+  Status   : Verified
+  Role     : BUYER
+
+  Login at: http://localhost:3000/auth/login

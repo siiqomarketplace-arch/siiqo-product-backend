@@ -1,0 +1,10 @@
+# Elastic Beanstalk Ignore
+venv/
+env/
+.env
+__pycache__/
+*.pyc
+.git/
+.idea/
+.vscode/
+instance/
