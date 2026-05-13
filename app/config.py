@@ -42,7 +42,13 @@ class Config:
     }
 
     # CORS
-    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(',')
+    # Updated to support main domain, local dev, and vendor subdomains
+    CORS_ORIGINS = [
+        "https://siiqo.com",
+        "https://www.siiqo.com",
+        "http://localhost:3000",
+        r"https://.*\.siiqo\.com"
+    ]
 
     # Rate Limiting — use Redis in production
     RATELIMIT_STORAGE_URI = os.environ.get('REDIS_URL', 'memory://')
@@ -56,6 +62,7 @@ class Config:
     AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
     AWS_S3_BUCKET_NAME = os.environ.get('AWS_S3_BUCKET_NAME')
+    AWS_S3_CUSTOM_DOMAIN = os.environ.get('AWS_S3_CUSTOM_DOMAIN')
     AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
     # Email
