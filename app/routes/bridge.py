@@ -98,7 +98,6 @@ def create_category():
     db.session.commit()
     return jsonify({"message": "Category created", "id": cat.id, "status": "success"}), 201
 
-
 @bridge_bp.route('/products/catalogs', methods=['GET'])
 @jwt_required()
 def get_catalogs():
@@ -107,26 +106,29 @@ def get_catalogs():
     if not user or not user.storefront:
         return jsonify({"status": "success", "catalogs": []}), 200
 
-    products = Product.query.filter_by(
-        storefront_id=user.storefront.id, is_active=True
-    ).all()
+    catalogs = Catalog.query.filter_by(vendor_id=user.id).all()
 
-    return jsonify({
-        "status": "success",
-        "catalogs": [{
-            "id": user.storefront.id,
-            "name": user.storefront.store_name,
-            "description": user.storefront.store_description or "",
-            "image": user.storefront.store_logo,
+    result = []
+    for cat in catalogs:
+        products = Product.query.filter_by(
+            catalog_id=cat.id, storefront_id=user.storefront.id, is_active=True
+        ).all()
+        result.append({
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description or "",
+            "image": None,  # image upload not yet supported for catalogs
             "products": [{
                 "id": p.id,
                 "name": p.name,
                 "price": str(p.price),
                 "images": p.images or [],
                 "description": p.description,
+                "category": p.category.name if p.category else "",
             } for p in products],
-        }],
-    }), 200
+        })
+
+    return jsonify({"status": "success", "catalogs": result}), 200
 
 
 @bridge_bp.route('/products/catalogs', methods=['POST'])
@@ -136,7 +138,97 @@ def create_catalog():
     user = db.session.get(User, int(user_id))
     if not user or not user.storefront:
         return jsonify({"message": "Vendor storefront required"}), 403
-    return jsonify({"message": "Catalog created", "id": user.storefront.id, "status": "success"}), 201
+
+    # Accept both JSON, URLSearchParams (form-urlencoded), and multipart
+    if request.is_json:
+        data = request.get_json() or {}
+    else:
+        data = request.form.to_dict()
+
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"message": "Catalog name is required"}), 400
+
+    description = (data.get("description") or "").strip()
+    product_ids_raw = data.get("product_ids", "")
+    product_ids = [int(x.strip()) for x in product_ids_raw.split(",") if x.strip().isdigit()]
+
+    cat = Catalog(vendor_id=user.id, name=name, description=description)
+    db.session.add(cat)
+    db.session.flush()  # get cat.id before commit
+
+    # Link products to this catalog
+    if product_ids:
+        Product.query.filter(
+            Product.id.in_(product_ids),
+            Product.storefront_id == user.storefront.id,
+        ).update({"catalog_id": cat.id}, synchronize_session=False)
+
+    db.session.commit()
+    return jsonify({"status": "success", "message": "Catalog created", "id": cat.id, "catalog": {"id": cat.id, "name": cat.name}}), 201
+
+
+@bridge_bp.route('/products/catalogs/<int:catalog_id>', methods=['PATCH'])
+@jwt_required()
+def update_catalog(catalog_id):
+    """Rename a catalog and/or update its product assignments."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or not user.storefront:
+        return jsonify({"message": "Vendor storefront required"}), 403
+
+    cat = db.session.get(Catalog, catalog_id)
+    if not cat or cat.vendor_id != user.id:
+        return jsonify({"message": "Catalog not found"}), 404
+
+    # Accept both JSON, URLSearchParams (form-urlencoded), and multipart
+    if request.is_json:
+        data = request.get_json() or {}
+    else:
+        data = request.form.to_dict()
+
+    if data.get("name"):
+        cat.name = data["name"].strip()
+    if "description" in data:
+        cat.description = data["description"].strip()
+
+    # Re-assign products if product_ids provided
+    product_ids_raw = data.get("product_ids", "")
+    if product_ids_raw:
+        product_ids = [int(x.strip()) for x in product_ids_raw.split(",") if x.strip().isdigit()]
+        # First clear old assignments for this catalog
+        Product.query.filter_by(
+            catalog_id=cat.id, storefront_id=user.storefront.id
+        ).update({"catalog_id": None}, synchronize_session=False)
+        # Then assign new ones
+        if product_ids:
+            Product.query.filter(
+                Product.id.in_(product_ids),
+                Product.storefront_id == user.storefront.id,
+            ).update({"catalog_id": cat.id}, synchronize_session=False)
+
+    db.session.commit()
+    return jsonify({"status": "success", "message": "Catalog updated", "id": cat.id}), 200
+
+
+@bridge_bp.route('/products/catalogs/<int:catalog_id>', methods=['DELETE'])
+@jwt_required()
+def delete_catalog(catalog_id):
+    """Delete a catalog. Products inside become uncategorized (catalog_id set to null)."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or not user.storefront:
+        return jsonify({"message": "Vendor storefront required"}), 403
+
+    cat = db.session.get(Catalog, catalog_id)
+    if not cat or cat.vendor_id != user.id:
+        return jsonify({"message": "Catalog not found"}), 404
+
+    # Unlink products — they remain in the store but become ungrouped
+    Product.query.filter_by(catalog_id=cat.id).update({"catalog_id": None}, synchronize_session=False)
+    db.session.delete(cat)
+    db.session.commit()
+    return jsonify({"status": "success", "message": f"Catalog '{cat.name}' deleted. Products are now ungrouped."}), 200
 
 
 # ===========================================================================

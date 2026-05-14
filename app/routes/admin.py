@@ -381,9 +381,21 @@ def manage_category(cat_id):
         return jsonify({"message": "Category not found"}), 404
 
     if request.method == 'DELETE':
+        from app.models.product import Product as Prod
+        product_count = Prod.query.filter_by(category_id=cat_id).count()
+        force = request.args.get('force', 'false').lower() == 'true'
+        if product_count > 0 and not force:
+            return jsonify({
+                "message": f"Cannot delete '{cat.name}'. It has {product_count} product(s) assigned. "
+                           f"Pass ?force=true to delete anyway (products will become uncategorized).",
+                "product_count": product_count,
+                "requires_force": True,
+            }), 409
+        if product_count > 0 and force:
+            Prod.query.filter_by(category_id=cat_id).update({"category_id": None})
         db.session.delete(cat)
         db.session.commit()
-        return jsonify({"message": f"Category '{cat.name}' deleted."}), 200
+        return jsonify({"message": f"Category '{cat.name}' deleted.", "affected_products": product_count}), 200
 
     data = request.get_json() or {}
     if 'name' in data:
@@ -586,20 +598,45 @@ def handle_blog():
 
     if request.method == 'GET':
         articles = Article.query.order_by(Article.created_at.desc()).all()
-        return jsonify([{
-            "id": a.id,
-            "title": a.title,
-            "slug": a.slug,
-            "is_published": a.is_published,
-            "created_at": a.created_at.isoformat() if a.created_at else None,
-        } for a in articles]), 200
+        return jsonify({
+            "articles": [{
+                "id": a.id,
+                "title": a.title,
+                "slug": a.slug,
+                "excerpt": a.excerpt,
+                "cover_image": a.cover_image,
+                "status": "published" if a.is_published else "draft",
+                "is_published": a.is_published,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            } for a in articles]
+        }), 200
 
     if not _require_superadmin(parsed_id):
         return jsonify({"message": "SuperAdmin required"}), 403
 
-    data = request.get_json() or {}
     import re
+
+    # Support both JSON and multipart/form-data (for image uploads)
+    if request.content_type and 'multipart' in request.content_type:
+        data = request.form.to_dict()
+        cover_image_file = request.files.get('cover_image')
+        cover_image_url = None
+        if cover_image_file:
+            import os, uuid
+            upload_dir = os.path.join('uploads', 'blog')
+            os.makedirs(upload_dir, exist_ok=True)
+            ext = cover_image_file.filename.rsplit('.', 1)[-1] if '.' in cover_image_file.filename else 'jpg'
+            filename = f"{uuid.uuid4().hex}.{ext}"
+            filepath = os.path.join(upload_dir, filename)
+            cover_image_file.save(filepath)
+            cover_image_url = f"/uploads/blog/{filename}"
+    else:
+        data = request.get_json() or {}
+        cover_image_url = data.get('cover_image')
+
     title = data.get('title', '')
+    if not title:
+        return jsonify({"message": "Title is required"}), 400
     slug = data.get('slug') or re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
 
     new_article = Article(
@@ -608,14 +645,77 @@ def handle_blog():
         slug=slug,
         content=data.get('content', ''),
         excerpt=data.get('excerpt'),
-        cover_image=data.get('cover_image'),
-        is_published=data.get('is_published', False),
-        meta_title=data.get('meta_title'),
-        meta_description=data.get('meta_description'),
+        cover_image=cover_image_url,
+        is_published=data.get('is_published', False) in (True, 'true', '1', 'published'),
+        meta_title=data.get('meta_title') or data.get('seo_title'),
+        meta_description=data.get('meta_description') or data.get('seo_description'),
     )
     db.session.add(new_article)
     db.session.commit()
-    return jsonify({"message": "Article created.", "id": new_article.id}), 201
+    return jsonify({"message": "Article created.", "id": new_article.id, "slug": new_article.slug}), 201
+
+
+@admin_bp.route('/blog/<int:article_id>', methods=['PATCH', 'DELETE'])
+@jwt_required()
+def manage_blog_article(article_id):
+    """Edit or delete a specific blog article by ID."""
+    admin_id = get_jwt_identity()
+    parsed_id = _parse_admin_id(admin_id)
+    if not _require_superadmin(parsed_id):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    article = db.session.get(Article, article_id)
+    if not article:
+        return jsonify({"message": "Article not found"}), 404
+
+    if request.method == 'DELETE':
+        db.session.delete(article)
+        db.session.commit()
+        return jsonify({"message": f"Article '{article.title}' deleted."}), 200
+
+    # PATCH — update existing article
+    import re
+
+    if request.content_type and 'multipart' in request.content_type:
+        data = request.form.to_dict()
+        cover_image_file = request.files.get('cover_image')
+        if cover_image_file:
+            import os, uuid
+            upload_dir = os.path.join('uploads', 'blog')
+            os.makedirs(upload_dir, exist_ok=True)
+            ext = cover_image_file.filename.rsplit('.', 1)[-1] if '.' in cover_image_file.filename else 'jpg'
+            filename = f"{uuid.uuid4().hex}.{ext}"
+            filepath = os.path.join(upload_dir, filename)
+            cover_image_file.save(filepath)
+            article.cover_image = f"/uploads/blog/{filename}"
+    else:
+        data = request.get_json() or {}
+        if 'cover_image' in data and isinstance(data['cover_image'], str):
+            article.cover_image = data['cover_image']
+
+    if 'title' in data and data['title']:
+        article.title = data['title']
+        if not data.get('slug'):
+            article.slug = re.sub(r'[^a-z0-9]+', '-', data['title'].lower()).strip('-')
+    if 'slug' in data and data['slug']:
+        article.slug = data['slug']
+    if 'content' in data:
+        article.content = data['content']
+    if 'excerpt' in data:
+        article.excerpt = data['excerpt']
+    if 'status' in data:
+        article.is_published = data['status'] in ('published', True, 'true', '1')
+    if 'is_published' in data:
+        article.is_published = data['is_published'] in (True, 'true', '1', 'published')
+    if 'meta_title' in data or 'seo_title' in data:
+        article.meta_title = data.get('meta_title') or data.get('seo_title')
+    if 'meta_description' in data or 'seo_description' in data:
+        article.meta_description = data.get('meta_description') or data.get('seo_description')
+
+    db.session.commit()
+    return jsonify({"message": "Article updated.", "id": article.id}), 200
+
+
 
 
 # ---------------------------------------------------------------------------
