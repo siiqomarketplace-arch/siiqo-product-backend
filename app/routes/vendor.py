@@ -322,31 +322,70 @@ def add_product():
 
     data = request.form if request.form else (request.get_json() or {})
 
-    name = (data.get('name') or '').strip()
+    # Accept both 'name' (AddProductModal) and 'product_name' (page.tsx handleSaveProduct)
+    name = (data.get('name') or data.get('product_name') or '').strip()
     if not name:
         return jsonify({"message": "Product name is required"}), 400
 
+    # Accept 'price', 'price-text', or 'product_price' (frontend sends product_price in cents — divide by 100)
+    raw_price_str = data.get('price') or data.get('price-text') or data.get('product_price') or '0'
     try:
-        price = float(data.get('price') or data.get('price-text') or 0)
+        raw_price = float(raw_price_str)
+        # If the value looks like it was multiplied by 100 (>= 100 and no decimal context), divide back
+        # We detect this by checking if 'product_price' was the key used (page.tsx path)
+        if data.get('product_price') and not data.get('price'):
+            price = raw_price / 100.0
+        else:
+            price = raw_price
     except (ValueError, TypeError):
         return jsonify({"message": "Invalid price"}), 400
+
+    # Accept 'stock_quantity', 'quantity' (page.tsx sends 'quantity')
+    stock_raw = data.get('stock_quantity') or data.get('quantity') or 1
+    try:
+        stock_qty = int(stock_raw)
+    except (ValueError, TypeError):
+        stock_qty = 1
+
+    # Resolve category: accept category_id (int) or category (name string → look up id)
+    category_id = None
+    if data.get('category_id'):
+        try:
+            category_id = int(data['category_id'])
+        except (ValueError, TypeError):
+            pass
+    elif data.get('category'):
+        cat = Category.query.filter(Category.name.ilike(data['category'].strip())).first()
+        if cat:
+            category_id = cat.id
 
     new_product = Product(
         storefront_id=sf.id,
         name=name,
         description=data.get('description', ''),
         price=price,
-        stock_quantity=int(data.get('stock_quantity', 1)),
-        category_id=data.get('category_id') or None,
+        stock_quantity=stock_qty,
+        category_id=category_id,
     )
 
-    image_file = request.files.get('image') or request.files.get('images-file')
-    if image_file:
-        try:
-            saved_url = save_uploaded_file(image_file, subfolder='products')
-            new_product.images = [saved_url]
-        except ValueError as e:
-            return jsonify({"message": str(e)}), 400
+    # Handle multiple image files (frontend appends each as 'images')
+    # Also accept legacy single-file keys 'image' and 'images-file'
+    saved_images = []
+    image_files = request.files.getlist('images')
+    if not image_files:
+        single = request.files.get('image') or request.files.get('images-file')
+        if single:
+            image_files = [single]
+    for img_file in image_files:
+        if img_file and img_file.filename:
+            try:
+                saved_url = save_uploaded_file(img_file, subfolder='products')
+                if saved_url:
+                    saved_images.append(saved_url)
+            except ValueError as e:
+                return jsonify({"message": str(e)}), 400
+    if saved_images:
+        new_product.images = saved_images
 
     db.session.add(new_product)
     db.session.flush()  # get new_product.id before commit
@@ -403,29 +442,73 @@ def edit_product(product_id):
 
     data = request.form if request.form else (request.get_json() or {})
 
+    # Accept both 'name' and 'product_name'
     if 'name' in data:
         product.name = data['name']
+    elif 'product_name' in data:
+        product.name = data['product_name']
+
     if 'description' in data:
         product.description = data['description']
-    if 'price' in data or 'price-text' in data:
+
+    # Accept 'price', 'price-text', or 'product_price' (product_price may be in cents)
+    if 'product_price' in data and 'price' not in data:
+        try:
+            product.price = float(data['product_price']) / 100.0
+        except (ValueError, TypeError):
+            pass
+    elif 'price' in data or 'price-text' in data:
         try:
             product.price = float(data.get('price') or data.get('price-text'))
         except (ValueError, TypeError):
             pass
+
+    # Accept 'stock_quantity' or 'quantity'
     if 'stock_quantity' in data:
-        product.stock_quantity = int(data['stock_quantity'])
+        try:
+            product.stock_quantity = int(data['stock_quantity'])
+        except (ValueError, TypeError):
+            pass
+    elif 'quantity' in data:
+        try:
+            product.stock_quantity = int(data['quantity'])
+        except (ValueError, TypeError):
+            pass
+
+    # Accept 'is_active' or 'status'
     if 'is_active' in data:
         product.is_active = str(data['is_active']).lower() in ('true', '1', 'yes')
-    if 'category_id' in data:
-        product.category_id = data['category_id'] or None
+    elif 'status' in data:
+        product.is_active = str(data['status']).lower() in ('active', 'true', '1')
 
-    image_file = request.files.get('image') or request.files.get('images-file')
-    if image_file:
+    # Resolve category: accept category_id (int) or category (name string)
+    if 'category_id' in data:
         try:
-            saved_url = save_uploaded_file(image_file, subfolder='products')
-            product.images = list(product.images or []) + [saved_url]
-        except ValueError as e:
-            return jsonify({"message": str(e)}), 400
+            product.category_id = int(data['category_id']) if data['category_id'] else None
+        except (ValueError, TypeError):
+            product.category_id = None
+    elif 'category' in data and data['category']:
+        cat = Category.query.filter(Category.name.ilike(data['category'].strip())).first()
+        if cat:
+            product.category_id = cat.id
+
+    # Handle multiple image files
+    saved_images = []
+    image_files = request.files.getlist('images')
+    if not image_files:
+        single = request.files.get('image') or request.files.get('images-file')
+        if single:
+            image_files = [single]
+    for img_file in image_files:
+        if img_file and img_file.filename:
+            try:
+                saved_url = save_uploaded_file(img_file, subfolder='products')
+                if saved_url:
+                    saved_images.append(saved_url)
+            except ValueError as e:
+                return jsonify({"message": str(e)}), 400
+    if saved_images:
+        product.images = list(product.images or []) + saved_images
 
     db.session.commit()
     return jsonify({"message": "Product updated successfully", "status": "success"}), 200
@@ -445,11 +528,16 @@ def my_products():
         "name": p.name,
         "price": str(p.price),
         "stock": p.stock_quantity,
+        "quantity": p.stock_quantity,          # alias so frontend quantity mapping works
         "is_active": p.is_active,
+        "status": "active" if p.is_active else "inactive",
         "images": p.images or [],
         "description": p.description,
         "category_id": p.category_id,
+        "category": p.category.name if p.category else "",   # resolved name
+        "vendor_id": sf.vendor_id,             # needed for cart vendor filtering
         "created_at": p.created_at.isoformat() if p.created_at else None,
+        "createdAt": p.created_at.isoformat() if p.created_at else None,  # camelCase alias
     } for p in products]), 200
 
 

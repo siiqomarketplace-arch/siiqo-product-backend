@@ -43,17 +43,22 @@ def get_cart():
         if item.product and item.product.is_active:
             subtotal = float(item.product.price) * item.quantity
             total += subtotal
+            sf = item.product.storefront
             items.append({
                 "id": item.id,
                 "product_id": item.product.id,
                 "name": item.product.name,
                 "price": str(item.product.price),
+                "unit_price": float(item.product.price),    # frontend reads unit_price
                 "quantity": item.quantity,
                 "subtotal": str(subtotal),
                 "image": item.product.images[0] if item.product.images else None,
-                "storefront": item.product.storefront.store_name if item.product.storefront else None,
-                "storefront_slug": item.product.storefront.store_slug if item.product.storefront else None,
+                "storefront": sf.store_name if sf else None,
+                "storefront_slug": sf.store_slug if sf else None,
+                "vendor_name": sf.store_name if sf else None,    # alias for cart filter
+                "vendor_id": sf.vendor_id if sf else None,       # stable ID for cart filter
                 "stock_quantity": item.product.stock_quantity,
+                "category": item.product.category.name if item.product.category else "",
             })
 
     return jsonify({
@@ -179,19 +184,37 @@ def checkout():
     if not cart or not cart.items:
         return jsonify({"message": "Your cart is empty"}), 400
 
-    # Group items by vendor
-    vendors: dict[int, list] = {}
-    for item in cart.items:
-        if item.product and item.product.is_active and item.product.storefront:
-            vid = item.product.storefront.vendor_id
-            vendors.setdefault(vid, []).append(item)
-
-    if not vendors:
-        return jsonify({"message": "No valid items in cart"}), 400
-
     data = request.get_json() or {}
     referral_code = (data.get('referral_code') or '').strip().upper()
     delivery_address = data.get('delivery_address', '')
+
+    # ── Optional vendor filter (storefront single-vendor checkout) ────
+    # Frontend sends vendor_name or vendor_id to check out only one vendor's items.
+    # If neither is provided, all cart items are checked out (marketplace flow).
+    filter_vendor_name = (data.get('vendor_name') or '').strip().lower()
+    filter_vendor_id = None
+    try:
+        raw_vid = data.get('vendor_id')
+        filter_vendor_id = int(raw_vid) if raw_vid else None
+    except (ValueError, TypeError):
+        filter_vendor_id = None
+
+    # Group active items by vendor, applying the optional filter
+    vendors: dict[int, list] = {}
+    for item in cart.items:
+        if not (item.product and item.product.is_active and item.product.storefront):
+            continue
+        sf = item.product.storefront
+        vid = sf.vendor_id
+        # Apply filter if provided
+        if filter_vendor_id and vid != filter_vendor_id:
+            continue
+        if filter_vendor_name and sf.store_name.lower() != filter_vendor_name:
+            continue
+        vendors.setdefault(vid, []).append(item)
+
+    if not vendors:
+        return jsonify({"message": "No valid items in cart"}), 400
 
     orders_created = []
 
@@ -233,7 +256,7 @@ def checkout():
                 quantity=item.quantity,
             ))
 
-        # Create EscrowTransaction with all required fields
+        # Create EscrowTransaction
         txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
@@ -259,7 +282,6 @@ def checkout():
             profile.total_spent = float(profile.total_spent or 0) + total
             profile.total_orders = (profile.total_orders or 0) + 1
             profile.last_purchase_date = _utcnow()
-            # Segment upgrade
             if profile.total_orders >= 10:
                 profile.segment = 'VIP'
             elif profile.total_orders >= 3:
@@ -290,12 +312,22 @@ def checkout():
             "escrow_txn": txn_number,
         })
 
-    # Clear cart
-    CartItem.query.filter_by(cart_id=cart.id).delete()
+    # Only clear the checked-out items (not the whole cart if vendor-filtered)
+    checked_out_item_ids = [
+        item.id
+        for items_list in vendors.values()
+        for item in items_list
+    ]
+    CartItem.query.filter(
+        CartItem.cart_id == cart.id,
+        CartItem.id.in_(checked_out_item_ids)
+    ).delete(synchronize_session=False)
+
     db.session.commit()
 
     return jsonify({
         "message": "Checkout successful. Proceed to payment.",
         "orders": orders_created,
+        "id": orders_created[0]["order_id"] if orders_created else None,
         "status": "success",
     }), 200

@@ -467,6 +467,77 @@ def user_profile_alias():
     return _profile()
 
 
+@bridge_bp.route('/user/update-profile', methods=['PUT', 'PATCH'])
+@jwt_required()
+def update_user_profile():
+    """Update buyer personal info (fullname, email, phone)."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    # Accept both JSON and FormData
+    if request.is_json:
+        data = request.get_json() or {}
+        # Support flat keys or nested personal_info object
+        pi = data.get('personal_info', data)
+        fullname = (pi.get('fullname') or '').strip()
+        email    = (pi.get('email')    or '').strip().lower()
+        phone    = (pi.get('phone')    or '').strip()
+    else:
+        # FormData with bracket notation: personal_info[fullname]
+        fullname = (request.form.get('personal_info[fullname]') or request.form.get('fullname') or '').strip()
+        email    = (request.form.get('personal_info[email]')    or request.form.get('email')    or '').strip().lower()
+        phone    = (request.form.get('personal_info[phone]')    or request.form.get('phone')    or '').strip()
+
+    if fullname:
+        parts = fullname.split(' ', 1)
+        user.first_name = parts[0]
+        user.last_name  = parts[1] if len(parts) > 1 else (user.last_name or '')
+    if email and email != user.email:
+        if User.query.filter(User.email == email, User.id != user.id).first():
+            return jsonify({"message": "That email is already in use by another account"}), 409
+        user.email = email
+    if phone:
+        user.phone = phone
+
+    db.session.commit()
+
+    from app.routes.auth import _user_payload
+    return jsonify({
+        "message": "Profile updated successfully",
+        "status": "success",
+        "user": _user_payload(user),
+    }), 200
+
+
+@bridge_bp.route('/auth/change-password', methods=['POST'])
+@jwt_required()
+def change_password():
+    """Change password for authenticated user."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    data = request.get_json() or {}
+    current_password = data.get('current_password', '')
+    new_password     = data.get('new_password', '')
+
+    if not current_password or not new_password:
+        return jsonify({"message": "current_password and new_password are required"}), 400
+
+    if not user.check_password(current_password):
+        return jsonify({"message": "Current password is incorrect"}), 403
+
+    if len(new_password) < 8:
+        return jsonify({"message": "New password must be at least 8 characters"}), 400
+
+    user.set_password(new_password)
+    db.session.commit()
+    return jsonify({"message": "Password changed successfully", "status": "success"}), 200
+
+
 @bridge_bp.route('/upload-profile-pic', methods=['POST'])
 @jwt_required()
 def upload_profile_pic_alias():
