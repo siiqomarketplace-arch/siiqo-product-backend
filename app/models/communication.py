@@ -43,6 +43,7 @@ class Message(db.Model):
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
 
     content = db.Column(db.Text, nullable=False)
+    image_url = db.Column(db.String(255), nullable=True)
     is_read = db.Column(db.Boolean, default=False)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)

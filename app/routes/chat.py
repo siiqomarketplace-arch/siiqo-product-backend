@@ -19,24 +19,40 @@ chat_bp = Blueprint('chat', __name__)
 @jwt_required()
 def send_message():
     user_id = get_jwt_identity()
-    data = request.get_json() or {}
+    
+    if request.content_type and request.content_type.startswith('multipart/form-data'):
+        data = request.form
+    else:
+        data = request.get_json() or {}
 
     receiver_id = data.get('receiver_id')
     content = (data.get('content') or '').strip()
     order_id = data.get('order_id')
 
-    if not receiver_id or not content:
-        return jsonify({"message": "receiver_id and content are required"}), 400
+    if not receiver_id:
+        return jsonify({"message": "receiver_id is required"}), 400
 
     # Verify receiver exists
     receiver = db.session.get(User, int(receiver_id))
     if not receiver:
         return jsonify({"message": "Recipient not found"}), 404
 
+    image_url = None
+    if request.files and 'image' in request.files:
+        from app.utils.upload import save_uploaded_file
+        try:
+            image_url = save_uploaded_file(request.files['image'], subfolder='chat')
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+
+    if not content and not image_url:
+        return jsonify({"message": "content or image is required"}), 400
+
     msg = Message(
         sender_id=user_id,
         receiver_id=receiver_id,
         content=content,
+        image_url=image_url,
         order_id=order_id,
     )
     db.session.add(msg)
@@ -46,7 +62,7 @@ def send_message():
     db.session.add(Notification(
         user_id=receiver_id,
         title=f"New message from {sender.full_name if sender else 'Someone'}",
-        message=content[:100],
+        message="Sent an image" if (image_url and not content) else content[:100],
         type="CHAT",
         order_id=order_id,
     ))
@@ -55,6 +71,7 @@ def send_message():
     return jsonify({
         "message": "Message sent",
         "id": msg.id,
+        "image_url": image_url,
         "status": "success",
     }), 201
 
@@ -68,6 +85,8 @@ def send_message():
 def get_conversation(partner_id):
     user_id = get_jwt_identity()
     order_id = request.args.get('order_id')
+    page = int(request.args.get('page', 1))
+    per_page = min(int(request.args.get('per_page', 50)), 100)
 
     query = Message.query.filter(
         ((Message.sender_id == user_id) & (Message.receiver_id == partner_id)) |
@@ -77,23 +96,35 @@ def get_conversation(partner_id):
     if order_id:
         query = query.filter_by(order_id=order_id)
 
-    messages = query.order_by(Message.created_at.asc()).all()
+    paginated = query.order_by(Message.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    messages = list(paginated.items)
+    messages.reverse()
 
     # Mark received messages as read
+    unread_found = False
     for m in messages:
         if m.receiver_id == int(user_id) and not m.is_read:
             m.is_read = True
-    db.session.commit()
+            unread_found = True
+            
+    if unread_found:
+        db.session.commit()
 
-    return jsonify([{
-        "id": m.id,
-        "sender_id": m.sender_id,
-        "receiver_id": m.receiver_id,
-        "content": m.content,
-        "is_read": m.is_read,
-        "order_id": m.order_id,
-        "created_at": m.created_at.isoformat() if m.created_at else None,
-    } for m in messages]), 200
+    return jsonify({
+        "messages": [{
+            "id": m.id,
+            "sender_id": m.sender_id,
+            "receiver_id": m.receiver_id,
+            "content": m.content,
+            "image_url": m.image_url,
+            "is_read": m.is_read,
+            "order_id": m.order_id,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        } for m in messages],
+        "page": page,
+        "pages": paginated.pages,
+        "has_more": paginated.has_next
+    }), 200
 
 
 # ---------------------------------------------------------------------------

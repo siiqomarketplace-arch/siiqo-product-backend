@@ -1,0 +1,39 @@
+═══════════════════════════════════════════════════════════════
+  QUICK FIX FOR SECRET PUSH PROTECTION ERROR
+═══════════════════════════════════════════════════════════════
+
+PROBLEM: GitHub blocked push because .env file has secrets
+
+SOLUTION: Allow secrets on GitHub, then push
+
+═══════════════════════════════════════════════════════════════
+  STEP 1: ALLOW SECRETS (Click these 3 links)
+═══════════════════════════════════════════════════════════════
+
+1. Allow Mapbox Secret:
+https://github.com/siiqomarketplace-arch/siiqo-product-backend/security/secret-scanning/unblock-secret/3DiZvD0HQBZVNNanHPWZorKRMbr
+
+2. Allow AWS Access Key:
+https://github.com/siiqomarketplace-arch/siiqo-product-backend/security/secret-scanning/unblock-secret/3DiZv8rpYXSm8HLKkro9l6imsye
+
+3. Allow AWS Secret Key:
+https://github.com/siiqomarketplace-arch/siiqo-product-backend/security/secret-scanning/unblock-secret/3DiZvCwjpXiz0RchhNQVOk9d8TT
+
+═══════════════════════════════════════════════════════════════
+  STEP 2: PUSH AGAIN
+═══════════════════════════════════════════════════════════════
+
+cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+git push origin main
+
+═══════════════════════════════════════════════════════════════
+  DONE! ✅
+═══════════════════════════════════════════════════════════════
+
+After successful push, remember to:
+- Rotate (change) your Mapbox token
+- Rotate (change) your AWS keys
+- Update .env file with new secrets
+- Update server environment variables
+
+═══════════════════════════════════════════════════════════════

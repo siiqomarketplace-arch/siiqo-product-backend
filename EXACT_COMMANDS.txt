@@ -1,0 +1,7 @@
+Open Command Prompt (CMD) and copy-paste these commands one by one:
+
+cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+
+clean_commit.bat
+
+git push origin main

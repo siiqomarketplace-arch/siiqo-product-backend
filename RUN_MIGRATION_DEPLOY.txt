@@ -1,0 +1,73 @@
+═══════════════════════════════════════════════════════════════
+  RUN DATABASE MIGRATION - AUTOMATIC SETUP
+═══════════════════════════════════════════════════════════════
+
+I've created a configuration file that will make migrations run
+automatically every time you deploy to AWS Elastic Beanstalk.
+
+═══════════════════════════════════════════════════════════════
+  WHAT TO DO NOW
+═══════════════════════════════════════════════════════════════
+
+Open Command Prompt (CMD) and run:
+
+cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+
+deploy_with_migration.bat
+
+═══════════════════════════════════════════════════════════════
+  WHAT THIS DOES
+═══════════════════════════════════════════════════════════════
+
+1. Adds the .ebextensions/01_flask_migrate.config file
+2. Commits it to git
+3. Pushes to GitHub
+4. AWS Elastic Beanstalk will:
+   - Detect the new commit
+   - Deploy the code
+   - Run "flask db upgrade" AUTOMATICALLY
+   - Complete the migration
+
+═══════════════════════════════════════════════════════════════
+  TIMELINE
+═══════════════════════════════════════════════════════════════
+
+0-2 min:  Push to GitHub
+2-5 min:  AWS detects new commit
+5-10 min: Deployment in progress
+10-15 min: Migration runs automatically
+15 min:   Deployment complete! ✅
+
+═══════════════════════════════════════════════════════════════
+  HOW TO VERIFY MIGRATION RAN
+═══════════════════════════════════════════════════════════════
+
+After 15 minutes:
+
+1. Go to AWS Elastic Beanstalk Console
+2. Click on your environment
+3. Go to "Logs" → "Request Logs" → "Last 100 Lines"
+4. Look for: "Running upgrade" or "flask db upgrade"
+5. Should see: "Alembic upgrade complete"
+
+Or test the API - if it works, migration succeeded!
+
+═══════════════════════════════════════════════════════════════
+  FUTURE DEPLOYMENTS
+═══════════════════════════════════════════════════════════════
+
+From now on, every time you push to GitHub:
+✅ Migrations will run automatically
+✅ No manual SSH needed
+✅ No manual commands needed
+
+Just push and wait for deployment!
+
+═══════════════════════════════════════════════════════════════
+  READY TO RUN
+═══════════════════════════════════════════════════════════════
+
+cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+deploy_with_migration.bat
+
+That's it! ✅

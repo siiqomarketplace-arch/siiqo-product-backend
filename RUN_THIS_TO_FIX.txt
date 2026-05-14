@@ -1,0 +1,71 @@
+═══════════════════════════════════════════════════════════════
+  FIX BACKEND COMMIT - RUN THIS NOW
+═══════════════════════════════════════════════════════════════
+
+STEP 1: Open Command Prompt (CMD) - NOT PowerShell
+
+STEP 2: Navigate to backend folder:
+cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+
+STEP 3: Run the cleanup script:
+clean_commit.bat
+
+STEP 4: After the script finishes, push to GitHub:
+git push origin main
+
+═══════════════════════════════════════════════════════════════
+  WHAT THE SCRIPT DOES
+═══════════════════════════════════════════════════════════════
+
+1. Resets to 2 commits ago (removes bad commits)
+2. Unstages all files
+3. Stages ONLY the migration file
+4. Creates a clean commit
+5. Shows you the result
+
+Your files are safe - nothing is deleted!
+
+═══════════════════════════════════════════════════════════════
+  EXPECTED RESULT
+═══════════════════════════════════════════════════════════════
+
+After running the script, you should see:
+
+migrations/versions/ea362e02b64f_update.py | 431 +++++++++++++++
+1 file changed, 431 insertions(+)
+
+This means ONLY the migration file is in the commit.
+
+Then run:
+git push origin main
+
+It should push successfully without any secret scanning errors!
+
+═══════════════════════════════════════════════════════════════
+  IF YOU GET AN ERROR
+═══════════════════════════════════════════════════════════════
+
+If git push still shows secret scanning error, it means there's
+an older commit with secrets. In that case:
+
+1. Go to these 3 URLs and click "Allow secret":
+   - https://github.com/siiqomarketplace-arch/siiqo-product-backend/security/secret-scanning/unblock-secret/3DiZvD0HQBZVNNanHPWZorKRMbr
+   - https://github.com/siiqomarketplace-arch/siiqo-product-backend/security/secret-scanning/unblock-secret/3DiZv8rpYXSm8HLKkro9l6imsye
+   - https://github.com/siiqomarketplace-arch/siiqo-product-backend/security/secret-scanning/unblock-secret/3DiZvCwjpXiz0RchhNQVOk9d8TT
+
+2. Then push again:
+   git push origin main
+
+3. Rotate your secrets within 24 hours (generate new keys)
+
+═══════════════════════════════════════════════════════════════
+  READY TO GO!
+═══════════════════════════════════════════════════════════════
+
+Just run:
+1. Open CMD
+2. cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+3. clean_commit.bat
+4. git push origin main
+
+Done! ✅

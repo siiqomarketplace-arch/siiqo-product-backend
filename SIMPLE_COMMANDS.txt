@@ -1,0 +1,5 @@
+Open CMD and run these 2 commands:
+
+cd "c:\Users\RABONY GLOBALS\Downloads\Siiqo prodcut\Siiqo backend"
+
+deploy_with_migration.bat
