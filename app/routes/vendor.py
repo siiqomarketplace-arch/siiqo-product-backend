@@ -366,6 +366,8 @@ def add_product():
         price=price,
         stock_quantity=stock_qty,
         category_id=category_id,
+        is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
+        floor_price=float(data['floor_price']) if data.get('floor_price') else None,
     )
 
     # Handle multiple image files (frontend appends each as 'images')
@@ -510,6 +512,15 @@ def edit_product(product_id):
     if saved_images:
         product.images = list(product.images or []) + saved_images
 
+    # Negotiation fields
+    if 'is_negotiable' in data:
+        product.is_negotiable = str(data['is_negotiable']).lower() in ('true', '1', 'yes')
+    if 'floor_price' in data:
+        try:
+            product.floor_price = float(data['floor_price']) if data['floor_price'] else None
+        except (ValueError, TypeError):
+            pass
+
     db.session.commit()
     return jsonify({"message": "Product updated successfully", "status": "success"}), 200
 
@@ -536,6 +547,8 @@ def my_products():
         "category_id": p.category_id,
         "category": p.category.name if p.category else "",   # resolved name
         "vendor_id": sf.vendor_id,             # needed for cart vendor filtering
+        "is_negotiable": p.is_negotiable,
+        "floor_price": str(p.floor_price) if p.floor_price else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,  # camelCase alias
     } for p in products]), 200

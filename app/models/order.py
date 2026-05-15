@@ -21,10 +21,15 @@ class CartItem(db.Model):
     cart_id = db.Column(db.Integer, db.ForeignKey('carts.id'), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
     quantity = db.Column(db.Integer, default=1, nullable=False)
-    
+
+    # ── Negotiation fields ──────────────────────────────────────────
+    negotiated_price  = db.Column(db.Numeric(10, 2), nullable=True)   # agreed price after negotiation
+    negotiation_id    = db.Column(db.Integer, db.ForeignKey('negotiation_requests.id'), nullable=True)
+
     # Relationships
     cart = db.relationship('Cart', back_populates='items')
     product = db.relationship('Product')
+    negotiation = db.relationship('NegotiationRequest', foreign_keys=[negotiation_id])
 
 class Order(db.Model):
     __tablename__ = 'orders'
@@ -35,6 +40,9 @@ class Order(db.Model):
     
     total_amount = db.Column(db.Numeric(10, 2), nullable=False)
     status = db.Column(db.String(50), default='PENDING', nullable=False) # PENDING, PAID, SHIPPED, DELIVERED, CANCELLED
+    
+    # Payment method
+    payment_method = db.Column(db.String(20), default='ESCROW', nullable=False) # ESCROW, POD, CRYPTO
     
     # Logistics information
     logistics_provider_id = db.Column(db.String(100), nullable=True) # e.g. "siiqo_partner_1" or "self_pickup"

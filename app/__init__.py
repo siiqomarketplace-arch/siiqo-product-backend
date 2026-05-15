@@ -105,18 +105,22 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.bridge import bridge_bp
     from app.routes.community import community_bp
     from app.routes.finance import finance_bp
+    from app.routes.withdrawal import withdrawal_bp
+    from app.routes.negotiation import negotiation_bp
 
-    app.register_blueprint(auth_bp,       url_prefix='/api/auth')
-    app.register_blueprint(public_bp,     url_prefix='/api/marketplace')
-    app.register_blueprint(cart_bp,       url_prefix='/api/cart')
-    app.register_blueprint(vendor_bp,     url_prefix='/api/vendor')
-    app.register_blueprint(escrow_bp,     url_prefix='/api/escrow')
-    app.register_blueprint(logistics_bp,  url_prefix='/api/logistics')
-    app.register_blueprint(admin_bp,      url_prefix='/api/admin')
-    app.register_blueprint(chat_bp,       url_prefix='/api/chat')
-    app.register_blueprint(community_bp,  url_prefix='/api/community')
-    app.register_blueprint(finance_bp,    url_prefix='/api/finance')
+    app.register_blueprint(auth_bp,         url_prefix='/api/auth')
+    app.register_blueprint(public_bp,       url_prefix='/api/marketplace')
+    app.register_blueprint(cart_bp,         url_prefix='/api/cart')
+    app.register_blueprint(vendor_bp,       url_prefix='/api/vendor')
+    app.register_blueprint(escrow_bp,       url_prefix='/api/escrow')
+    app.register_blueprint(logistics_bp,    url_prefix='/api/logistics')
+    app.register_blueprint(admin_bp,        url_prefix='/api/admin')
+    app.register_blueprint(chat_bp,         url_prefix='/api/chat')
+    app.register_blueprint(community_bp,    url_prefix='/api/community')
+    app.register_blueprint(finance_bp,      url_prefix='/api/finance')
+    app.register_blueprint(withdrawal_bp,   url_prefix='/api/withdrawal')
+    app.register_blueprint(negotiation_bp,  url_prefix='/api/negotiations')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
-    app.register_blueprint(bridge_bp,     url_prefix='/api')
+    app.register_blueprint(bridge_bp,       url_prefix='/api')
 
     return app

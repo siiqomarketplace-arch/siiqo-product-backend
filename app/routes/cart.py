@@ -16,6 +16,7 @@ from app.models.finance import Ledger, Invoice
 from app.models.crm import CustomerProfile
 from app.models.partnerships import Referral
 from app.models.communication import Notification
+from app.models.withdrawal import PODPayment
 
 cart_bp = Blueprint('cart', __name__)
 
@@ -59,6 +60,12 @@ def get_cart():
                 "vendor_id": sf.vendor_id if sf else None,       # stable ID for cart filter
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
+                # Negotiation fields
+                "is_negotiable": item.product.is_negotiable,
+                "negotiated_price": str(item.negotiated_price) if item.negotiated_price else None,
+                "negotiation_id": item.negotiation_id,
+                "negotiation_status": item.negotiation.status if item.negotiation else None,
+                "negotiation_current_offer": str(item.negotiation.current_offer) if item.negotiation else None,
             })
 
     return jsonify({
@@ -187,6 +194,11 @@ def checkout():
     data = request.get_json() or {}
     referral_code = (data.get('referral_code') or '').strip().upper()
     delivery_address = data.get('delivery_address', '')
+    
+    # Get payment method (ESCROW or POD)
+    payment_method = (data.get('payment_method') or 'ESCROW').upper()
+    if payment_method not in ['ESCROW', 'POD']:
+        payment_method = 'ESCROW'  # Default to ESCROW if invalid
 
     # ── Optional vendor filter (storefront single-vendor checkout) ────
     # Frontend sends vendor_name or vendor_id to check out only one vendor's items.
@@ -201,6 +213,7 @@ def checkout():
 
     # Group active items by vendor, applying the optional filter
     vendors: dict[int, list] = {}
+    skipped_items = []  # items with pending/countered negotiations — excluded from this checkout
     for item in cart.items:
         if not (item.product and item.product.is_active and item.product.storefront):
             continue
@@ -211,6 +224,26 @@ def checkout():
             continue
         if filter_vendor_name and sf.store_name.lower() != filter_vendor_name:
             continue
+        # Skip items whose negotiation is still in-flight (PENDING or COUNTERED)
+        if item.negotiation and item.negotiation.status in ('PENDING', 'COUNTERED'):
+            skipped_items.append({
+                "product_name": item.product.name,
+                "reason": "Offer pending — checkout at agreed price once vendor responds",
+            })
+            continue
+        # If accepted negotiation has expired, clear it so listed price is used
+        if item.negotiation and item.negotiation.status == 'ACCEPTED':
+            from app.models.negotiation import NegotiationRequest
+            neg = item.negotiation
+            if neg.accepted_expires_at:
+                from datetime import timezone as _tz
+                exp = neg.accepted_expires_at
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=_tz.utc)
+                if datetime.now(_tz.utc) > exp:
+                    item.negotiated_price = None
+                    item.negotiation_id = None
+                    neg.status = 'EXPIRED'
         vendors.setdefault(vid, []).append(item)
 
     if not vendors:
@@ -234,7 +267,10 @@ def checkout():
                 referrer.points_balance = float(referrer.points_balance or 0) + 1000
 
     for vid, items in vendors.items():
-        total = sum(float(item.product.price) * item.quantity for item in items)
+        total = sum(
+            float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
+            for item in items
+        )
         fee_percent = 12.00
         fee_amount = total * (fee_percent / 100)
 
@@ -244,39 +280,91 @@ def checkout():
             vendor_id=vid,
             total_amount=total,
             status='PENDING',
+            payment_method=payment_method,
         )
         db.session.add(new_order)
         db.session.flush()
 
         for item in items:
+            effective_price = item.negotiated_price if item.negotiated_price else item.product.price
             db.session.add(OrderItem(
                 order_id=new_order.id,
                 product_id=item.product.id,
-                price_at_purchase=item.product.price,
+                price_at_purchase=effective_price,
                 quantity=item.quantity,
             ))
 
-        # Create EscrowTransaction
-        txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
-        new_escrow = EscrowTransaction(
-            order_id=new_order.id,
-            transaction_number=txn_number,
-            status=EscrowStatus.PENDING_PAYMENT,
-            amount=total,
-            fee_percent=fee_percent,
-            fee_amount=fee_amount,
-            currency='NGN',
-        )
-        db.session.add(new_escrow)
-
-        # Create Invoice
+        # Handle payment method: ESCROW or POD
+        if payment_method == 'POD':
+            # Pay on Delivery - Create POD payment record
+            pod_payment = PODPayment(
+                order_id=new_order.id,
+                vendor_id=vid,
+                amount=total,
+                currency='NGN',
+                confirmed_by_vendor=False,
+            )
+            db.session.add(pod_payment)
+            
+            # Set order status to PENDING_DELIVERY (no payment needed yet)
+            new_order.status = 'PENDING_DELIVERY'
+            
+            # Notify vendor about POD order
+            db.session.add(Notification(
+                user_id=vid,
+                title="New POD Order Received",
+                message=f"You have a new Pay on Delivery order #{new_order.id} worth ₦{total:,.2f}. Deliver and collect payment.",
+                type="ORDER",
+                order_id=new_order.id,
+            ))
+            
+            orders_created.append({
+                "order_id": new_order.id,
+                "vendor_id": vid,
+                "total_amount": str(total),
+                "payment_method": "POD",
+                "status": "PENDING_DELIVERY",
+            })
+            
+        else:  # ESCROW (default)
+            # Create EscrowTransaction
+            txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
+            new_escrow = EscrowTransaction(
+                order_id=new_order.id,
+                transaction_number=txn_number,
+                status=EscrowStatus.PENDING_PAYMENT,
+                amount=total,
+                fee_percent=fee_percent,
+                fee_amount=fee_amount,
+                currency='NGN',
+            )
+            db.session.add(new_escrow)
+            
+            # Notify vendor about escrow order
+            db.session.add(Notification(
+                user_id=vid,
+                title="New Order Received",
+                message=f"You have a new order #{new_order.id} worth ₦{total:,.2f}.",
+                type="ORDER",
+                order_id=new_order.id,
+            ))
+            
+            orders_created.append({
+                "order_id": new_order.id,
+                "vendor_id": vid,
+                "total_amount": str(total),
+                "escrow_txn": txn_number,
+                "payment_method": "ESCROW",
+            })
+        
+        # Create Invoice (for both payment methods)
         db.session.add(Invoice(
             order_id=new_order.id,
             vendor_id=vid,
             buyer_id=user_id,
         ))
 
-        # Update CRM CustomerProfile
+        # Update CRM CustomerProfile (for both payment methods)
         profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()
         if profile:
             profile.total_spent = float(profile.total_spent or 0) + total
@@ -296,22 +384,6 @@ def checkout():
                 last_purchase_date=_utcnow(),
             ))
 
-        # Notify vendor
-        db.session.add(Notification(
-            user_id=vid,
-            title="New Order Received",
-            message=f"You have a new order #{new_order.id} worth ₦{total:,.2f}.",
-            type="ORDER",
-            order_id=new_order.id,
-        ))
-
-        orders_created.append({
-            "order_id": new_order.id,
-            "vendor_id": vid,
-            "total_amount": str(total),
-            "escrow_txn": txn_number,
-        })
-
     # Only clear the checked-out items (not the whole cart if vendor-filtered)
     checked_out_item_ids = [
         item.id
@@ -330,4 +402,5 @@ def checkout():
         "orders": orders_created,
         "id": orders_created[0]["order_id"] if orders_created else None,
         "status": "success",
+        "skipped_items": skipped_items,
     }), 200

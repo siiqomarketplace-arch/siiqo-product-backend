@@ -37,6 +37,10 @@ class Product(db.Model):
     
     images = db.Column(db.JSON, default=list) # Array of image URLs
     is_active = db.Column(db.Boolean, default=True)
+
+    # ── Negotiation fields ──────────────────────────────────────────
+    is_negotiable = db.Column(db.Boolean, default=False)
+    floor_price   = db.Column(db.Numeric(10, 2), nullable=True)  # hidden minimum; NULL = no floor
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

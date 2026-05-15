@@ -130,8 +130,11 @@ def get_product_details(product_id):
         "category_id": p.category_id,
         "avg_rating": avg_rating,
         "review_count": review_count,
+        "whatsapp_chat": p.whatsapp_chat,
+        "is_negotiable": p.is_negotiable,
         "storefront": {
             "id": p.storefront.id,
+            "vendor_id": p.storefront.vendor_id,  # Added for chat functionality
             "name": p.storefront.store_name,
             "slug": p.storefront.store_slug,
             "logo": p.storefront.store_logo,
@@ -209,6 +212,7 @@ def get_storefront_details(slug):
             "images": p.images or [],
             "description": p.description,
             "stock_quantity": p.stock_quantity,
+            "is_negotiable": p.is_negotiable,
         })
 
     catalogs = [
