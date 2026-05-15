@@ -61,6 +61,8 @@ def _next_receipt_number(settings: BrandingSettings) -> str:
     return f"{prefix}-{num:04d}"
 
 
+from sqlalchemy.orm.attributes import flag_modified
+
 def _get_standalone_docs(user_id: int, doc_type: str) -> list:
     """Read standalone invoices or receipts from branding settings JSON store."""
     settings = BrandingSettings.query.filter_by(vendor_id=user_id).first()
@@ -72,12 +74,13 @@ def _get_standalone_docs(user_id: int, doc_type: str) -> list:
 def _save_standalone_doc(user_id: int, doc_type: str, doc: dict):
     """Append a standalone invoice/receipt to the JSON store."""
     settings = _get_or_create_branding(user_id)
-    opts = settings.template_options or {}
+    opts = dict(settings.template_options or {})  # Create a copy to ensure detection
     key = f'standalone_{doc_type}s'
-    docs = opts.get(key, [])
+    docs = list(opts.get(key, []))
     docs.insert(0, doc)  # newest first
     opts[key] = docs
     settings.template_options = opts
+    flag_modified(settings, "template_options")
     db.session.commit()
 
 
@@ -86,14 +89,24 @@ def _update_standalone_doc(user_id: int, doc_type: str, doc_id: str, updates: di
     settings = BrandingSettings.query.filter_by(vendor_id=user_id).first()
     if not settings or not settings.template_options:
         return False
+    
+    opts = dict(settings.template_options)
     key = f'standalone_{doc_type}s'
-    docs = settings.template_options.get(key, [])
+    docs = list(opts.get(key, []))
+    
+    found = False
     for i, d in enumerate(docs):
         if str(d.get('id')) == str(doc_id):
             docs[i] = {**d, **updates}
-            settings.template_options = {**settings.template_options, key: docs}
-            db.session.commit()
-            return True
+            found = True
+            break
+            
+    if found:
+        opts[key] = docs
+        settings.template_options = opts
+        flag_modified(settings, "template_options")
+        db.session.commit()
+        return True
     return False
 
 
@@ -172,6 +185,18 @@ def create_invoice():
     }), 201
 
 
+@finance_bp.route('/invoices/<string:invoice_id>', methods=['GET'])
+@jwt_required()
+def get_invoice(invoice_id):
+    """Get a single standalone invoice"""
+    user_id = get_jwt_identity()
+    docs = _get_standalone_docs(user_id, 'invoice')
+    for d in docs:
+        if str(d.get('id')) == str(invoice_id):
+            return jsonify({'status': 'success', 'invoice': d}), 200
+    return jsonify({'message': 'Invoice not found'}), 404
+
+
 @finance_bp.route('/invoices/<string:invoice_id>/status', methods=['PATCH'])
 @jwt_required()
 def update_invoice_status(invoice_id):
@@ -214,6 +239,18 @@ def list_receipts():
         'receipts': docs,
         'total': len(docs)
     }), 200
+
+
+@finance_bp.route('/receipts/<string:receipt_id>', methods=['GET'])
+@jwt_required()
+def get_receipt(receipt_id):
+    """Get a single standalone receipt"""
+    user_id = get_jwt_identity()
+    docs = _get_standalone_docs(user_id, 'receipt')
+    for d in docs:
+        if str(d.get('id')) == str(receipt_id):
+            return jsonify({'status': 'success', 'receipt': d}), 200
+    return jsonify({'message': 'Receipt not found'}), 404
 
 
 @finance_bp.route('/receipts', methods=['POST'])

@@ -299,6 +299,9 @@ class BrandingSettings(db.Model):
     invoice_footer = db.Column(db.Text, nullable=True)
     receipt_footer = db.Column(db.Text, nullable=True)
     
+    # JSON store for standalone templates and documents
+    template_options = db.Column(db.JSON, nullable=True)
+    
     # Timestamps
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
