@@ -130,7 +130,6 @@ def get_product_details(product_id):
         "category_id": p.category_id,
         "avg_rating": avg_rating,
         "review_count": review_count,
-        "whatsapp_chat": p.whatsapp_chat,
         "is_negotiable": p.is_negotiable,
         "storefront": {
             "id": p.storefront.id,
