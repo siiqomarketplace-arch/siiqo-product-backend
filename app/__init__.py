@@ -20,6 +20,22 @@ def create_app(config_name: str | None = None) -> Flask:
     from app import models  # noqa: F401
 
     migrate.init_app(app, db)
+
+    # -----------------------------------------------------------------------
+    # Auto-apply pending database migrations on startup (production-safe)
+    # This ensures schema changes are applied when Elastic Beanstalk redeploys
+    # without requiring direct RDS access from a local machine.
+    # -----------------------------------------------------------------------
+    with app.app_context():
+        try:
+            from flask_migrate import upgrade as db_upgrade
+            db_upgrade()
+        except Exception as _migration_err:
+            # Log but never crash the app — a failed migration is recoverable
+            import logging
+            logging.getLogger(__name__).warning(
+                "Auto-migration skipped or failed: %s", _migration_err
+            )
     jwt.init_app(app)
     cors.init_app(app, resources={r"/api/*": {"origins": app.config['CORS_ORIGINS']}})
     limiter.init_app(app)
