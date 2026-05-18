@@ -34,7 +34,12 @@ def create_app(config_name: str | None = None) -> Flask:
             # Log but never crash the app — a failed migration is recoverable
             import logging
             logging.getLogger(__name__).warning(
-                "Auto-migration skipped or failed: %s", _migration_err
+                "Auto-migration skipped or failed (Exception): %s", _migration_err
+            )
+        except SystemExit as _sys_err:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Auto-migration skipped or failed (SystemExit): %s", _sys_err
             )
     jwt.init_app(app)
     cors.init_app(app, resources={r"/api/*": {"origins": app.config['CORS_ORIGINS']}})
