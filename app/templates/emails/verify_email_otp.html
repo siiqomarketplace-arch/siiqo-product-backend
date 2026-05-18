@@ -31,6 +31,11 @@
             <div class="otp-box">
                 <p class="otp-code">{{ otp }}</p>
             </div>
+
+            {% if verification_link %}
+            <p style="margin: 30px 0;">Or verify instantly by clicking the button below:</p>
+            <a href="{{ verification_link }}" style="display: inline-block; background-color: #E0921C; color: #ffffff; text-decoration: none; padding: 16px 32px; border-radius: 8px; font-weight: 700; font-size: 16px; margin-bottom: 24px; text-transform: uppercase; letter-spacing: 0.5px;">Verify My Account</a>
+            {% endif %}
             
             <p><strong>This code will expire in 10 minutes.</strong><br>If you did not create a Siiqo account, please safely ignore this email.</p>
         </div>

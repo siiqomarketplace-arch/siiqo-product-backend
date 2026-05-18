@@ -112,11 +112,13 @@ def register():
             template_name="verify_email_otp",
             first_name=new_user.first_name or "there",
             otp=otp,
+            verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={new_user.email}&otp={otp}"
         )
     except Exception as e:
         print(f"[WARN] OTP email failed: {e}")
 
     return jsonify({
+        "status": "success",
         "message": "Account created. Please check your email for the verification code.",
         "email": new_user.email,
     }), 201
@@ -186,6 +188,7 @@ def resend_otp():
             template_name="verify_email_otp",
             first_name=user.first_name or "there",
             otp=otp,
+            verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={user.email}&otp={otp}"
         )
     except Exception as e:
         print(f"[WARN] Resend OTP email failed: {e}")
@@ -225,6 +228,7 @@ def login():
                 template_name="verify_email_otp",
                 first_name=user.first_name or "there",
                 otp=otp,
+                verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={user.email}&otp={otp}"
             )
         except Exception:
             pass
