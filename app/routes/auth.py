@@ -103,7 +103,6 @@ def register():
                 "status": "success",
                 "message": "Account exists but is unverified. We have resent the verification code.",
                 "email": existing_user.email,
-                "debug_otp": otp,
             }), 201
 
     new_user = User(
@@ -155,7 +154,6 @@ def register():
         "status": "success",
         "message": "Account created. Please check your email for the verification code.",
         "email": new_user.email,
-        "debug_otp": otp,
     }), 201
 
 
@@ -229,8 +227,7 @@ def resend_otp():
         print(f"[WARN] Resend OTP email failed: {e}")
 
     return jsonify({
-        "message": "If that email is registered, a new code has been sent.",
-        "debug_otp": otp
+        "message": "If that email is registered, a new code has been sent."
     }), 200
 
 
