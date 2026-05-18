@@ -3,6 +3,7 @@ auth.py — Authentication routes
 Handles: register, verify-email, login, logout, refresh, profile,
          forgot-password, reset-password, upload-profile-pic, delete-account
 """
+import os
 import random
 from datetime import datetime, timedelta, timezone
 
