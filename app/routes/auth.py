@@ -69,8 +69,41 @@ def register():
     if len(password) < 8:
         return jsonify({"message": "Password must be at least 8 characters"}), 400
 
-    if User.query.filter_by(email=email).first():
-        return jsonify({"message": "An account with this email already exists"}), 409
+    existing_user = User.query.filter_by(email=email).first()
+    if existing_user:
+        if existing_user.is_verified:
+            return jsonify({"message": "An account with this email already exists"}), 409
+        else:
+            # User exists but hasn't verified email yet. Resend OTP and return 201 so frontend proceeds.
+            otp = str(random.randint(100000, 999999))
+            existing_user.reset_otp = otp
+            existing_user.otp_expiry = _utcnow() + timedelta(minutes=10)
+            
+            # Ensure password gets updated if they typed a new one during this new signup attempt
+            existing_user.set_password(password)
+            if first_name: existing_user.first_name = first_name
+            if last_name: existing_user.last_name = last_name
+            
+            db.session.commit()
+            
+            try:
+                send_siiqo_email(
+                    to_email=existing_user.email,
+                    subject="Verify Your Siiqo Account",
+                    template_name="verify_email_otp",
+                    first_name=existing_user.first_name or "there",
+                    otp=otp,
+                    verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={existing_user.email}&otp={otp}"
+                )
+            except Exception as e:
+                print(f"[WARN] OTP email failed: {e}")
+                
+            return jsonify({
+                "status": "success",
+                "message": "Account exists but is unverified. We have resent the verification code.",
+                "email": existing_user.email,
+                "debug_otp": otp,
+            }), 201
 
     new_user = User(
         email=email,

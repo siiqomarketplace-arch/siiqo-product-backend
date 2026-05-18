@@ -14,7 +14,7 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     mail_port     = int(os.environ.get('MAIL_PORT', 465))
     mail_username = os.environ.get('MAIL_USERNAME')
     mail_password = os.environ.get('MAIL_PASSWORD')
-    mail_sender   = os.environ.get('MAIL_DEFAULT_SENDER', 'support@siiqo.com')
+    mail_sender   = os.environ.get('MAIL_DEFAULT_SENDER', mail_username)
 
     # Render the HTML template
     try:
