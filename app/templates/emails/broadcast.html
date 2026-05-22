@@ -40,7 +40,9 @@
         <div class="footer">
             <p>&copy; 2026 Siiqo Technologies. All rights reserved.</p>
             <p>You received this email because you are a registered user of Siiqo.</p>
-            <p>If you wish to unsubscribe from marketing emails, <a href="#">click here</a>.</p>
+            {% if unsubscribe_link %}
+            <p>If you wish to unsubscribe from marketing emails, <a href="{{ unsubscribe_link }}">click here</a>.</p>
+            {% endif %}
         </div>
     </div>
 </body>

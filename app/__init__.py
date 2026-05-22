@@ -96,6 +96,12 @@ def create_app(config_name: str | None = None) -> Flask:
             "docs": "/api/",
         }), 200
 
+    @app.route('/uploads/<path:filename>')
+    def serve_uploads(filename):
+        from flask import send_from_directory
+        uploads_dir = os.path.join(os.getcwd(), 'uploads')
+        return send_from_directory(uploads_dir, filename)
+
     # -----------------------------------------------------------------------
     # Blueprints
     # -----------------------------------------------------------------------

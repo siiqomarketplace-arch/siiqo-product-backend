@@ -768,46 +768,55 @@ def send_email_broadcast():
     target_audience = data.get('target_audience') or data.get('audience', 'ALL')
     subject = data.get('subject', '')
     body = data.get('body', '')
+    critical = data.get('critical', False)
 
     if not subject or not body:
         return jsonify({"message": "Subject and body are required"}), 400
 
     if target_audience == 'VENDORS':
-        recipients = User.query.filter_by(role='VENDOR').all()
+        recipients = User.query.filter_by(role='VENDOR', is_subscribed_to_broadcasts=True).all()
     elif target_audience == 'BUYERS':
-        recipients = User.query.filter_by(role='BUYER').all()
+        recipients = User.query.filter_by(role='BUYER', is_subscribed_to_broadcasts=True).all()
     elif target_audience == 'PARTNERS':
-        recipients = User.query.filter_by(role='PARTNER').all()
+        recipients = User.query.filter_by(role='PARTNER', is_subscribed_to_broadcasts=True).all()
     elif target_audience == 'CUSTOM':
-        # Custom email list — comma-separated
         custom_emails_raw = data.get('customEmails') or data.get('custom_emails', '')
         custom_emails = [e.strip() for e in custom_emails_raw.split(',') if e.strip()]
         if not custom_emails:
             return jsonify({"message": "No valid email addresses provided for custom broadcast"}), 400
-        # Build mock user objects for the send loop
         class _FakeUser:
             def __init__(self, email):
                 self.email = email
                 self.first_name = None
+                self.is_subscribed_to_broadcasts = True
         recipients = [_FakeUser(e) for e in custom_emails]
     else:
-        recipients = User.query.all()
+        recipients = User.query.filter_by(is_subscribed_to_broadcasts=True).all()
 
     sent, failed = 0, 0
+    import hashlib
+    from flask import current_app
+    secret = current_app.config.get('SECRET_KEY', 'default-key')
+
     for user in recipients:
         try:
+            token = hashlib.sha256(f"{user.email}{secret}".encode()).hexdigest()[:16]
+            base_url = request.host_url.rstrip('/')
+            unsubscribe_link = f"{base_url}/unsubscribe?email={user.email}&token={token}"
+            
             ok = send_siiqo_email(
                 to_email=user.email,
                 subject=subject,
                 template_name="broadcast",
-                first_name=user.first_name or "Siiqo Member",
-                body=body,
+                first_name=getattr(user, 'first_name', None) or "Siiqo Member",
+                body_content=body,
+                unsubscribe_link=None if critical else unsubscribe_link
             )
             if ok:
                 sent += 1
             else:
                 failed += 1
-        except Exception:
+        except Exception as e:
             failed += 1
 
     return jsonify({

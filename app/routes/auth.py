@@ -464,3 +464,53 @@ def delete_account():
     except Exception as e:
         db.session.rollback()
         return jsonify({"message": "Failed to delete account. Please try again."}), 500
+
+
+# ---------------------------------------------------------------------------
+# Unsubscribe from Broadcasts (one-click, no login needed)
+# ---------------------------------------------------------------------------
+
+@auth_bp.route('/unsubscribe', methods=['GET'])
+def unsubscribe():
+    import hashlib
+    email = (request.args.get('email') or '').strip().lower()
+    token = (request.args.get('token') or '').strip()
+
+    if not email or not token:
+        return jsonify({"message": "Invalid unsubscribe link."}), 400
+
+    # Verify the token (sha256 of email + secret key — prevents arbitrary unsubscribes)
+    secret = os.environ.get('SECRET_KEY', 'siiqo-default')
+    expected_token = hashlib.sha256(f"{email}{secret}".encode()).hexdigest()[:16]
+
+    if token != expected_token:
+        return jsonify({"message": "Invalid or expired unsubscribe link."}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if user:
+        user.is_subscribed_to_broadcasts = False
+        db.session.commit()
+
+    # Return a friendly HTML response (not JSON) since this is a browser click
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Unsubscribed - Siiqo</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; display: flex; align-items: center;
+               justify-content: center; height: 100vh; margin: 0; background: #f8fafc; }
+        .box { text-align: center; padding: 40px; background: white; border-radius: 16px;
+               box-shadow: 0 4px 20px rgba(0,0,0,0.08); max-width: 400px; }
+        h2 { color: #0b1b3b; } p { color: #64748b; }
+        a { color: #E0921C; text-decoration: none; font-weight: 600; }
+    </style></head>
+    <body>
+    <div class="box">
+        <h2>&#10003; You've been unsubscribed</h2>
+        <p>You will no longer receive marketing emails from Siiqo.</p>
+        <p>You'll still receive important account notifications like order updates and OTPs.</p>
+        <br>
+        <a href="https://siiqo.com">Go back to Siiqo &rarr;</a>
+    </div>
+    </body></html>
+    """, 200

@@ -6,12 +6,12 @@ from flask import render_template
 
 def send_siiqo_email(to_email, subject, template_name, **context):
     """
-    Sends a beautifully branded Siiqo email via cPanel SMTP.
-    Handles SSL certificate hostname mismatches common with shared hosting.
+    Sends a beautifully branded Siiqo email via SMTP.
+    Supports standard TLS/STARTTLS configurations (like AWS SES).
     Falls back to printing the OTP to the console during local testing.
     """
     mail_server   = os.environ.get('MAIL_SERVER')
-    mail_port     = int(os.environ.get('MAIL_PORT', 465))
+    mail_port     = int(os.environ.get('MAIL_PORT', 587))
     mail_username = os.environ.get('MAIL_USERNAME')
     mail_password = os.environ.get('MAIL_PASSWORD')
     mail_sender   = os.environ.get('MAIL_DEFAULT_SENDER', mail_username)
@@ -40,29 +40,21 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     msg.set_content("Please enable HTML to view this Siiqo email.")
     msg.add_alternative(html_content, subtype='html')
 
-    # SSL context that allows cPanel's server-hostname certificate
-    # (cPanel shared hosting SSL cert is for the server, not the custom domain)
+    # SSL context for STARTTLS
     ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
 
-    # Try port 465 (SSL) first, then fall back to port 587 (STARTTLS)
     try:
-        if mail_port == 465:
-            with smtplib.SMTP_SSL(mail_server, 465, context=ssl_context, timeout=15) as server:
-                server.login(mail_username, mail_password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(mail_server, mail_port, timeout=15) as server:
-                server.ehlo()
+        with smtplib.SMTP(mail_server, mail_port, timeout=15) as server:
+            server.ehlo()
+            if mail_port == 587:
                 server.starttls(context=ssl_context)
-                server.login(mail_username, mail_password)
-                server.send_message(msg)
+                server.ehlo()
+            server.login(mail_username, mail_password)
+            server.send_message(msg)
         return True
     except smtplib.SMTPAuthenticationError:
-        print(f"[EMAIL ERROR] Login failed for {mail_username}. Check MAIL_PASSWORD in .env.")
+        print(f"[EMAIL ERROR] Authentication failed for {mail_username}.")
         return False
     except Exception as e:
         print(f"[EMAIL ERROR] {type(e).__name__}: {e}")
         return False
-

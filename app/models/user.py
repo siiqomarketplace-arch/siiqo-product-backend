@@ -35,6 +35,9 @@ class User(db.Model):
     reset_otp = db.Column(db.String(10), nullable=True)
     otp_expiry = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # Newsletter/Broadcasts
+    is_subscribed_to_broadcasts = db.Column(db.Boolean, default=True)
+
     # Referral & Loyalty
     referral_code = db.Column(db.String(20), unique=True, nullable=True, index=True)
     points_balance = db.Column(db.Numeric(10, 2), default=0.00)
@@ -86,6 +89,7 @@ class User(db.Model):
             "profile_pic": self.profile_pic,
             "is_verified": self.is_verified,
             "is_active": self.is_active,
+            "is_subscribed_to_broadcasts": self.is_subscribed_to_broadcasts,
             "referral_code": self.referral_code or "",
             "points_balance": float(self.points_balance or 0),
             "city": self.city,
