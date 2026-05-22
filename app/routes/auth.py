@@ -97,8 +97,12 @@ def register():
                     verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={existing_user.email}&otp={otp}"
                 )
             except Exception as e:
-                print(f"[WARN] OTP email failed: {e}")
-                
+                print(f"[ERROR] OTP email failed for {existing_user.email}: {e}")
+                return jsonify({
+                    "status": "error",
+                    "message": f"Account registered but verification email could not be sent. Please contact support. Error: {str(e)}"
+                }), 500
+
             return jsonify({
                 "status": "success",
                 "message": "Account exists but is unverified. We have resent the verification code.",
@@ -148,7 +152,13 @@ def register():
             verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={new_user.email}&otp={otp}"
         )
     except Exception as e:
-        print(f"[WARN] OTP email failed: {e}")
+        print(f"[ERROR] OTP email failed for {new_user.email}: {e}")
+        # Account is created — user can resend OTP but we tell them what went wrong
+        return jsonify({
+            "status": "email_error",
+            "message": f"Account created but verification email failed to send. Please use 'Resend OTP'. Error: {str(e)}",
+            "email": new_user.email,
+        }), 201
 
     return jsonify({
         "status": "success",
