@@ -9,6 +9,7 @@ def create_app(config_name: str | None = None) -> Flask:
         config_name = os.environ.get('FLASK_ENV', 'default')
 
     app = Flask(__name__)
+    app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
 
     # -----------------------------------------------------------------------
