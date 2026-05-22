@@ -256,21 +256,32 @@ def accept_offer(neg_id):
         message=vendor_message or None,
     ))
 
-    # Update cart item with negotiated price
+    # Update cart item with negotiated price, or create it if missing
+    cart = Cart.query.filter_by(user_id=neg.buyer_id).first()
+    if not cart:
+        cart = Cart(user_id=neg.buyer_id)
+        db.session.add(cart)
+        db.session.flush()
+
+    ci = None
     if neg.cart_item_id:
         ci = db.session.get(CartItem, neg.cart_item_id)
-        if ci:
-            ci.negotiated_price = agreed_price
-            ci.negotiation_id = neg.id
-    else:
-        # Try to find the cart item by buyer + product
-        cart = Cart.query.filter_by(user_id=neg.buyer_id).first()
-        if cart:
-            ci = CartItem.query.filter_by(cart_id=cart.id, product_id=neg.product_id).first()
-            if ci:
-                ci.negotiated_price = agreed_price
-                ci.negotiation_id = neg.id
-                neg.cart_item_id = ci.id
+        
+    if not ci:
+        ci = CartItem.query.filter_by(cart_id=cart.id, product_id=neg.product_id).first()
+        
+    if not ci:
+        ci = CartItem(
+            cart_id=cart.id,
+            product_id=neg.product_id,
+            quantity=neg.quantity or 1
+        )
+        db.session.add(ci)
+        db.session.flush()
+
+    ci.negotiated_price = agreed_price
+    ci.negotiation_id = neg.id
+    neg.cart_item_id = ci.id
 
     product = neg.product
     vendor = db.session.get(User, vendor_id)
@@ -480,14 +491,32 @@ def buyer_accept_counter(neg_id):
         price=agreed_price,
     ))
 
-    # Update cart item
+    # Update cart item with negotiated price, or create it if missing
     cart = Cart.query.filter_by(user_id=buyer_id).first()
-    if cart:
+    if not cart:
+        cart = Cart(user_id=buyer_id)
+        db.session.add(cart)
+        db.session.flush()
+
+    ci = None
+    if neg.cart_item_id:
+        ci = db.session.get(CartItem, neg.cart_item_id)
+        
+    if not ci:
         ci = CartItem.query.filter_by(cart_id=cart.id, product_id=neg.product_id).first()
-        if ci:
-            ci.negotiated_price = agreed_price
-            ci.negotiation_id = neg.id
-            neg.cart_item_id = ci.id
+        
+    if not ci:
+        ci = CartItem(
+            cart_id=cart.id,
+            product_id=neg.product_id,
+            quantity=neg.quantity or 1
+        )
+        db.session.add(ci)
+        db.session.flush()
+
+    ci.negotiated_price = agreed_price
+    ci.negotiation_id = neg.id
+    neg.cart_item_id = ci.id
 
     product = neg.product
     buyer = db.session.get(User, buyer_id)

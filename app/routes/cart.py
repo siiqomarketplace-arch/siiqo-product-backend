@@ -17,6 +17,7 @@ from app.models.crm import CustomerProfile
 from app.models.partnerships import Referral
 from app.models.communication import Notification
 from app.models.withdrawal import PODPayment
+from app.utils.email import send_siiqo_email
 
 cart_bp = Blueprint('cart', __name__)
 
@@ -318,6 +319,21 @@ def checkout():
                 order_id=new_order.id,
             ))
             
+            vendor = db.session.get(User, vid)
+            if vendor:
+                try:
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject="New Pay-on-Delivery Order - Siiqo",
+                        template_name="new_order_vendor",
+                        first_name=vendor.first_name or "Vendor",
+                        order_id=new_order.id,
+                        total_amount=f"₦{total:,.2f}",
+                        payment_method="Pay on Delivery"
+                    )
+                except Exception:
+                    pass
+            
             orders_created.append({
                 "order_id": new_order.id,
                 "vendor_id": vid,
@@ -348,6 +364,21 @@ def checkout():
                 type="ORDER",
                 order_id=new_order.id,
             ))
+            
+            vendor = db.session.get(User, vid)
+            if vendor:
+                try:
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject="New Escrow Order - Siiqo",
+                        template_name="new_order_vendor",
+                        first_name=vendor.first_name or "Vendor",
+                        order_id=new_order.id,
+                        total_amount=f"₦{total:,.2f}",
+                        payment_method="Escrow"
+                    )
+                except Exception:
+                    pass
             
             orders_created.append({
                 "order_id": new_order.id,
