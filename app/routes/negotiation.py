@@ -12,6 +12,7 @@ from app.models.order import Cart, CartItem
 from app.models.product import Product
 from app.models.user import User
 from app.models.communication import Notification, Message
+from app.utils.email import send_siiqo_email
 
 negotiation_bp = Blueprint('negotiation', __name__)
 
@@ -299,6 +300,20 @@ def accept_offer(neg_id):
         f"✅ Offer Accepted! I've accepted your offer of ₦{agreed_price:,.0f} for "
         f"{product.name if product else 'the item'}. Please complete your purchase within 48 hours.",
     )
+
+    buyer = db.session.get(User, neg.buyer_id)
+    if buyer and buyer.email:
+        try:
+            send_siiqo_email(
+                to_email=buyer.email,
+                subject="Offer Accepted! 🎉",
+                template_name="system_notice",
+                first_name=buyer.first_name or "Buyer",
+                title="Your Offer Was Accepted!",
+                message=f"Good news! {vendor_name} has accepted your offer of ₦{agreed_price:,.0f} for {product.name if product else 'the item'}. Please proceed to your cart to complete the purchase within 48 hours."
+            )
+        except Exception as e:
+            print(f"[EMAIL ERROR] Failed to send negotiation acceptance email: {e}")
 
     db.session.commit()
     return jsonify({

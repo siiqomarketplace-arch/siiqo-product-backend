@@ -325,7 +325,7 @@ def checkout():
                     send_siiqo_email(
                         to_email=vendor.email,
                         subject="New Pay-on-Delivery Order - Siiqo",
-                        template_name="new_order_vendor",
+                        template_name="order_received_vendor",
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
                         total_amount=f"₦{total:,.2f}",
@@ -371,7 +371,7 @@ def checkout():
                     send_siiqo_email(
                         to_email=vendor.email,
                         subject="New Escrow Order - Siiqo",
-                        template_name="new_order_vendor",
+                        template_name="order_received_vendor",
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
                         total_amount=f"₦{total:,.2f}",
