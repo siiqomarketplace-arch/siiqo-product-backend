@@ -47,13 +47,17 @@ def send_siiqo_email(to_email, subject, template_name, **context):
 
     # ── SEND ──────────────────────────────────────────────────────────────────
     try:
-        with smtplib.SMTP(mail_server, mail_port, timeout=15) as server:
-            server.ehlo()
-            if mail_port != 465:          # 465 = SSL, 587/25 = STARTTLS
+        if mail_port == 465:
+            with smtplib.SMTP_SSL(mail_server, mail_port, context=ssl_context, timeout=15) as server:
+                server.login(mail_username, mail_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(mail_server, mail_port, timeout=15) as server:
+                server.ehlo()
                 server.starttls(context=ssl_context)
                 server.ehlo()
-            server.login(mail_username, mail_password)
-            server.send_message(msg)
+                server.login(mail_username, mail_password)
+                server.send_message(msg)
 
         print(f"[EMAIL OK] Sent '{subject}' to {to_email}")
         return True
