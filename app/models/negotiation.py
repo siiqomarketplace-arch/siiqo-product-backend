@@ -84,7 +84,7 @@ class NegotiationRequest(db.Model):
             "accepted_expires_at":  self.accepted_expires_at.isoformat() if self.accepted_expires_at else None,
             "history":              [h.to_dict() for h in self.history],
             "buyer_name":           self.buyer.full_name if self.buyer else "",
-            "vendor_name":          self.vendor.business_name if self.vendor else "",
+            "vendor_name":          (self.vendor.storefront.store_name if self.vendor and self.vendor.storefront else self.vendor.full_name) if self.vendor else "",
         }
 
 

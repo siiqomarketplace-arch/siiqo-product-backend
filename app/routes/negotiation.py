@@ -274,7 +274,7 @@ def accept_offer(neg_id):
 
     product = neg.product
     vendor = db.session.get(User, vendor_id)
-    vendor_name = vendor.business_name if vendor else "The vendor"
+    vendor_name = (vendor.storefront.store_name if vendor.storefront else vendor.full_name) if vendor else "The vendor"
 
     _notify(
         neg.buyer_id,
@@ -363,7 +363,7 @@ def counter_offer(neg_id):
     ))
 
     actor = db.session.get(User, user_id)
-    actor_name = (actor.business_name if role == 'vendor' else actor.full_name) if actor else "The other party"
+    actor_name = ((actor.storefront.store_name if actor.storefront else actor.full_name) if role == 'vendor' else actor.full_name) if actor else "The other party"
     product_name = product.name if product else "the item"
 
     _notify(
@@ -420,7 +420,7 @@ def reject_offer(neg_id):
     ))
 
     actor = db.session.get(User, user_id)
-    actor_name = (actor.business_name if role == 'vendor' else actor.full_name) if actor else "The other party"
+    actor_name = ((actor.storefront.store_name if actor.storefront else actor.full_name) if role == 'vendor' else actor.full_name) if actor else "The other party"
     product = neg.product
     product_name = product.name if product else "the item"
 
