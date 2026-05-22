@@ -158,6 +158,9 @@ def remove_cart_item(item_id):
     if not item:
         return jsonify({"message": "Item not found"}), 404
 
+    from app.models.negotiation import NegotiationRequest
+    NegotiationRequest.query.filter_by(cart_item_id=item.id).update({"cart_item_id": None}, synchronize_session=False)
+
     db.session.delete(item)
     db.session.commit()
     return jsonify({"message": "Item removed", "status": "success"}), 200
@@ -173,8 +176,13 @@ def clear_cart():
     user_id = get_jwt_identity()
     cart = Cart.query.filter_by(user_id=user_id).first()
     if cart:
-        CartItem.query.filter_by(cart_id=cart.id).delete()
-        db.session.commit()
+        items = CartItem.query.filter_by(cart_id=cart.id).all()
+        item_ids = [item.id for item in items]
+        if item_ids:
+            from app.models.negotiation import NegotiationRequest
+            NegotiationRequest.query.filter(NegotiationRequest.cart_item_id.in_(item_ids)).update({"cart_item_id": None}, synchronize_session=False)
+            CartItem.query.filter_by(cart_id=cart.id).delete(synchronize_session=False)
+            db.session.commit()
     return jsonify({"message": "Cart cleared", "status": "success"}), 200
 
 
@@ -421,6 +429,15 @@ def checkout():
         for items_list in vendors.values()
         for item in items_list
     ]
+    
+    # Detach any negotiation requests from the cart items being deleted
+    # to avoid ForeignKeyViolation on cart_items.id
+    if checked_out_item_ids:
+        from app.models.negotiation import NegotiationRequest
+        NegotiationRequest.query.filter(
+            NegotiationRequest.cart_item_id.in_(checked_out_item_ids)
+        ).update({"cart_item_id": None}, synchronize_session=False)
+
     CartItem.query.filter(
         CartItem.cart_id == cart.id,
         CartItem.id.in_(checked_out_item_ids)

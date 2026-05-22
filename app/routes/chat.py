@@ -110,6 +110,9 @@ def get_conversation(partner_id):
     if unread_found:
         db.session.commit()
 
+    # Fetch partner info for chat header
+    partner = db.session.get(User, partner_id)
+
     return jsonify({
         "messages": [{
             "id": m.id,
@@ -123,7 +126,11 @@ def get_conversation(partner_id):
         } for m in messages],
         "page": page,
         "pages": paginated.pages,
-        "has_more": paginated.has_next
+        "has_more": paginated.has_next,
+        # Partner info for the chat header
+        "partner_name": partner.full_name if partner else "User",
+        "partner_avatar": partner.profile_pic if partner else None,
+        "partner_role": partner.role if partner else None,
     }), 200
 
 
