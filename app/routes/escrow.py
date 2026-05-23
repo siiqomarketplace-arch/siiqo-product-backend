@@ -16,6 +16,7 @@ from app.models.order import Order
 from app.models.escrow import EscrowTransaction, EscrowStatus
 from app.models.finance import Ledger, Receipt
 from app.models.communication import Notification
+from app.models.withdrawal import PODPayment
 
 escrow_bp = Blueprint('escrow', __name__)
 
@@ -309,7 +310,38 @@ def raise_dispute():
         return jsonify({"message": "transactionNumber or order_id required"}), 400
 
     if not escrow:
-        return jsonify({"message": "Transaction not found"}), 404
+        # Check if this is a POD order
+        pod = None
+        if order_id:
+            pod = PODPayment.query.filter_by(order_id=order_id).first()
+            
+        if not pod:
+            return jsonify({"message": "Transaction not found"}), 404
+            
+        # Handle POD Dispute
+        order = pod.order
+        if order.buyer_id != int(user_id) and order.vendor_id != int(user_id):
+            return jsonify({"message": "Unauthorized"}), 403
+            
+        dispute_id = f"DISP-{uuid.uuid4().hex[:8].upper()}"
+        pod.vendor_notes = f"[DISPUTED: {dispute_id} - {reason}] " + (pod.vendor_notes or "")
+        
+        # Notify both parties
+        for uid in [order.buyer_id, order.vendor_id]:
+            db.session.add(Notification(
+                user_id=uid,
+                title="POD Dispute Raised",
+                message=f"A dispute has been raised on Pay-on-Delivery Order #{order.id}.",
+                type="ORDER",
+                order_id=order.id,
+            ))
+            
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "disputeId": dispute_id,
+            "message": "Dispute raised. Our team will review within 48 hours."
+        }), 200
 
     order = escrow.order
     if order.buyer_id != int(user_id) and order.vendor_id != int(user_id):
