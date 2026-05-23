@@ -229,9 +229,9 @@ def release_escrow():
     order_id = data.get('order_id')
 
     if txn_number:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=txn_number).first()
+        escrow = db.session.query(EscrowTransaction).filter_by(transaction_number=txn_number).with_for_update().first()
     elif order_id:
-        escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+        escrow = db.session.query(EscrowTransaction).filter_by(order_id=order_id).with_for_update().first()
     else:
         return jsonify({"message": "transactionId or order_id required"}), 400
 

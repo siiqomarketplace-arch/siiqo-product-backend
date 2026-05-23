@@ -413,7 +413,7 @@ def buyer_checkout():
 @jwt_required()
 def buyer_order_history():
     user_id = get_jwt_identity()
-    orders = Order.query.filter_by(buyer_id=user_id).order_by(Order.created_at.desc()).all()
+    orders = Order.query.filter_by(buyer_id=user_id).order_by(Order.created_at.desc()).limit(500).all()
 
     result = []
     for o in orders:

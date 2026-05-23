@@ -197,7 +197,7 @@ def get_storefront_details(slug):
             "message": "This storefront is currently offline.",
         }), 202
 
-    products = Product.query.filter_by(storefront_id=s.id, is_active=True).all()
+    products = Product.query.filter_by(storefront_id=s.id, is_active=True).limit(500).all()
 
     # Group by category
     from collections import defaultdict

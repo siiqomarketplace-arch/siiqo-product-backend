@@ -533,7 +533,7 @@ def my_products():
     if not user or not sf:
         return jsonify([]), 200
 
-    products = Product.query.filter_by(storefront_id=sf.id).all()
+    products = Product.query.filter_by(storefront_id=sf.id).limit(500).all()
     return jsonify([{
         "id": p.id,
         "name": p.name,
@@ -566,7 +566,7 @@ def get_orders():
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
 
-    orders = Order.query.filter_by(vendor_id=user.id).order_by(Order.created_at.desc()).all()
+    orders = Order.query.filter_by(vendor_id=user.id).order_by(Order.created_at.desc()).limit(500).all()
     return jsonify([{
         "id": o.id,
         "total_amount": str(o.total_amount),
@@ -621,7 +621,7 @@ def get_ledger():
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
 
-    records = Ledger.query.filter_by(vendor_id=user.id).order_by(Ledger.created_at.desc()).all()
+    records = Ledger.query.filter_by(vendor_id=user.id).order_by(Ledger.created_at.desc()).limit(500).all()
 
     # Summary
     total_credits = sum(float(r.amount) for r in records if r.transaction_type == 'CREDIT')
@@ -658,7 +658,7 @@ def get_customers():
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
 
-    profiles = CustomerProfile.query.filter_by(vendor_id=user.id).all()
+    profiles = CustomerProfile.query.filter_by(vendor_id=user.id).limit(500).all()
     return jsonify({
         "status": "success",
         "customers": [{
@@ -687,7 +687,7 @@ def handle_coupons():
         return jsonify({"message": "Vendor access required"}), 403
 
     if request.method == 'GET':
-        coupons = Coupon.query.filter_by(vendor_id=user.id).all()
+        coupons = Coupon.query.filter_by(vendor_id=user.id).limit(500).all()
         return jsonify({
             "status": "success",
             "coupons": [{
@@ -745,7 +745,7 @@ def handle_campaigns():
         return jsonify({"message": "Vendor access required"}), 403
 
     if request.method == 'GET':
-        campaigns = Campaign.query.filter_by(vendor_id=user.id).all()
+        campaigns = Campaign.query.filter_by(vendor_id=user.id).limit(500).all()
         return jsonify({
             "status": "success",
             "campaigns": [{

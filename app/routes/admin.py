@@ -160,7 +160,7 @@ def get_all_users():
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
-    users = User.query.order_by(User.created_at.desc()).all()
+    users = User.query.order_by(User.created_at.desc()).limit(500).all()
     user_list = []
     for u in users:
         if u.storefront and not u.storefront.is_verified:
@@ -311,7 +311,7 @@ def get_all_storefronts():
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
-    storefronts = Storefront.query.order_by(Storefront.created_at.desc()).all()
+    storefronts = Storefront.query.order_by(Storefront.created_at.desc()).limit(500).all()
     return jsonify({
         "storefronts": [{
             "id": s.id,
@@ -343,7 +343,7 @@ def handle_categories():
         return jsonify({"message": "Unauthorized"}), 403
 
     if request.method == 'GET':
-        cats = Category.query.all()
+        cats = Category.query.limit(500).all()
         return jsonify({
             "categories": [{"id": c.id, "name": c.name, "slug": c.slug} for c in cats],
             "count": len(cats),
@@ -423,7 +423,7 @@ def get_pending_escrow():
             EscrowStatus.IN_ESCROW,
             EscrowStatus.DISPUTED,
         ])
-    ).order_by(EscrowTransaction.created_at.desc()).all()
+    ).order_by(EscrowTransaction.created_at.desc()).limit(500).all()
 
     return jsonify({
         "pending_escrow": [e.to_dict() for e in pending],
@@ -501,7 +501,7 @@ def get_partnerships():
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
-    applications = PartnerApplication.query.order_by(PartnerApplication.applied_at.desc()).all()
+    applications = PartnerApplication.query.order_by(PartnerApplication.applied_at.desc()).limit(500).all()
     return jsonify({
         "partners": [{
             "id": p.id,
@@ -597,7 +597,7 @@ def handle_blog():
         return jsonify({"message": "Unauthorized"}), 403
 
     if request.method == 'GET':
-        articles = Article.query.order_by(Article.created_at.desc()).all()
+        articles = Article.query.order_by(Article.created_at.desc()).limit(500).all()
         return jsonify({
             "articles": [{
                 "id": a.id,

@@ -288,6 +288,11 @@ def request_withdrawal():
     if amount < Decimal('1000'):
         return jsonify({'message': 'Minimum withdrawal is ₦1,000'}), 400
     
+    # Acquire row-level lock to prevent concurrent withdrawals race condition
+    user_lock = db.session.query(User).with_for_update().get(vendor_id)
+    if not user_lock:
+        return jsonify({'message': 'Vendor not found'}), 404
+
     # Check balance
     balance = _get_ledger_balance(vendor_id)
     pending_amount = db.session.query(func.sum(Withdrawal.amount)).filter_by(

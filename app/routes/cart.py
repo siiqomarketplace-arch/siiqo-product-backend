@@ -295,10 +295,18 @@ def checkout():
         db.session.flush()
 
         for item in items:
-            effective_price = item.negotiated_price if item.negotiated_price else item.product.price
+            product = db.session.query(Product).with_for_update().get(item.product.id)
+            if product.stock_quantity < item.quantity:
+                db.session.rollback()
+                return jsonify({"message": f"Insufficient stock for {product.name}"}), 400
+            
+            # Decrement inventory
+            product.stock_quantity -= item.quantity
+
+            effective_price = item.negotiated_price if item.negotiated_price else product.price
             db.session.add(OrderItem(
                 order_id=new_order.id,
-                product_id=item.product.id,
+                product_id=product.id,
                 price_at_purchase=effective_price,
                 quantity=item.quantity,
             ))
