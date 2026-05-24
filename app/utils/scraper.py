@@ -89,3 +89,80 @@ def scrape_product_url(url):
             "success": False,
             "message": str(e)
         }
+
+def analyze_storefront_url(url):
+    proxy_url = os.environ.get("BRIGHT_DATA_PROXY")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    }
+    
+    proxies = None
+    if proxy_url:
+        proxies = {
+            "http": proxy_url,
+            "https": proxy_url
+        }
+        
+    try:
+        response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        name = ""
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            name = og_title["content"]
+        else:
+            title_tag = soup.find("title")
+            if title_tag:
+                name = title_tag.text.strip()
+                
+        description = ""
+        og_desc = soup.find("meta", property="og:description")
+        if og_desc and og_desc.get("content"):
+            description = og_desc["content"]
+        else:
+            meta_desc = soup.find("meta", attrs={"name": "description"})
+            if meta_desc and meta_desc.get("content"):
+                description = meta_desc["content"]
+                
+        image_url = ""
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            image_url = og_image["content"]
+            
+        colors = []
+        if image_url:
+            try:
+                import tempfile
+                from colorthief import ColorThief
+                img_resp = requests.get(image_url, timeout=15)
+                if img_resp.status_code == 200:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                        tmp.write(img_resp.content)
+                        tmp_path = tmp.name
+                    color_thief = ColorThief(tmp_path)
+                    palette = color_thief.get_palette(color_count=4)
+                    colors = ['#{:02x}{:02x}{:02x}'.format(r, g, b) for r, g, b in palette]
+                    import os
+                    os.remove(tmp_path)
+            except Exception as ce:
+                print(f"Color extraction error: {ce}")
+                
+        return {
+            "success": True,
+            "data": {
+                "name": name,
+                "description": description,
+                "image_url": image_url,
+                "colors": colors
+            }
+        }
+    except Exception as e:
+        print(f"Bright Data Scraping Error: {e}")
+        return {
+            "success": False,
+            "message": str(e)
+        }

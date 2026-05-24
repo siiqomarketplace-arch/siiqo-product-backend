@@ -19,7 +19,7 @@ from app.models.crm import CustomerProfile
 from app.utils.upload import save_uploaded_file
 from app.utils.email import send_siiqo_email
 from app.utils.algolia_sync import sync_product_to_algolia, delete_product_from_algolia
-from app.utils.scraper import scrape_product_url
+from app.utils.scraper import scrape_product_url, analyze_storefront_url
 
 vendor_bp = Blueprint('vendor', __name__)
 
@@ -831,3 +831,27 @@ def handle_campaigns():
         "id": campaign.id,
         "status": "success",
     }), 201
+
+# ---------------------------------------------------------------------------
+# POST /vendor/storefront/analyze
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/storefront/analyze', methods=['POST'])
+@jwt_required()
+def analyze_storefront():
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    data = request.get_json() or {}
+    url = data.get('url')
+    if not url:
+        return jsonify({"message": "URL is required"}), 400
+
+    result = analyze_storefront_url(url)
+    if not result.get("success"):
+        return jsonify({"message": result.get("message", "Analysis failed")}), 400
+
+    return jsonify(result), 200
+
