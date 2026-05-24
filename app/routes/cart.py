@@ -424,6 +424,18 @@ def checkout():
             buyer_id=user_id,
         ))
 
+        # Send Order Confirmation Email to Buyer
+        try:
+            send_siiqo_email(
+                to_email=user.email,
+                subject=f"Order Confirmation #{new_order.id} - Siiqo",
+                template_name="order_confirmation",
+                first_name=user.first_name or "there",
+                order_id=new_order.id,
+            )
+        except Exception as e:
+            print(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
+
         # Update CRM CustomerProfile (for both payment methods)
         profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()
         if profile:

@@ -146,7 +146,6 @@ def analyze_storefront_url(url):
                     color_thief = ColorThief(tmp_path)
                     palette = color_thief.get_palette(color_count=4)
                     colors = ['#{:02x}{:02x}{:02x}'.format(r, g, b) for r, g, b in palette]
-                    import os
                     os.remove(tmp_path)
             except Exception as ce:
                 print(f"Color extraction error: {ce}")
