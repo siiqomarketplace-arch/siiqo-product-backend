@@ -49,17 +49,30 @@ def scrape_product_url(url):
         if og_image and og_image.get("content"):
             image_url = og_image["content"]
             
-        # Try to find a price
-        price = "0.00"
+        # Try to find a price — supports $, £, €, ₦, ₵, ¥, ₹, KES, NGN etc.
+        price = "0"
         import re
-        price_tags = soup.find_all(string=lambda text: text and ("$" in text or "£" in text or "€" in text))
-        if price_tags:
-            for t in price_tags:
-                match = re.search(r'[\$£€]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)', t)
-                if match:
-                    price = match.group(1).replace(',', '')
-                    break
-        
+        # Look for og:price:amount first (Shopify, WooCommerce etc.)
+        og_price = soup.find("meta", property="og:price:amount") or soup.find("meta", attrs={"property": "product:price:amount"})
+        if og_price and og_price.get("content"):
+            price = og_price["content"].replace(",", "").strip()
+        else:
+            # Scan visible text for any currency followed by a number
+            price_tags = soup.find_all(string=lambda text: text and re.search(r'[\$£€₦₵¥₹]', text))
+            if price_tags:
+                for t in price_tags:
+                    match = re.search(r'[\$£€₦₵¥₹]\s*([\d,]+(?:\.\d{1,2})?)', str(t))
+                    if match:
+                        price = match.group(1).replace(',', '')
+                        break
+            # Also try price with currency code like NGN 12,000
+            if price == "0":
+                price_tags2 = soup.find_all(string=lambda text: text and re.search(r'NGN|USD|GBP|EUR', str(text)))
+                for t in price_tags2:
+                    match = re.search(r'(?:NGN|USD|GBP|EUR)\s*([\d,]+(?:\.\d{1,2})?)', str(t))
+                    if match:
+                        price = match.group(1).replace(',', '')
+                        break
         return {
             "success": True,
             "data": {
