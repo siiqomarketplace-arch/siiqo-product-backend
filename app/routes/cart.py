@@ -438,6 +438,7 @@ def checkout():
                 template_name="order_confirmation",
                 first_name=user.first_name or "there",
                 order_id=new_order.id,
+                payment_method=payment_method,
             )
         except Exception as e:
             print(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")

@@ -12,9 +12,19 @@
         .content { padding: 40px; text-align: center; }
         .content h2 { color: #0f172a; margin-top: 0; font-size: 22px; font-weight: 700; }
         .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 24px; }
-        .highlight-box { background-color: #f1f5f9; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 20px; margin: 30px 0; text-align: center; }
+        .highlight-box { border-radius: 12px; padding: 20px; margin: 30px 0; text-align: center; }
+        .highlight-box.escrow { background-color: #eff6ff; border: 2px dashed #93c5fd; }
+        .highlight-box.pod { background-color: #f0fdf4; border: 2px dashed #86efac; }
+        .highlight-box.whatsapp { background-color: #f0fdf4; border: 2px dashed #4ade80; }
+        .highlight-box.crypto { background-color: #faf5ff; border: 2px dashed #c4b5fd; }
+        .highlight-box.transfer { background-color: #fff7ed; border: 2px dashed #fdba74; }
+        .badge { display: inline-block; padding: 6px 16px; border-radius: 999px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+        .badge.escrow { background: #dbeafe; color: #1e40af; }
+        .badge.pod { background: #dcfce7; color: #15803d; }
+        .badge.whatsapp { background: #dcfce7; color: #16a34a; }
+        .badge.crypto { background: #ede9fe; color: #7c3aed; }
+        .badge.transfer { background: #ffedd5; color: #c2410c; }
         .btn { display: inline-block; background-color: #0b1b3b; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin-top: 10px; }
-        .btn:hover { background-color: #1e3a8a; }
         .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
         .footer p { margin: 5px 0; }
         .footer a { color: #E0921C; text-decoration: none; }
@@ -26,15 +36,38 @@
             <h1>Siiqo<span>.</span></h1>
         </div>
         <div class="content">
-            <h2>Order Confirmation</h2>
-            <p>Hi {{ first_name }},<br><br>Thank you for shopping on Siiqo! Your order <strong>#{{ order_id }}</strong> has been successfully placed securely via PayScrow.</p>
-            
-            <div class="highlight-box">
-                <p style="margin: 0; font-weight: 600; color: #0b1b3b;">Your payment is held safely in Escrow until you receive and confirm your items.</p>
+            <h2>Order Confirmed ✅</h2>
+            <p>Hi {{ first_name }},<br><br>
+            Thank you for shopping on Siiqo! Your order <strong>#{{ order_id }}</strong> has been successfully placed and the vendor has been notified.</p>
+
+            {% if payment_method == 'POD' %}
+            <div class="highlight-box pod">
+                <span class="badge pod">💵 Pay on Delivery</span>
+                <p style="margin: 0; font-weight: 600; color: #15803d;">You chose <strong>Pay on Delivery</strong>. You will pay the vendor directly when your order arrives. Please have the exact amount ready at the time of delivery.</p>
             </div>
-            
+            {% elif payment_method == 'WHATSAPP' %}
+            <div class="highlight-box whatsapp">
+                <span class="badge whatsapp">💬 WhatsApp Order</span>
+                <p style="margin: 0; font-weight: 600; color: #16a34a;">Your order is confirmed. The vendor will reach out to you on <strong>WhatsApp</strong> to coordinate payment and pickup directly.</p>
+            </div>
+            {% elif payment_method == 'CRYPTO' %}
+            <div class="highlight-box crypto">
+                <span class="badge crypto">🔐 Crypto Payment</span>
+                <p style="margin: 0; font-weight: 600; color: #7c3aed;">Your order is awaiting your <strong>cryptocurrency payment</strong>. Please upload your blockchain payment proof from your order dashboard to complete the process.</p>
+            </div>
+            {% elif payment_method == 'TRANSFER' %}
+            <div class="highlight-box transfer">
+                <span class="badge transfer">🏦 Bank Transfer</span>
+                <p style="margin: 0; font-weight: 600; color: #c2410c;">Your order is awaiting your <strong>bank transfer to Siiqo Escrow</strong>. Please make the transfer and upload your receipt from your order dashboard to proceed.</p>
+            </div>
+            {% else %}
+            <div class="highlight-box escrow">
+                <span class="badge escrow">🔒 Escrow Payment</span>
+                <p style="margin: 0; font-weight: 600; color: #1e3a8a;">Your payment is <strong>securely held in Siiqo Escrow</strong>. The funds will only be released to the vendor after you confirm that you have received your items safely.</p>
+            </div>
+            {% endif %}
+
             <p>The vendor has been notified and will process your order shortly. You can track your order status and communicate with the vendor directly from your dashboard.</p>
-            
             <a href="https://siiqo.com/user-profile" class="btn">View Order Details</a>
         </div>
         <div class="footer">
