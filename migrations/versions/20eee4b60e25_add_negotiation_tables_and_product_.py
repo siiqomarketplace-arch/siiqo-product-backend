@@ -1,7 +1,7 @@
 """ add negotiation tables and product negotiation fields
 
 Revision ID: 20eee4b60e25
-Revises: 361cb0130ee5
+Revises: f110e3b88494
 Create Date: 2026-05-22 22:12:39.067692
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '20eee4b60e25'
-down_revision = '361cb0130ee5'
+down_revision = 'f110e3b88494'
 branch_labels = None
 depends_on = None
 
