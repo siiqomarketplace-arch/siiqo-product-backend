@@ -107,6 +107,8 @@ def add_to_cart():
 
     existing = CartItem.query.filter_by(cart_id=cart.id, product_id=product_id).first()
     if existing:
+        if existing.quantity + quantity > product.stock_quantity:
+            return jsonify({"message": f"Cannot add more. Only {product.stock_quantity} total available in stock."}), 400
         existing.quantity += quantity
     else:
         db.session.add(CartItem(cart_id=cart.id, product_id=product_id, quantity=quantity))
@@ -136,6 +138,10 @@ def update_cart_item(item_id):
     item = CartItem.query.filter_by(id=item_id, cart_id=cart.id).first()
     if not item:
         return jsonify({"message": "Item not found"}), 404
+
+    product = db.session.get(Product, item.product_id)
+    if product and product.stock_quantity < int(quantity):
+        return jsonify({"message": f"Cannot update. Only {product.stock_quantity} available in stock."}), 400
 
     item.quantity = int(quantity)
     db.session.commit()

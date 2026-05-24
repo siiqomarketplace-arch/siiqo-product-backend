@@ -28,6 +28,7 @@ def get_products():
         .join(Storefront)
         .filter(
             Product.is_active == True,
+            Product.stock_quantity > 0,
             Storefront.is_verified == True,
             Storefront.is_published == True,
         )
@@ -197,7 +198,11 @@ def get_storefront_details(slug):
             "message": "This storefront is currently offline.",
         }), 202
 
-    products = Product.query.filter_by(storefront_id=s.id, is_active=True).limit(500).all()
+    products = Product.query.filter(
+        Product.storefront_id == s.id,
+        Product.is_active == True,
+        Product.stock_quantity > 0
+    ).limit(500).all()
 
     # Group by category
     from collections import defaultdict
@@ -246,6 +251,7 @@ def search():
         .join(Storefront)
         .filter(
             Product.is_active == True,
+            Product.stock_quantity > 0,
             Storefront.is_verified == True,
             Storefront.is_published == True,
             Product.name.ilike(f'%{q}%') | Product.description.ilike(f'%{q}%')
