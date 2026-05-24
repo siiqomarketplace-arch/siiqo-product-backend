@@ -423,7 +423,7 @@ def buyer_order_history():
             "id": o.id,
             "total": float(o.total_amount),
             "status": o.status,
-            "payment_method": "payscrow",
+            "payment_method": o.payment_method or "payscrow",
             "date": o.created_at.strftime('%d %b %Y') if o.created_at else "",
             "vendor_name": (
                 vendor_store.store_name if vendor_store

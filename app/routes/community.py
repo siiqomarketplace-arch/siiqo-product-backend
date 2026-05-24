@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.communication import Notification
 from datetime import datetime, timezone
 from sqlalchemy import or_, and_, func
+from app.utils.algolia_sync import sync_post_to_algolia, delete_post_from_algolia
 
 community_bp = Blueprint('community', __name__, url_prefix='/api/community')
 
@@ -193,6 +194,12 @@ def create_post():
     
     db.session.commit()
     
+    # Sync to Algolia
+    try:
+        sync_post_to_algolia(post)
+    except Exception as e:
+        print(f"Failed to sync post to Algolia: {e}")
+    
     return jsonify({
         'message': 'Post created successfully',
         'post': post.to_dict(include_author=True, include_stats=True)
@@ -289,6 +296,12 @@ def delete_post(post_id):
     # Soft delete
     post.is_active = False
     db.session.commit()
+    
+    # Remove from Algolia
+    try:
+        delete_post_from_algolia(post_id)
+    except Exception as e:
+        print(f"Failed to delete post from Algolia: {e}")
     
     return jsonify({'message': 'Post deleted successfully'}), 200
 

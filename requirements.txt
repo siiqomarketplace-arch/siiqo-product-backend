@@ -22,3 +22,7 @@ Werkzeug==3.0.3
 
 # WSGI Server for Production (AWS Elastic Beanstalk)
 gunicorn==21.2.0
+
+# Third-party Services
+algoliasearch>=3.0.0
+beautifulsoup4>=4.12.0

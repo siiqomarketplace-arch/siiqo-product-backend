@@ -18,6 +18,8 @@ from app.models.marketing import Coupon, Campaign
 from app.models.crm import CustomerProfile
 from app.utils.upload import save_uploaded_file
 from app.utils.email import send_siiqo_email
+from app.utils.algolia_sync import sync_product_to_algolia, delete_product_from_algolia
+from app.utils.scraper import scrape_product_url
 
 vendor_bp = Blueprint('vendor', __name__)
 
@@ -310,6 +312,25 @@ def update_settings():
 # Products
 # ---------------------------------------------------------------------------
 
+@vendor_bp.route('/products/scrape', methods=['POST'])
+@jwt_required()
+def scrape_product():
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user or not sf:
+        return jsonify({"message": "Vendor access required"}), 403
+    
+    data = request.get_json() or {}
+    url = data.get('url')
+    if not url:
+        return jsonify({"message": "URL is required"}), 400
+        
+    result = scrape_product_url(url)
+    if not result.get("success"):
+        return jsonify({"message": result.get("message", "Failed to scrape URL")}), 400
+        
+    return jsonify(result), 200
+
 @vendor_bp.route('/products/add', methods=['POST'])
 @jwt_required()
 def add_product():
@@ -421,6 +442,13 @@ def add_product():
             logging.warning(f"Auto community post failed for product {new_product.id}: {e}")
 
     db.session.commit()
+    
+    # Sync to Algolia
+    try:
+        sync_product_to_algolia(new_product)
+    except Exception as e:
+        print(f"Failed to sync to Algolia: {e}")
+
     return jsonify({
         "message": "Product added successfully",
         "id": new_product.id,
@@ -522,8 +550,37 @@ def edit_product(product_id):
             pass
 
     db.session.commit()
+    
+    # Sync to Algolia
+    try:
+        sync_product_to_algolia(product)
+    except Exception as e:
+        print(f"Failed to sync to Algolia: {e}")
+
     return jsonify({"message": "Product updated successfully", "status": "success"}), 200
 
+@vendor_bp.route('/products/delete/<int:product_id>', methods=['DELETE'])
+@jwt_required()
+def delete_product(product_id):
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user:
+        return jsonify({"message": "Vendor access required"}), 403
+
+    product = db.session.get(Product, product_id)
+    if not product or (sf and product.storefront_id != sf.id):
+        return jsonify({"message": "Product not found"}), 404
+
+    db.session.delete(product)
+    db.session.commit()
+    
+    # Remove from Algolia
+    try:
+        delete_product_from_algolia(product_id)
+    except Exception as e:
+        print(f"Failed to delete from Algolia: {e}")
+        
+    return jsonify({"message": "Product deleted"}), 200
 
 @vendor_bp.route('/products/my-products', methods=['GET'])
 @jwt_required()

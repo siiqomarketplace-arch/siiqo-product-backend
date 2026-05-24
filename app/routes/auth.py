@@ -132,9 +132,8 @@ def register():
                 referred_id=new_user.id,
                 referral_code_used=referral_code_used,
                 status='PENDING',
-                reward_earned=50.0,
+                reward_earned=0.0,
             ))
-            referrer.points_balance = float(referrer.points_balance or 0) + 50.0
 
     # Generate OTP
     otp = str(random.randint(100000, 999999))

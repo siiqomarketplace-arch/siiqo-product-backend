@@ -260,20 +260,33 @@ def checkout():
 
     orders_created = []
 
-    # Process referral on first-ever order
-    if referral_code and Order.query.filter_by(buyer_id=user_id).count() == 0:
-        referrer = User.query.filter_by(referral_code=referral_code).first()
-        if referrer and referrer.id != int(user_id):
-            existing_ref = Referral.query.filter_by(referred_id=user_id).first()
-            if not existing_ref:
-                db.session.add(Referral(
+    # Process referral rewards for the first 100 transactions
+    buyer_order_count = Order.query.filter_by(buyer_id=user_id).count()
+    if buyer_order_count < 100:
+        from app.models.partnerships import Referral
+        existing_ref = Referral.query.filter_by(referred_id=user_id).first()
+        # Fallback if referral code was entered at checkout but missed at signup
+        if not existing_ref and referral_code:
+            referrer = User.query.filter_by(referral_code=referral_code).first()
+            if referrer and referrer.id != int(user_id):
+                existing_ref = Referral(
                     referrer_id=referrer.id,
                     referred_id=user_id,
                     referral_code_used=referral_code,
-                    status='QUALIFIED',
-                    reward_earned=1000.00,
-                ))
-                referrer.points_balance = float(referrer.points_balance or 0) + 1000
+                    status='PENDING',
+                    reward_earned=0.0,
+                )
+                db.session.add(existing_ref)
+                db.session.flush()
+
+        if existing_ref:
+            referrer = db.session.get(User, existing_ref.referrer_id)
+            if referrer:
+                # 1000 points for 1st order, 50 points for next 99 orders
+                reward = 1000.00 if buyer_order_count == 0 else 50.00
+                existing_ref.status = 'QUALIFIED'
+                existing_ref.reward_earned = float(existing_ref.reward_earned or 0) + reward
+                referrer.points_balance = float(referrer.points_balance or 0) + reward
 
     for vid, items in vendors.items():
         total = sum(
