@@ -113,7 +113,11 @@ def add_to_cart():
     else:
         db.session.add(CartItem(cart_id=cart.id, product_id=product_id, quantity=quantity))
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"Database error: {str(e)}"}), 500
     return jsonify({"message": "Item added to cart", "status": "success"}), 200
 
 
@@ -144,7 +148,11 @@ def update_cart_item(item_id):
         return jsonify({"message": f"Cannot update. Only {product.stock_quantity} available in stock."}), 400
 
     item.quantity = int(quantity)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"Database error: {str(e)}"}), 500
     return jsonify({"message": "Cart updated", "status": "success"}), 200
 
 
@@ -168,7 +176,11 @@ def remove_cart_item(item_id):
     NegotiationRequest.query.filter_by(cart_item_id=item.id).update({"cart_item_id": None}, synchronize_session=False)
 
     db.session.delete(item)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"Database error: {str(e)}"}), 500
     return jsonify({"message": "Item removed", "status": "success"}), 200
 
 
@@ -188,7 +200,11 @@ def clear_cart():
             from app.models.negotiation import NegotiationRequest
             NegotiationRequest.query.filter(NegotiationRequest.cart_item_id.in_(item_ids)).update({"cart_item_id": None}, synchronize_session=False)
             CartItem.query.filter_by(cart_id=cart.id).delete(synchronize_session=False)
-            db.session.commit()
+            try:
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                return jsonify({"message": f"Database error: {str(e)}"}), 500
     return jsonify({"message": "Cart cleared", "status": "success"}), 200
 
 
@@ -483,7 +499,11 @@ def checkout():
         CartItem.id.in_(checked_out_item_ids)
     ).delete(synchronize_session=False)
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"Checkout failed: {str(e)}"}), 500
 
     return jsonify({
         "message": "Checkout successful. Proceed to payment.",

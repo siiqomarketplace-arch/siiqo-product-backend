@@ -257,6 +257,7 @@ def update_settings():
         'cac_reg': 'cac_reg',
         'meta_title': 'meta_title',
         'meta_description': 'meta_description',
+        'logo_url': 'store_logo',
     }
     for form_key, model_attr in field_map.items():
         if form_key in data:
