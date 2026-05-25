@@ -380,7 +380,7 @@ def checkout():
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
                         total_amount=f"₦{total:,.2f}",
-                        payment_method="Pay on Delivery"
+                        payment_method="POD"
                     )
                 except Exception:
                     pass
@@ -426,7 +426,7 @@ def checkout():
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
                         total_amount=f"₦{total:,.2f}",
-                        payment_method="Escrow"
+                        payment_method="ESCROW"
                     )
                 except Exception:
                     pass

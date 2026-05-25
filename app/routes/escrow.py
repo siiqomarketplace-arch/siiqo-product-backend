@@ -237,6 +237,27 @@ def release_escrow():
         return jsonify({"message": "transactionId or order_id required"}), 400
 
     if not escrow:
+        if order_id:
+            pod = PODPayment.query.filter_by(order_id=order_id).first()
+            if pod:
+                order = pod.order
+                if order.buyer_id != int(user_id):
+                    return jsonify({"message": "Only the buyer can release funds"}), 403
+                
+                order.status = 'COMPLETED'
+                pod.payment_status = 'collected'
+                db.session.add(Notification(
+                    user_id=order.vendor_id,
+                    title="Order Complete",
+                    message=f"Buyer confirmed receipt for POD Order #{order.id}.",
+                    type="ORDER",
+                    order_id=order.id,
+                ))
+                db.session.commit()
+                return jsonify({
+                    "success": True,
+                    "message": "Order marked as completed.",
+                }), 200
         return jsonify({"message": "Transaction not found"}), 404
 
     order = escrow.order

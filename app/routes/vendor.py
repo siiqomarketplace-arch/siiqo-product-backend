@@ -658,13 +658,46 @@ def update_order_status(order_id):
     if order.vendor_id != user.id:
         return jsonify({"message": "Unauthorized"}), 403
 
-    new_status = (request.get_json() or {}).get('status')
+    new_status = ((request.get_json() or {}).get('status') or '').upper().strip()
     if not new_status:
         return jsonify({"message": "Status is required"}), 400
 
+    ALLOWED_STATUSES = [
+        'PENDING', 'PENDING_DELIVERY', 'PROCESSING',
+        'SHIPPED', 'DELIVERED', 'COMPLETED', 'CANCELLED',
+    ]
+    if new_status not in ALLOWED_STATUSES:
+        return jsonify({"message": f"Invalid status. Allowed: {', '.join(ALLOWED_STATUSES)}"}), 400
+
     order.status = new_status
-    db.session.commit()
+
+    # Notify buyer of the status change
+    from app.models.communication import Notification
+    status_labels = {
+        'PROCESSING': 'is being processed',
+        'SHIPPED': 'has been shipped',
+        'DELIVERED': 'has been marked as delivered',
+        'COMPLETED': 'is complete',
+        'CANCELLED': 'has been cancelled',
+        'PENDING_DELIVERY': 'is pending delivery',
+    }
+    label = status_labels.get(new_status, f'status updated to {new_status}')
+    db.session.add(Notification(
+        user_id=order.buyer_id,
+        title=f"Order #{order_id} Update",
+        message=f"Your order #{order_id} from {user.storefront.store_name if user.storefront else 'vendor'} {label}.",
+        type="ORDER",
+        order_id=order_id,
+    ))
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": "Failed to update order status", "error": str(e)}), 500
+
     return jsonify({"message": f"Order status updated to {new_status}", "status": "success"}), 200
+
 
 
 # ---------------------------------------------------------------------------
