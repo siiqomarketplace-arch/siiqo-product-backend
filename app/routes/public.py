@@ -74,19 +74,30 @@ def get_products():
             db.session.commit()
 
     def _product_dict(p, is_sponsored=False):
+        sf = p.storefront
         return {
             "id": p.id,
             "name": p.name,
             "price": str(p.price),
             "description": p.description,
+            "image": (p.images[0] if p.images else None),
             "images": p.images or [],
             "stock_quantity": p.stock_quantity,
             "storefront_id": p.storefront_id,
-            "storefront": p.storefront.store_name if p.storefront else None,
-            "storefront_slug": p.storefront.store_slug if p.storefront else None,
-            "city": p.storefront.city if p.storefront else None,
-            "state": p.storefront.state if p.storefront else None,
+            "storefront": sf.store_name if sf else None,
+            "storefront_slug": sf.store_slug if sf else None,
+            # ── vendor identity (required for chat / messaging) ──
+            "vendor_id": sf.vendor_id if sf else None,
+            "user_id": sf.vendor_id if sf else None,
+            "vendor_name": sf.store_name if sf else None,
+            # ── contact details ──
+            "vendor_phone": sf.phone if sf else None,
+            "whatsapp_link": (f"https://wa.me/{sf.phone}" if sf and sf.phone else None),
+            # ── location ──
+            "city": sf.city if sf else None,
+            "state": sf.state if sf else None,
             "category_id": p.category_id,
+            "is_negotiable": p.is_negotiable,
             "is_sponsored": is_sponsored,
         }
 

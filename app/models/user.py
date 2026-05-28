@@ -174,4 +174,9 @@ class Storefront(db.Model):
             "is_verified": self.is_verified,
             "is_published": self.is_published,
             "is_live": self.is_live,
+            # ── vendor identity (required for chat / messaging) ──
+            "vendor_id": self.vendor_id,
+            "user_id": self.vendor_id,
+            "vendor_phone": self.phone,
+            "whatsapp_link": (f"https://wa.me/{self.phone}" if self.phone else None),
         }
