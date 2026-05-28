@@ -85,10 +85,12 @@ def create_app(config_name: str | None = None) -> Flask:
     # Health & root
     # -----------------------------------------------------------------------
     @app.route("/health")
+    @limiter.exempt
     def health_check():
         return jsonify({"status": "healthy", "version": "2.0.0"}), 200
 
     @app.route("/")
+    @limiter.exempt
     def index():
         return jsonify({
             "status": "online",

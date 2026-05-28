@@ -1,4 +1,4 @@
-﻿# Environment variables
+# Environment variables
 .env
 .env.local
 .env.*.local
@@ -56,8 +56,8 @@ instance/
 Thumbs.db
 
 # Elastic Beanstalk
+# NOTE: .ebextensions MUST be committed so EB can read nginx/migration configs
 .elasticbeanstalk/
-.ebextensions/
 
 # Git
 .git/
