@@ -112,6 +112,8 @@ def get_conversation(partner_id):
 
     # Fetch partner info for chat header
     partner = db.session.get(User, partner_id)
+    partner_name = partner.storefront.store_name if partner and partner.storefront else (partner.full_name if partner else "User")
+    partner_avatar = partner.storefront.store_logo if partner and partner.storefront and partner.storefront.store_logo else (partner.profile_pic if partner else None)
 
     return jsonify({
         "messages": [{
@@ -128,8 +130,8 @@ def get_conversation(partner_id):
         "pages": paginated.pages,
         "has_more": paginated.has_next,
         # Partner info for the chat header
-        "partner_name": partner.full_name if partner else "User",
-        "partner_avatar": partner.profile_pic if partner else None,
+        "partner_name": partner_name,
+        "partner_avatar": partner_avatar,
         "partner_role": partner.role if partner else None,
     }), 200
 
@@ -170,11 +172,15 @@ def get_threads():
         unread = Message.query.filter_by(
             sender_id=partner_id, receiver_id=user_id, is_read=False
         ).count()
+        
+        partner_name = partner.storefront.store_name if partner and partner.storefront else (partner.full_name if partner else "Unknown")
+        partner_pic = partner.storefront.store_logo if partner and partner.storefront and partner.storefront.store_logo else (partner.profile_pic if partner else None)
+
         threads.append({
             "partner_id": partner_id,
-            "partner_name": partner.full_name if partner else "Unknown",
-            "partner_pic": partner.profile_pic if partner else None,
-            "last_message": msg.content[:80],
+            "partner_name": partner_name,
+            "partner_pic": partner_pic,
+            "last_message": msg.content[:80] if msg.content else "Sent an image",
             "last_message_at": msg.created_at.isoformat() if msg.created_at else None,
             "unread_count": unread,
         })
