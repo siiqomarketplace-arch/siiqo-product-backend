@@ -624,13 +624,10 @@ def handle_blog():
         cover_image_url = None
         if cover_image_file:
             import os, uuid
-            upload_dir = os.path.join('uploads', 'blog')
-            os.makedirs(upload_dir, exist_ok=True)
-            ext = cover_image_file.filename.rsplit('.', 1)[-1] if '.' in cover_image_file.filename else 'jpg'
-            filename = f"{uuid.uuid4().hex}.{ext}"
-            filepath = os.path.join(upload_dir, filename)
-            cover_image_file.save(filepath)
-            cover_image_url = f"/uploads/blog/{filename}"
+            from app.utils.upload import save_uploaded_file
+            s3_url = save_uploaded_file(cover_image_file, subfolder="blog")
+            if s3_url:
+                cover_image_url = s3_url
     else:
         data = request.get_json() or {}
         cover_image_url = data.get('cover_image')
@@ -682,13 +679,10 @@ def manage_blog_article(article_id):
         cover_image_file = request.files.get('cover_image')
         if cover_image_file:
             import os, uuid
-            upload_dir = os.path.join('uploads', 'blog')
-            os.makedirs(upload_dir, exist_ok=True)
-            ext = cover_image_file.filename.rsplit('.', 1)[-1] if '.' in cover_image_file.filename else 'jpg'
-            filename = f"{uuid.uuid4().hex}.{ext}"
-            filepath = os.path.join(upload_dir, filename)
-            cover_image_file.save(filepath)
-            article.cover_image = f"/uploads/blog/{filename}"
+            from app.utils.upload import save_uploaded_file
+            s3_url = save_uploaded_file(cover_image_file, subfolder="blog")
+            if s3_url:
+                article.cover_image = s3_url
     else:
         data = request.get_json() or {}
         if 'cover_image' in data and isinstance(data['cover_image'], str):
