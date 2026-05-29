@@ -16,6 +16,12 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     mail_password = os.environ.get('MAIL_PASSWORD')
     mail_sender   = os.environ.get('MAIL_DEFAULT_SENDER', mail_username)
 
+    try:
+        from flask import request
+        context['logo_url'] = f"{request.host_url.rstrip('/')}/static/logo.png"
+    except Exception:
+        context['logo_url'] = "https://siiqo.com/images/Siiqo.png"  # Fallback
+        
     # Render the HTML template
     try:
         html_content = render_template(f"emails/{template_name}.html", **context)

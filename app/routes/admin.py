@@ -766,7 +766,7 @@ def send_email_broadcast():
         return jsonify({"message": "SuperAdmin required"}), 403
 
     data = request.get_json() or {}
-    target_audience = data.get('target_audience') or data.get('audience', 'ALL')
+    target_audience = str(data.get('target_audience') or data.get('audience', 'ALL')).upper()
     subject = data.get('subject', '')
     body = data.get('body', '')
     critical = data.get('critical', False)
