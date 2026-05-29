@@ -453,13 +453,27 @@ def revenue_status():
                 except Exception:
                     pass
 
+    # Check for an active subscription in the database
+    from app.models.admin import VendorSubscription
+    now = utcnow()
+    active_sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == int(user_id),
+        VendorSubscription.status == 'ACTIVE',
+        VendorSubscription.end_date > now,
+    ).first()
+
+    has_sub = active_sub is not None
+    plan_type = 'FREE'
+    if has_sub and active_sub.plan:
+        plan_type = active_sub.plan.name
+
     return jsonify({
         'status': 'success',
-        'has_active_subscription': False,  # TODO: wire to subscription model
-        'plan_type': 'FREE',
+        'has_active_subscription': has_sub,
+        'plan_type': plan_type,
         'usage': {
             'current_month_invoices': month_count,
-            'limit': 6
+            'limit': None if has_sub else 6,  # None = unlimited for Pro users
         }
     }), 200
 

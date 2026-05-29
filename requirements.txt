@@ -26,3 +26,4 @@ gunicorn==21.2.0
 # Third-party Services
 algoliasearch==3.0.0
 beautifulsoup4>=4.12.0
+python-dateutil==2.9.0

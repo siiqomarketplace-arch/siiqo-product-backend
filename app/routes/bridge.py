@@ -10,6 +10,10 @@ This file is intentionally kept thin — business logic lives in the
 dedicated route files. Bridge routes delegate or re-use that logic.
 """
 import uuid
+import os
+import hmac
+import hashlib
+import requests as http_requests
 from datetime import datetime, timezone
 
 from flask import Blueprint, request, jsonify
@@ -20,7 +24,7 @@ from app.models.user import User, Storefront, UserRole
 from app.models.product import Product, Category, Catalog
 from app.models.order import Order, OrderItem, Cart, CartItem
 from app.models.escrow import EscrowTransaction, EscrowStatus
-from app.models.admin import Favorite
+from app.models.admin import Favorite, VendorSubscription, SubscriptionPlan
 from app.models.partnerships import PartnerApplication, Referral
 from app.models.community import Review
 from app.models.communication import Notification
@@ -680,23 +684,156 @@ def partner_login():
 # PAYMENTS
 # ===========================================================================
 
+PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
+PAYSTACK_BASE_URL = 'https://api.paystack.co'
+PAYSTACK_MONTHLY_PLAN = os.environ.get('PAYSTACK_MONTHLY_PLAN_CODE', '')
+PAYSTACK_ANNUAL_PLAN = os.environ.get('PAYSTACK_ANNUAL_PLAN_CODE', '')
+SITE_URL = os.environ.get('NEXT_PUBLIC_SITE_URL', 'https://siiqo.com')
+
+
 @bridge_bp.route('/payments/initiate-pro-subscription', methods=['POST'])
 @jwt_required()
 def initiate_pro_subscription():
+    """
+    Initialise a Paystack subscription checkout.
+    Returns authorization_url — frontend redirects the user there.
+    """
     user_id = get_jwt_identity()
-    data = request.get_json() or {}
-    plan = data.get('plan', 'PRO')
-    amount = data.get('amount', 0)
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "Unauthorized"}), 403
 
-    txn_ref = str(uuid.uuid4())
+    data = request.get_json() or {}
+    billing_cycle = data.get('billing_cycle', 'monthly')
+
+    # Pick the correct Paystack plan code
+    plan_code = PAYSTACK_ANNUAL_PLAN if billing_cycle == 'annual' else PAYSTACK_MONTHLY_PLAN
+
+    if not PAYSTACK_SECRET_KEY:
+        return jsonify({"message": "Payment gateway not configured"}), 503
+
+    if not plan_code:
+        return jsonify({"message": "Subscription plan not configured"}), 503
+
+    # Call Paystack initialize endpoint
+    try:
+        payload = {
+            "email": user.email,
+            "plan": plan_code,
+            "callback_url": f"{SITE_URL}/payment/subscription-success",
+            "metadata": {
+                "user_id": str(user_id),
+                "billing_cycle": billing_cycle,
+                "cancel_action": f"{SITE_URL}/finance-tools/upgrade",
+            }
+        }
+        resp = http_requests.post(
+            f"{PAYSTACK_BASE_URL}/transaction/initialize",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        result = resp.json()
+    except Exception as e:
+        return jsonify({"message": f"Payment gateway error: {str(e)}"}), 503
+
+    if not resp.ok or not result.get('status'):
+        return jsonify({
+            "message": result.get('message', 'Failed to initialize payment')
+        }), 400
+
     return jsonify({
         "status": "success",
-        "message": "Subscription initiated",
-        "payment_link": f"https://sandbox.payscrow.net/pay/{txn_ref}",
-        "transaction_ref": txn_ref,
-        "plan": plan,
-        "amount": amount,
+        "data": {
+            "authorization_url": result['data']['authorization_url'],
+            "access_code": result['data']['access_code'],
+            "reference": result['data']['reference'],
+        }
     }), 200
+
+
+@bridge_bp.route('/payments/webhook', methods=['POST'])
+def paystack_webhook():
+    """
+    Receive Paystack webhook events.
+    Activates subscription when charge.success fires.
+    Paystack signs the payload with HMAC-SHA512 using your secret key.
+    """
+    # Verify the webhook signature
+    signature = request.headers.get('x-paystack-signature', '')
+    body = request.get_data()
+    expected = hmac.new(
+        PAYSTACK_SECRET_KEY.encode('utf-8'),
+        body,
+        hashlib.sha512
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, signature):
+        return jsonify({"message": "Invalid signature"}), 400
+
+    event = request.get_json() or {}
+    event_type = event.get('event', '')
+
+    # Handle successful charge (subscription payment)
+    if event_type in ('charge.success', 'subscription.create'):
+        data = event.get('data', {})
+        customer_email = data.get('customer', {}).get('email') or data.get('email', '')
+        plan_code = (
+            data.get('plan', {}).get('plan_code') or
+            data.get('subscription_code', '')
+        )
+        status = data.get('status', '')
+
+        if customer_email and status == 'success':
+            user = User.query.filter_by(email=customer_email).first()
+            if user:
+                # Determine plan from plan code
+                billing_cycle = 'annual' if plan_code == PAYSTACK_ANNUAL_PLAN else 'monthly'
+                plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
+
+                # Find or create the SubscriptionPlan record
+                plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
+                if not plan:
+                    plan = SubscriptionPlan(
+                        name=plan_name,
+                        price_ngn=48000 if billing_cycle == 'annual' else 5000,
+                        features={"unlimited_invoices": True, "crm": True},
+                        is_active=True,
+                    )
+                    db.session.add(plan)
+                    db.session.flush()
+
+                # Deactivate any existing active subscription for this user
+                existing = VendorSubscription.query.filter_by(
+                    vendor_id=user.id, status='ACTIVE'
+                ).all()
+                for sub in existing:
+                    sub.status = 'SUPERSEDED'
+
+                # Calculate end date
+                now = _utcnow()
+                if billing_cycle == 'annual':
+                    from dateutil.relativedelta import relativedelta
+                    end_date = now + relativedelta(years=1)
+                else:
+                    from dateutil.relativedelta import relativedelta
+                    end_date = now + relativedelta(months=1)
+
+                # Create new subscription record
+                new_sub = VendorSubscription(
+                    vendor_id=user.id,
+                    plan_id=plan.id,
+                    status='ACTIVE',
+                    start_date=now,
+                    end_date=end_date,
+                )
+                db.session.add(new_sub)
+                db.session.commit()
+
+    return jsonify({"status": "ok"}), 200
 
 
 # ===========================================================================
