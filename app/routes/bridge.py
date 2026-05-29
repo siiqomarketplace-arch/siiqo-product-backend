@@ -1,3 +1,4 @@
+import logging
 """
 bridge.py — Route aliases & missing endpoints
 

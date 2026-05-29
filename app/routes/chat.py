@@ -1,3 +1,4 @@
+import logging
 """
 chat.py — Messaging and notifications
 """

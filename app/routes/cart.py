@@ -1,3 +1,4 @@
+import logging
 """
 cart.py — Cart and checkout routes
 """
@@ -457,7 +458,7 @@ def checkout():
                 payment_method=payment_method,
             )
         except Exception as e:
-            print(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
+            logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
 
         # Update CRM CustomerProfile (for both payment methods)
         profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()

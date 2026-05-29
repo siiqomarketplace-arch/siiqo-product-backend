@@ -1,3 +1,4 @@
+import logging
 """
 negotiation.py — Price negotiation API routes
 """
@@ -313,7 +314,7 @@ def accept_offer(neg_id):
                 message=f"Good news! {vendor_name} has accepted your offer of ₦{agreed_price:,.0f} for {product.name if product else 'the item'}. Please proceed to your cart to complete the purchase within 48 hours."
             )
         except Exception as e:
-            print(f"[EMAIL ERROR] Failed to send negotiation acceptance email: {e}")
+            logging.warning(f"[EMAIL ERROR] Failed to send negotiation acceptance email: {e}")
 
     db.session.commit()
     return jsonify({

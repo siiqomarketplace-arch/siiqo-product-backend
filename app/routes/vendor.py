@@ -448,7 +448,7 @@ def add_product():
     try:
         sync_product_to_algolia(new_product)
     except Exception as e:
-        print(f"Failed to sync to Algolia: {e}")
+        logging.warning(f"Failed to sync to Algolia: {e}")
 
     return jsonify({
         "message": "Product added successfully",
@@ -556,7 +556,7 @@ def edit_product(product_id):
     try:
         sync_product_to_algolia(product)
     except Exception as e:
-        print(f"Failed to sync to Algolia: {e}")
+        logging.warning(f"Failed to sync to Algolia: {e}")
 
     return jsonify({"message": "Product updated successfully", "status": "success"}), 200
 
@@ -579,7 +579,7 @@ def delete_product(product_id):
     try:
         delete_product_from_algolia(product_id)
     except Exception as e:
-        print(f"Failed to delete from Algolia: {e}")
+        logging.warning(f"Failed to delete from Algolia: {e}")
         
     return jsonify({"message": "Product deleted"}), 200
 

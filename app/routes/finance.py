@@ -1,3 +1,4 @@
+import logging
 """
 finance.py — Finance Tools Routes
 Handles: Invoices (standalone), Receipts (standalone), Customers (CRM),

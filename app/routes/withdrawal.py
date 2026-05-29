@@ -1,3 +1,4 @@
+import logging
 """
 withdrawal.py — Vendor Withdrawal Routes
 Handles bank accounts, withdrawal requests, and POD payments
@@ -281,7 +282,7 @@ def request_withdrawal():
     
     try:
         amount = Decimal(str(amount))
-    except:
+    except Exception as e:
         return jsonify({'message': 'Invalid amount'}), 400
     
     # Minimum withdrawal
@@ -352,7 +353,7 @@ def request_withdrawal():
     try:
         _process_withdrawal(withdrawal.id)
     except Exception as e:
-        print(f"Withdrawal processing error: {e}")
+        logging.warning(f"Withdrawal processing error: {e}")
         # Don't fail the request, it will be retried
     
     return jsonify({

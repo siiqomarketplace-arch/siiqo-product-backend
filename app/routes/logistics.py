@@ -1,3 +1,4 @@
+import logging
 """
 logistics.py — Logistics partner routes
 """

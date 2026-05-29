@@ -1,3 +1,4 @@
+import logging
 """
 auth.py — Authentication routes
 Handles: register, verify-email, login, logout, refresh, profile,
@@ -97,7 +98,7 @@ def register():
                     verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={existing_user.email}&otp={otp}"
                 )
             except Exception as e:
-                print(f"[ERROR] OTP email failed for {existing_user.email}: {e}")
+                logging.warning(f"[ERROR] OTP email failed for {existing_user.email}: {e}")
                 return jsonify({
                     "status": "error",
                     "message": f"Account registered but verification email could not be sent. Please contact support. Error: {str(e)}"
@@ -151,7 +152,7 @@ def register():
             verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={new_user.email}&otp={otp}"
         )
     except Exception as e:
-        print(f"[ERROR] OTP email failed for {new_user.email}: {e}")
+        logging.warning(f"[ERROR] OTP email failed for {new_user.email}: {e}")
         # Account is created — user can resend OTP but we tell them what went wrong
         return jsonify({
             "status": "email_error",
@@ -233,7 +234,7 @@ def resend_otp():
             verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={user.email}&otp={otp}"
         )
     except Exception as e:
-        print(f"[WARN] Resend OTP email failed: {e}")
+        logging.warning(f"[WARN] Resend OTP email failed: {e}")
 
     return jsonify({
         "message": "If that email is registered, a new code has been sent."
@@ -379,7 +380,7 @@ def forgot_password():
                 otp=otp,
             )
         except Exception as e:
-            print(f"[WARN] Forgot password email failed: {e}")
+            logging.warning(f"[WARN] Forgot password email failed: {e}")
 
     # Always return 200 to prevent email enumeration
     return jsonify({"message": "If that email is registered, a reset code has been sent."}), 200

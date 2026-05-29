@@ -1,3 +1,4 @@
+import logging
 """
 community.py — Community/Social Feed Routes
 Handles: Posts, Likes, Comments, Follows, Feed
@@ -97,7 +98,7 @@ def get_feed():
         user = User.query.get(user_id)
         if user:
             user_city = user.city
-    except:
+    except Exception as e:
         pass
     
     # Base query
@@ -198,7 +199,7 @@ def create_post():
     try:
         sync_post_to_algolia(post)
     except Exception as e:
-        print(f"Failed to sync post to Algolia: {e}")
+        logging.warning(f"Failed to sync post to Algolia: {e}")
     
     return jsonify({
         'message': 'Post created successfully',
@@ -218,7 +219,7 @@ def get_post(post_id):
     user_id = None
     try:
         user_id = get_jwt_identity()
-    except:
+    except Exception as e:
         pass
     
     # Create view record (one per user per day)
@@ -301,7 +302,7 @@ def delete_post(post_id):
     try:
         delete_post_from_algolia(post_id)
     except Exception as e:
-        print(f"Failed to delete post from Algolia: {e}")
+        logging.warning(f"Failed to delete post from Algolia: {e}")
     
     return jsonify({'message': 'Post deleted successfully'}), 200
 

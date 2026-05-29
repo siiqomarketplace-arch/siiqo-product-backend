@@ -1,3 +1,4 @@
+import logging
 """
 public.py — Public marketplace routes (no auth required)
 """

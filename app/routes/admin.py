@@ -1,3 +1,4 @@
+import logging
 """
 admin.py — Admin panel routes
 All routes require a valid AdminUser JWT.
