@@ -94,10 +94,10 @@ def get_products():
             # ── contact details ──
             "vendor_phone": sf.phone if sf else None,
             "whatsapp_link": (f"https://wa.me/{sf.phone}" if sf and sf.phone else None),
-            # ── location ──
             "city": sf.city if sf else None,
             "state": sf.state if sf else None,
             "category_id": p.category_id,
+            "category": p.category.name if p.category else "General",
             "is_negotiable": p.is_negotiable,
             "is_sponsored": is_sponsored,
         }

@@ -803,7 +803,7 @@ def send_email_broadcast():
         try:
             token = hashlib.sha256(f"{user.email}{secret}".encode()).hexdigest()[:16]
             base_url = request.host_url.rstrip('/')
-            unsubscribe_link = f"{base_url}/unsubscribe?email={user.email}&token={token}"
+            unsubscribe_link = f"{base_url}/api/auth/unsubscribe?email={user.email}&token={token}"
             
             ok = send_siiqo_email(
                 to_email=user.email,
