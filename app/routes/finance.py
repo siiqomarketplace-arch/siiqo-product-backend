@@ -435,7 +435,7 @@ def revenue_status():
             'status': 'success',
             'has_active_subscription': False,
             'plan_type': 'FREE',
-            'usage': {'current_month_invoices': 0, 'limit': 5}
+            'usage': {'current_month_invoices': 0, 'limit': 6}
         }), 200
 
     # Count this month's standalone invoices + receipts
@@ -459,7 +459,7 @@ def revenue_status():
         'plan_type': 'FREE',
         'usage': {
             'current_month_invoices': month_count,
-            'limit': 5
+            'limit': 6
         }
     }), 200
 
