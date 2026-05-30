@@ -61,6 +61,8 @@ class PayscrowProvider(BaseEscrowProvider):
             "customerPhoneNo": buyer_phone,
             "currencyCode": "NGN",
             "merchantChargePercentage": 0,
+            "redirectUrl": "https://siiqo.com/CartSystem?success=true",
+            "returnUrl": "https://siiqo.com/CartSystem?success=true",
             "webhookNotificationUrl": os.environ.get(
                 'PAYSCROW_WEBHOOK_URL',
                 "https://devapi.siiqo.app/api/escrow/webhook"

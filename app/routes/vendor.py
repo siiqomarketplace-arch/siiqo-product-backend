@@ -59,6 +59,18 @@ def get_settings():
 
     sf = user.storefront
     full_name = user.full_name
+    
+    from app.models.admin import VendorSubscription
+    from datetime import datetime
+    now = datetime.utcnow()
+    active_sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == int(user_id),
+        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
+        VendorSubscription.end_date > now
+    ).order_by(VendorSubscription.end_date.desc()).first()
+    
+    plan_name = active_sub.plan.name if active_sub and active_sub.plan else "Free"
+    plan_renews = active_sub.end_date.strftime("%b %d, %Y") if active_sub and active_sub.end_date else None
 
     if sf:
         store_settings = {
@@ -87,6 +99,8 @@ def get_settings():
             "working_hours": sf.working_hours or {},
             "meta_title": sf.meta_title,
             "meta_description": sf.meta_description,
+            "plan_name": plan_name,
+            "plan_renews": plan_renews,
         }
     else:
         store_settings = {
@@ -114,6 +128,8 @@ def get_settings():
             "working_hours": {},
             "meta_title": None,
             "meta_description": None,
+            "plan_name": plan_name,
+            "plan_renews": plan_renews,
         }
 
     return jsonify({
