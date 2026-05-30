@@ -262,6 +262,18 @@ def update_settings():
     for form_key, model_attr in field_map.items():
         if form_key in data:
             setattr(sf, model_attr, data[form_key])
+            
+    # Also update user personal info if provided
+    if 'phone' in data:
+        user.phone = data['phone']
+        
+    if 'fullname' in data:
+        name_parts = data['fullname'].strip().split(' ', 1)
+        user.first_name = name_parts[0]
+        if len(name_parts) > 1:
+            user.last_name = name_parts[1]
+        else:
+            user.last_name = ""
 
     # Publish flag — vendor can set to True, but it only goes live after admin approval
     if 'is_published' in data:
