@@ -10,7 +10,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
 
 from app.extensions import db
-from app.models.admin import AdminUser, PlatformSetting, SubscriptionPlan
+from app.models.admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription
 from app.models.user import User, Storefront
 from app.models.escrow import EscrowTransaction, EscrowStatus
 from app.models.community import Article
@@ -823,3 +823,86 @@ def send_email_broadcast():
             "failed": failed,
         },
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Subscription Management (Admin)
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/subscriptions', methods=['GET'])
+@jwt_required()
+def list_subscriptions():
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Admin access required"}), 403
+
+    subs = VendorSubscription.query.all()
+    result = []
+    for s in subs:
+        vendor = db.session.get(User, s.vendor_id)
+        plan = db.session.get(SubscriptionPlan, s.plan_id)
+        result.append({
+            "id": s.id,
+            "vendor_id": s.vendor_id,
+            "vendor_email": vendor.email if vendor else "N/A",
+            "plan_name": plan.name if plan else "N/A",
+            "status": s.status,
+            "start_date": s.start_date.isoformat() if s.start_date else None,
+            "end_date": s.end_date.isoformat() if s.end_date else None,
+        })
+    return jsonify({"status": "success", "subscriptions": result}), 200
+
+
+@admin_bp.route('/subscriptions/<int:vendor_id>/grant', methods=['POST'])
+@jwt_required()
+def grant_subscription(vendor_id):
+    """Manually grant a Pro subscription to a vendor."""
+    admin = _require_superadmin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Superadmin access required"}), 403
+
+    user = db.session.get(User, vendor_id)
+    if not user:
+        return jsonify({"message": "Vendor not found"}), 404
+
+    data = request.get_json() or {}
+    months = int(data.get('months', 1))
+    plan_name = data.get('plan_name', 'PRO_MONTHLY')
+
+    plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
+    if not plan:
+        return jsonify({"message": f"Plan '{plan_name}' not found"}), 404
+
+    existing = VendorSubscription.query.filter_by(vendor_id=user.id, status='ACTIVE').all()
+    for sub in existing:
+        sub.status = 'SUPERSEDED'
+
+    from dateutil.relativedelta import relativedelta
+    now = _utcnow()
+    new_sub = VendorSubscription(
+        vendor_id=user.id,
+        plan_id=plan.id,
+        status='ACTIVE',
+        start_date=now,
+        end_date=now + relativedelta(months=months),
+    )
+    db.session.add(new_sub)
+    db.session.commit()
+
+    return jsonify({"status": "success", "message": f"Granted {months} months of {plan_name} to {user.email}"}), 201
+
+
+@admin_bp.route('/subscriptions/<int:vendor_id>/revoke', methods=['DELETE'])
+@jwt_required()
+def revoke_subscription(vendor_id):
+    """Manually revoke/cancel a vendor's active subscription."""
+    admin = _require_superadmin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Superadmin access required"}), 403
+
+    VendorSubscription.query.filter_by(
+        vendor_id=vendor_id, status='ACTIVE'
+    ).update({'status': 'CANCELLED'})
+    db.session.commit()
+
+    return jsonify({"status": "success", "message": f"Revoked active subscriptions for vendor {vendor_id}"}), 200

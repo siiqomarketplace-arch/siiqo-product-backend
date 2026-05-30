@@ -688,7 +688,7 @@ PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
 PAYSTACK_BASE_URL = 'https://api.paystack.co'
 PAYSTACK_MONTHLY_PLAN = os.environ.get('PAYSTACK_MONTHLY_PLAN_CODE', '')
 PAYSTACK_ANNUAL_PLAN = os.environ.get('PAYSTACK_ANNUAL_PLAN_CODE', '')
-SITE_URL = os.environ.get('NEXT_PUBLIC_SITE_URL', 'https://siiqo.com')
+SITE_URL = os.environ.get('SITE_URL', os.environ.get('NEXT_PUBLIC_SITE_URL', 'https://siiqo.com'))
 
 
 @bridge_bp.route('/payments/initiate-pro-subscription', methods=['POST'])
@@ -720,6 +720,7 @@ def initiate_pro_subscription():
     try:
         payload = {
             "email": user.email,
+            "amount": 4800000 if billing_cycle == 'annual' else 500000,  # Paystack requires amount in kobo
             "plan": plan_code,
             "callback_url": f"{SITE_URL}/payment/subscription-success",
             "metadata": {
@@ -779,20 +780,26 @@ def paystack_webhook():
     event = request.get_json() or {}
     event_type = event.get('event', '')
 
-    # Handle successful charge (subscription payment)
+    # Handle successful charge (new subscription or one-time payment)
     if event_type in ('charge.success', 'subscription.create'):
         data = event.get('data', {})
         customer_email = data.get('customer', {}).get('email') or data.get('email', '')
+
+        # Extract plan_code correctly:
+        # - charge.success:      data['plan']['plan_code']  (e.g. PLN_xxx)
+        # - subscription.create: data['plan']['plan_code']  (preferred)
+        #                        data['plan_code']          (fallback)
+        # NOTE: data['subscription_code'] is SUB_xxx, NOT a plan code — never use it here
         plan_code = (
-            data.get('plan', {}).get('plan_code') or
-            data.get('subscription_code', '')
+            data.get('plan', {}).get('plan_code')
+            or data.get('plan_code', '')
         )
         status = data.get('status', '')
 
         if customer_email and status == 'success':
             user = User.query.filter_by(email=customer_email).first()
             if user:
-                # Determine plan from plan code
+                # Determine billing cycle from plan code
                 billing_cycle = 'annual' if plan_code == PAYSTACK_ANNUAL_PLAN else 'monthly'
                 plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
 
@@ -808,7 +815,7 @@ def paystack_webhook():
                     db.session.add(plan)
                     db.session.flush()
 
-                # Deactivate any existing active subscription for this user
+                # Supersede any existing active subscriptions
                 existing = VendorSubscription.query.filter_by(
                     vendor_id=user.id, status='ACTIVE'
                 ).all()
@@ -816,13 +823,9 @@ def paystack_webhook():
                     sub.status = 'SUPERSEDED'
 
                 # Calculate end date
+                from dateutil.relativedelta import relativedelta
                 now = _utcnow()
-                if billing_cycle == 'annual':
-                    from dateutil.relativedelta import relativedelta
-                    end_date = now + relativedelta(years=1)
-                else:
-                    from dateutil.relativedelta import relativedelta
-                    end_date = now + relativedelta(months=1)
+                end_date = now + (relativedelta(years=1) if billing_cycle == 'annual' else relativedelta(months=1))
 
                 # Create new subscription record
                 new_sub = VendorSubscription(
@@ -834,6 +837,39 @@ def paystack_webhook():
                 )
                 db.session.add(new_sub)
                 db.session.commit()
+                logging.info(f'[PAYSTACK] Subscription activated for user {user.id} ({billing_cycle}) until {end_date}')
+
+    # Handle subscription renewal invoice payment
+    elif event_type in ('invoice.update', 'invoice.payment_success'):
+        data = event.get('data', {})
+        customer_email = data.get('customer', {}).get('email', '')
+        invoice_status = data.get('status', '')
+        if customer_email and invoice_status in ('success', 'paid'):
+            user = User.query.filter_by(email=customer_email).first()
+            if user:
+                from dateutil.relativedelta import relativedelta
+                active_sub = VendorSubscription.query.filter_by(
+                    vendor_id=user.id, status='ACTIVE'
+                ).first()
+                if active_sub:
+                    # Extend from whichever is later: now or existing end_date (avoids gaps)
+                    base = max(active_sub.end_date, _utcnow())
+                    active_sub.end_date = base + relativedelta(months=1)
+                    db.session.commit()
+                    logging.info(f'[PAYSTACK] Subscription renewed for user {user.id} — new end_date: {active_sub.end_date}')
+
+    # Handle subscription cancellation / disable
+    elif event_type in ('subscription.not_renew', 'subscription.disable'):
+        data = event.get('data', {})
+        customer_email = data.get('customer', {}).get('email', '')
+        if customer_email:
+            user = User.query.filter_by(email=customer_email).first()
+            if user:
+                VendorSubscription.query.filter_by(
+                    vendor_id=user.id, status='ACTIVE'
+                ).update({'status': 'CANCELLED'})
+                db.session.commit()
+                logging.info(f'[PAYSTACK] Subscription cancelled for user {user.id} (event: {event_type})')
 
     return jsonify({"status": "ok"}), 200
 
