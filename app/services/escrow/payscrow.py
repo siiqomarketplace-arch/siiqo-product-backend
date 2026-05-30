@@ -70,7 +70,15 @@ class PayscrowProvider(BaseEscrowProvider):
         
         try:
             resp = requests.post(f"{base_url}/api/v3/marketplace/transactions/start", json=payload, headers=headers)
-            resp_data = resp.json()
+            try:
+                resp_data = resp.json()
+            except Exception as e:
+                logging.error(f"Payscrow JSON Decode Error: {e}, Status: {resp.status_code}, Text: {resp.text}")
+                return {
+                    "success": False,
+                    "error_message": f"Payscrow invalid response: {resp.status_code}"
+                }
+                
             if not resp_data.get('success'):
                 logging.error(f"Payscrow API error: {resp_data}")
                 return {
