@@ -27,6 +27,20 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _payscrow_env():
+    """Return (api_key, base_url) for Payscrow. Sandbox keys (ps_9...) route to payscrow.dev."""
+    key = os.environ.get('PAYSCROW_API_KEY', '')
+    # Payscrow sandbox keys start with 'ps_9'; live keys with 'ps_l' or similar
+    # We also allow an explicit override via PAYSCROW_ENV=sandbox
+    is_sandbox = (
+        not key
+        or key.startswith('ps_9')  # sandbox key prefix
+        or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+    )
+    base_url = "https://api.payscrow.dev" if is_sandbox else "https://api.payscrow.net"
+    return key, base_url
+
+
 def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, description: str):
     """Write a CREDIT entry to the vendor's ledger."""
     # Calculate running balance
@@ -80,8 +94,7 @@ def initiate_escrow():
         vendor_payout = float(order.total_amount)
 
         # Call PayScrow API
-        payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-        base_url = "https://api.payscrow.net" if payscrow_key else "https://api.payscrow.dev"
+        payscrow_key, base_url = _payscrow_env()
         headers = {
             "BrokerApiKey": payscrow_key,
             "Content-Type": "application/json"
@@ -328,8 +341,7 @@ def release_escrow():
         return jsonify({"message": "Missing escrow code or Payscrow ID to release funds."}), 400
 
     # Call PayScrow API to apply code and release funds
-    payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-    base_url = "https://api.payscrow.net" if payscrow_key else "https://api.payscrow.dev"
+    payscrow_key, base_url = _payscrow_env()
     headers = {
         "BrokerApiKey": payscrow_key,
         "Content-Type": "application/json"
@@ -475,8 +487,7 @@ def raise_dispute():
     requested_by = "customer" if order.buyer_id == int(user_id) else "merchant"
 
     # Notify Payscrow to officially freeze funds on their end
-    payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-    base_url = "https://api.payscrow.net" if payscrow_key else "https://api.payscrow.dev"
+    payscrow_key, base_url = _payscrow_env()
     headers = {
         "BrokerApiKey": payscrow_key,
         "Content-Type": "application/json"
