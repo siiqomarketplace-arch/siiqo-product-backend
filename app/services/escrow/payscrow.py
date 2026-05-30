@@ -28,8 +28,8 @@ class PayscrowProvider(BaseEscrowProvider):
         vendor_name = (order.vendor.first_name if order.vendor and order.vendor.first_name else "Siiqo Vendor")
         buyer_name = (order.buyer.first_name if order.buyer and order.buyer.first_name else "Siiqo Buyer")
         
-        vendor_phone = (order.vendor.phone if order.vendor and order.vendor.phone else "00000000000")
-        buyer_phone = (order.buyer.phone if order.buyer and order.buyer.phone else "00000000000")
+        vendor_phone = (order.vendor.phone if order.vendor and order.vendor.phone else "08000000000")
+        buyer_phone = (order.buyer.phone if order.buyer and order.buyer.phone else "08000000000")
 
         headers = {
             "BrokerApiKey": payscrow_key,
