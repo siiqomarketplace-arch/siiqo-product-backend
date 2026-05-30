@@ -82,12 +82,12 @@ def initiate_escrow():
         return jsonify({"message": "Unauthorized"}), 403
 
     escrow_txn = EscrowTransaction.query.filter_by(order_id=order.id).first()
-    if not escrow_txn:
+    if not escrow_txn or not escrow_txn.payment_link:
         vendor_bank = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
         if not vendor_bank:
             return jsonify({"message": "Vendor has not set up a receiving bank account."}), 400
 
-        txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
+        txn_number = escrow_txn.transaction_number if escrow_txn else f"ESC-{uuid.uuid4().hex[:12].upper()}"
         
         # We waive the 12% fee for beta testing, allocating 100% of funds to vendor settlement
         fee_amount = 0.0
@@ -142,18 +142,24 @@ def initiate_escrow():
             logging.error(f"Payscrow API error: {e}")
             return jsonify({"message": "Could not connect to Escrow provider"}), 500
 
-        escrow_txn = EscrowTransaction(
-            order_id=order.id,
-            transaction_number=txn_number,
-            status=EscrowStatus.PENDING_PAYMENT,
-            amount=order.total_amount,
-            fee_percent=0.00,
-            fee_amount=fee_amount,
-            payment_link=payment_link,
-            payscrow_transaction_id=str(payscrow_id) if payscrow_id else None,
-            payscrow_ref=str(payscrow_txn_number) if payscrow_txn_number else None,  # MKT-XXXXX
-        )
-        db.session.add(escrow_txn)
+        if not escrow_txn:
+            escrow_txn = EscrowTransaction(
+                order_id=order.id,
+                transaction_number=txn_number,
+                status=EscrowStatus.PENDING_PAYMENT,
+                amount=order.total_amount,
+                fee_percent=0.00,
+                fee_amount=fee_amount,
+                payment_link=payment_link,
+                payscrow_transaction_id=str(payscrow_id) if payscrow_id else None,
+                payscrow_ref=str(payscrow_txn_number) if payscrow_txn_number else None,  # MKT-XXXXX
+            )
+            db.session.add(escrow_txn)
+        else:
+            escrow_txn.payment_link = payment_link
+            escrow_txn.payscrow_transaction_id = str(payscrow_id) if payscrow_id else None
+            escrow_txn.payscrow_ref = str(payscrow_txn_number) if payscrow_txn_number else None
+            
         db.session.commit()
 
     return jsonify({
