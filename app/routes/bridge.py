@@ -708,6 +708,7 @@ def initiate_pro_subscription():
 
     # Pick the correct Paystack plan code
     plan_code = PAYSTACK_ANNUAL_PLAN if billing_cycle == 'annual' else PAYSTACK_MONTHLY_PLAN
+    logging.info(f'[PAYSTACK] billing_cycle={billing_cycle} plan_code={plan_code!r} key_set={bool(PAYSTACK_SECRET_KEY)}')
 
     if not PAYSTACK_SECRET_KEY:
         return jsonify({"message": "Payment gateway not configured"}), 503
@@ -741,6 +742,7 @@ def initiate_pro_subscription():
         return jsonify({"message": f"Payment gateway error: {str(e)}"}), 503
 
     if not resp.ok or not result.get('status'):
+        logging.error(f'[PAYSTACK] Error response: {result}')
         return jsonify({
             "message": result.get('message', 'Failed to initialize payment')
         }), 400
