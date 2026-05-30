@@ -31,7 +31,7 @@ class PayscrowProvider(BaseEscrowProvider):
         import re
         def format_phone(phone_str):
             if not phone_str:
-                return "08000000000"
+                return "08012345678"
             # Strip non-digits
             digits = re.sub(r'\D', '', phone_str)
             if digits.startswith('234') and len(digits) == 13:
@@ -41,7 +41,7 @@ class PayscrowProvider(BaseEscrowProvider):
             if len(digits) == 10:
                 return '0' + digits
             # Fallback for completely invalid strings
-            return "08000000000"
+            return "08012345678"
             
         vendor_phone = format_phone(order.vendor.phone if order.vendor else None)
         buyer_phone = format_phone(order.buyer.phone if order.buyer else None)
