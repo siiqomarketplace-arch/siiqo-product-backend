@@ -64,6 +64,8 @@ def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, desc
     ))
 
 
+from app.services.escrow import get_escrow_provider
+
 # ---------------------------------------------------------------------------
 # POST /escrow/initiate
 # ---------------------------------------------------------------------------
@@ -87,78 +89,32 @@ def initiate_escrow():
         if not vendor_bank:
             return jsonify({"message": "Vendor has not set up a receiving bank account."}), 400
 
-        txn_number = escrow_txn.transaction_number if escrow_txn else f"ESC-{uuid.uuid4().hex[:12].upper()}"
-        
-        # We waive the 12% fee for beta testing, allocating 100% of funds to vendor settlement
-        fee_amount = 0.0
-        vendor_payout = float(order.total_amount)
+        existing_txn_number = escrow_txn.transaction_number if escrow_txn else None
 
-        # Call PayScrow API
-        payscrow_key, base_url = _payscrow_env()
-        headers = {
-            "BrokerApiKey": payscrow_key,
-            "Content-Type": "application/json"
-        }
+        # Delegate logic to Escrow Service Provider
+        provider = get_escrow_provider()
+        result = provider.initiate_transaction(order, vendor_bank, existing_txn_number)
         
-        payload = {
-            "transactionReference": txn_number,
-            "merchantEmailAddress": order.vendor.email if order.vendor else "vendor@siiqo.com",
-            "merchantName": order.vendor.first_name if order.vendor else "Siiqo Vendor",
-            "customerEmailAddress": order.buyer.email if order.buyer else "buyer@siiqo.com",
-            "customerName": order.buyer.first_name if order.buyer else "Siiqo Buyer",
-            "currencyCode": "NGN",
-            "merchantChargePercentage": 0,  # Buyer pays escrow charges if any, or 0
-            "webhookNotificationUrl": os.environ.get(
-                'PAYSCROW_WEBHOOK_URL',
-                "https://devapi.siiqo.app/api/escrow/webhook"
-            ),
-            "items": [
-                {
-                    "name": f"Siiqo Order #{order.id}",
-                    "quantity": 1,
-                    "price": float(order.total_amount)
-                }
-            ],
-            "settlementAccounts": [
-                {
-                    "bankCode": vendor_bank.bank_code,
-                    "accountNumber": vendor_bank.account_number,
-                    "accountName": vendor_bank.account_name,
-                    "amount": vendor_payout
-                }
-            ]
-        }
-        
-        try:
-            resp = requests.post(f"{base_url}/api/v3/marketplace/transactions/start", json=payload, headers=headers)
-            resp_data = resp.json()
-            if not resp_data.get('success'):
-                return jsonify({"message": "Escrow init failed", "errors": resp_data.get('errors')}), 400
-            
-            payment_link = resp_data['data']['paymentLink']
-            payscrow_id = resp_data['data'].get('transactionId')          # GUID — used for applycode
-            payscrow_txn_number = resp_data['data'].get('transactionNumber')  # MKT-XXXXX — used for dispute/status
-        except Exception as e:
-            logging.error(f"Payscrow API error: {e}")
-            return jsonify({"message": "Could not connect to Escrow provider"}), 500
+        if not result.get("success"):
+            return jsonify({"message": result.get("error_message") or "Escrow init failed"}), 400
 
         if not escrow_txn:
             escrow_txn = EscrowTransaction(
                 order_id=order.id,
-                transaction_number=txn_number,
+                transaction_number=result['transaction_number'],
                 status=EscrowStatus.PENDING_PAYMENT,
-                amount=order.total_amount,
+                amount=result['amount'],
                 fee_percent=0.00,
-                fee_amount=fee_amount,
-                payment_link=payment_link,
-                payscrow_transaction_id=str(payscrow_id) if payscrow_id else None,
-                payscrow_ref=str(payscrow_txn_number) if payscrow_txn_number else None,  # MKT-XXXXX
+                fee_amount=result['fee_amount'],
+                payment_link=result['payment_link'],
+                payscrow_transaction_id=result['provider_transaction_id'],
+                payscrow_ref=result['provider_reference'],
             )
             db.session.add(escrow_txn)
         else:
-            escrow_txn.payment_link = payment_link
-            escrow_txn.payscrow_transaction_id = str(payscrow_id) if payscrow_id else None
-            escrow_txn.payscrow_ref = str(payscrow_txn_number) if payscrow_txn_number else None
+            escrow_txn.payment_link = result['payment_link']
+            escrow_txn.payscrow_transaction_id = result['provider_transaction_id']
+            escrow_txn.payscrow_ref = result['provider_reference']
             
         db.session.commit()
 
