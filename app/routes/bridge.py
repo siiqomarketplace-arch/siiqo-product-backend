@@ -732,24 +732,38 @@ def get_subscription_status():
 @jwt_required()
 def cancel_subscription():
     """Cancel the user's active subscription."""
-    user_id = get_jwt_identity()
-    active_sub = VendorSubscription.query.filter_by(
-        vendor_id=int(user_id), status='ACTIVE'
-    ).first()
-
-    if not active_sub:
-        return jsonify({"message": "No active subscription found."}), 404
-
-    # Mark as cancelled — it stays active until end_date
-    active_sub.status = 'CANCELLED_PENDING_EXPIRY'
-    db.session.commit()
-    logging.info(f'[PAYSTACK] User {user_id} cancelled subscription. Active until {active_sub.end_date}')
-
-    return jsonify({
-        "success": True,
-        "message": "Your subscription has been cancelled. You will retain Pro access until the end of your billing period.",
-        "end_date": active_sub.end_date.isoformat() if active_sub.end_date else None,
-    }), 200
+    try:
+        user_id = get_jwt_identity()
+        active_sub = VendorSubscription.query.filter_by(
+            vendor_id=int(user_id), status='ACTIVE'
+        ).first()
+    
+        if not active_sub:
+            return jsonify({"message": "No active subscription found."}), 404
+    
+        # Mark as cancelled
+        active_sub.status = 'CANCELLED_PENDING_EXPIRY'
+        db.session.commit()
+        logging.info(f'[PAYSTACK] User {user_id} cancelled subscription. Active until {active_sub.end_date}')
+        
+        # Safely handle end_date format (in case DB returns it as string instead of datetime)
+        end_date_str = None
+        if active_sub.end_date:
+            end_date_str = active_sub.end_date.isoformat() if hasattr(active_sub.end_date, 'isoformat') else str(active_sub.end_date)
+    
+        return jsonify({
+            "success": True,
+            "message": "Your subscription has been cancelled. You will retain Pro access until the end of your billing period.",
+            "end_date": end_date_str,
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        logging.error(f"Error cancelling subscription: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({
+            "message": "An internal server error occurred while cancelling your subscription.",
+            "error_details": str(e)
+        }), 500
 
 
 @bridge_bp.route('/payments/initiate-pro-subscription', methods=['POST'])
