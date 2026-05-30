@@ -205,6 +205,41 @@ def payscrow_webhook():
                     type="ESCROW",
                     order_id=order.id,
                 ))
+                
+                # Send Emails
+                from app.utils.email import send_siiqo_email
+                from app.models.user import User
+                
+                buyer = db.session.get(User, order.buyer_id)
+                if buyer:
+                    try:
+                        send_siiqo_email(
+                            to_email=buyer.email,
+                            subject=f"Order Confirmation #{order.id} - Siiqo",
+                            template_name="order_confirmation",
+                            first_name=buyer.first_name or "there",
+                            order_id=order.id,
+                            payment_method="ESCROW",
+                        )
+                    except Exception as e:
+                        import logging
+                        logging.warning(f"[EMAIL WARN] Failed to send webhook order confirmation to buyer: {e}")
+
+                vendor = db.session.get(User, order.vendor_id)
+                if vendor:
+                    try:
+                        send_siiqo_email(
+                            to_email=vendor.email,
+                            subject="New Escrow Order - Siiqo",
+                            template_name="order_received_vendor",
+                            first_name=vendor.first_name or "Vendor",
+                            order_id=order.id,
+                            total_amount=f"₦{float(order.total_amount):,.2f}",
+                            payment_method="ESCROW"
+                        )
+                    except Exception as e:
+                        import logging
+                        logging.warning(f"[EMAIL WARN] Failed to send webhook order received to vendor: {e}")
 
             db.session.commit()
 

@@ -46,10 +46,47 @@ class PayscrowProvider(BaseEscrowProvider):
         vendor_phone = format_phone(order.vendor.phone if order.vendor else None)
         buyer_phone = format_phone(order.buyer.phone if order.buyer else None)
 
+        total_amount = float(order.total_amount)
+        
+        # Calculate splits
+        # Vendor gets 88%
+        vendor_payout = round(total_amount * 0.88, 2)
+        
+        # Siiqo gets 12% MINUS Payscrow's Escrow fee (3.5% + 100 NGN)
+        siiqo_payout = round((total_amount * 0.12) - (total_amount * 0.035 + 100), 2)
+        
+        # Clamp Siiqo payout to 0 if it goes negative for very small amounts
+        if siiqo_payout < 0:
+            vendor_payout = vendor_payout + siiqo_payout # absorb the negative balance
+            siiqo_payout = 0
+
+        fee_amount = round(total_amount * 0.12, 2) # Logical Siiqo fee to save in our DB
+        
+        siiqo_bank_code = os.environ.get("SIIQO_BANK_CODE", "011") # Default First Bank
+        siiqo_account_number = os.environ.get("SIIQO_BANK_ACCOUNT", "3050025256")
+        siiqo_account_name = os.environ.get("SIIQO_BANK_NAME", "Siiqo Marketplace")
+
         headers = {
             "BrokerApiKey": payscrow_key,
             "Content-Type": "application/json"
         }
+        
+        settlement_accounts = [
+            {
+                "bankCode": vendor_bank.bank_code,
+                "accountNumber": vendor_bank.account_number,
+                "accountName": vendor_bank.account_name,
+                "amount": vendor_payout
+            }
+        ]
+        
+        if siiqo_payout > 0:
+            settlement_accounts.append({
+                "bankCode": siiqo_bank_code,
+                "accountNumber": siiqo_account_number,
+                "accountName": siiqo_account_name,
+                "amount": siiqo_payout
+            })
         
         payload = {
             "transactionReference": txn_number,
@@ -60,7 +97,7 @@ class PayscrowProvider(BaseEscrowProvider):
             "customerName": buyer_name,
             "customerPhoneNo": buyer_phone,
             "currencyCode": "NGN",
-            "merchantChargePercentage": 0,
+            "merchantChargePercentage": 100,
             "redirectUrl": "https://siiqo.com/CartSystem?success=true",
             "returnUrl": "https://siiqo.com/CartSystem?success=true",
             "webhookNotificationUrl": os.environ.get(
@@ -75,14 +112,7 @@ class PayscrowProvider(BaseEscrowProvider):
                     "price": float(order.total_amount)
                 }
             ],
-            "settlementAccounts": [
-                {
-                    "bankCode": vendor_bank.bank_code,
-                    "accountNumber": vendor_bank.account_number,
-                    "accountName": vendor_bank.account_name,
-                    "amount": vendor_payout
-                }
-            ]
+            "settlementAccounts": settlement_accounts
         }
         
         try:

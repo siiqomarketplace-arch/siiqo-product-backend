@@ -408,7 +408,7 @@ def checkout():
             )
             db.session.add(new_escrow)
             
-            # Notify vendor about escrow order
+            # Notify vendor about escrow order in-app
             db.session.add(Notification(
                 user_id=vid,
                 title="New Order Received",
@@ -417,20 +417,8 @@ def checkout():
                 order_id=new_order.id,
             ))
             
-            vendor = db.session.get(User, vid)
-            if vendor:
-                try:
-                    send_siiqo_email(
-                        to_email=vendor.email,
-                        subject="New Escrow Order - Siiqo",
-                        template_name="order_received_vendor",
-                        first_name=vendor.first_name or "Vendor",
-                        order_id=new_order.id,
-                        total_amount=f"₦{total:,.2f}",
-                        payment_method="ESCROW"
-                    )
-                except Exception:
-                    pass
+            # (Emails for Escrow orders are now sent in the webhook once payment is secured)
+
             
             orders_created.append({
                 "order_id": new_order.id,
@@ -447,18 +435,19 @@ def checkout():
             buyer_id=user_id,
         ))
 
-        # Send Order Confirmation Email to Buyer
-        try:
-            send_siiqo_email(
-                to_email=user.email,
-                subject=f"Order Confirmation #{new_order.id} - Siiqo",
-                template_name="order_confirmation",
-                first_name=user.first_name or "there",
-                order_id=new_order.id,
-                payment_method=payment_method,
-            )
-        except Exception as e:
-            logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
+        # Send Order Confirmation Email to Buyer (Only for POD here, Escrow sent via webhook)
+        if payment_method == 'POD':
+            try:
+                send_siiqo_email(
+                    to_email=user.email,
+                    subject=f"Order Confirmation #{new_order.id} - Siiqo",
+                    template_name="order_confirmation",
+                    first_name=user.first_name or "there",
+                    order_id=new_order.id,
+                    payment_method=payment_method,
+                )
+            except Exception as e:
+                logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
 
         # Update CRM CustomerProfile (for both payment methods)
         profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()
