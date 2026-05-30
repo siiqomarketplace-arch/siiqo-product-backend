@@ -38,6 +38,8 @@ class EscrowTransaction(db.Model):
 
     # PayScrow integration
     payscrow_ref = db.Column(db.String(255), nullable=True)
+    payscrow_transaction_id = db.Column(db.String(100), nullable=True)  # The GUID needed for applycode
+    escrow_code = db.Column(db.String(50), nullable=True)               # The 6-digit release code
     payment_link = db.Column(db.String(500), nullable=True)
 
     dispute_id = db.Column(db.String(100), nullable=True)

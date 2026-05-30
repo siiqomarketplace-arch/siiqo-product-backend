@@ -17,7 +17,8 @@ from app.models.order import Order
 from app.models.escrow import EscrowTransaction, EscrowStatus
 from app.models.finance import Ledger, Receipt
 from app.models.communication import Notification
-from app.models.withdrawal import PODPayment
+from app.models.withdrawal import PODPayment, VendorBankAccount
+import requests
 
 escrow_bp = Blueprint('escrow', __name__)
 
@@ -68,34 +69,83 @@ def initiate_escrow():
 
     escrow_txn = EscrowTransaction.query.filter_by(order_id=order.id).first()
     if not escrow_txn:
+        vendor_bank = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
+        if not vendor_bank:
+            return jsonify({"message": "Vendor has not set up a receiving bank account."}), 400
+
         txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
-        fee_amount = float(order.total_amount) * 0.12
+        
+        # We waive the 12% fee for beta testing, allocating 100% of funds to vendor settlement
+        fee_amount = 0.0
+        vendor_payout = float(order.total_amount)
+
+        # Call PayScrow API
+        payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+        base_url = "https://api.payscrow.net" if payscrow_key else "https://api.payscrow.dev"
+        headers = {
+            "BrokerApiKey": payscrow_key,
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "transactionReference": txn_number,
+            "merchantEmailAddress": order.vendor.email if order.vendor else "vendor@siiqo.com",
+            "merchantName": order.vendor.first_name if order.vendor else "Siiqo Vendor",
+            "customerEmailAddress": order.buyer.email if order.buyer else "buyer@siiqo.com",
+            "customerName": order.buyer.first_name if order.buyer else "Siiqo Buyer",
+            "currencyCode": "NGN",
+            "merchantChargePercentage": 0,  # Buyer pays escrow charges if any, or 0
+            "webhookNotificationUrl": os.environ.get(
+                'PAYSCROW_WEBHOOK_URL',
+                "https://api.siiqo.com/api/escrow/webhook"
+            ),
+            "items": [
+                {
+                    "name": f"Siiqo Order #{order.id}",
+                    "quantity": 1,
+                    "price": float(order.total_amount)
+                }
+            ],
+            "settlementAccounts": [
+                {
+                    "bankCode": vendor_bank.bank_code,
+                    "accountNumber": vendor_bank.account_number,
+                    "accountName": vendor_bank.account_name,
+                    "amount": vendor_payout
+                }
+            ]
+        }
+        
+        try:
+            resp = requests.post(f"{base_url}/api/v3/marketplace/transactions/start", json=payload, headers=headers)
+            resp_data = resp.json()
+            if not resp_data.get('success'):
+                return jsonify({"message": "Escrow init failed", "errors": resp_data.get('errors')}), 400
+            
+            payment_link = resp_data['data']['paymentLink']
+            payscrow_id = resp_data['data'].get('transactionId')          # GUID — used for applycode
+            payscrow_txn_number = resp_data['data'].get('transactionNumber')  # MKT-XXXXX — used for dispute/status
+        except Exception as e:
+            logging.error(f"Payscrow API error: {e}")
+            return jsonify({"message": "Could not connect to Escrow provider"}), 500
+
         escrow_txn = EscrowTransaction(
             order_id=order.id,
             transaction_number=txn_number,
             status=EscrowStatus.PENDING_PAYMENT,
             amount=order.total_amount,
-            fee_percent=12.00,
+            fee_percent=0.00,
             fee_amount=fee_amount,
+            payment_link=payment_link,
+            payscrow_transaction_id=str(payscrow_id) if payscrow_id else None,
+            payscrow_ref=str(payscrow_txn_number) if payscrow_txn_number else None,  # MKT-XXXXX
         )
         db.session.add(escrow_txn)
-        db.session.flush()
-
-    # Build PayScrow payment link
-    # In production: call PayScrow API here
-    # POST https://api.payscrow.net/v1/transactions/initiate
-    payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-    payment_link = (
-        f"https://sandbox.payscrow.net/pay/{escrow_txn.transaction_number}"
-        if not payscrow_key
-        else f"https://pay.payscrow.net/{escrow_txn.transaction_number}"
-    )
-    escrow_txn.payment_link = payment_link
-    db.session.commit()
+        db.session.commit()
 
     return jsonify({
         "success": True,
-        "paymentLink": payment_link,
+        "paymentLink": escrow_txn.payment_link,
         "transactionNumber": escrow_txn.transaction_number,
         "amount": str(escrow_txn.amount),
         "status": escrow_txn.status,
@@ -145,15 +195,21 @@ def payscrow_webhook():
             return jsonify({"message": "Invalid signature"}), 401
 
     data = request.get_json(force=True) or {}
-    event = data.get('event')
-    txn_ref = data.get('transaction_reference') or data.get('txn_ref')
+    
+    # PayScrow v3.0 Webhook structure
+    txn_ref = data.get('externalReference') or data.get('transactionNumber')
+    payment_status = data.get('paymentStatus')
+    escrow_code = data.get('escrowCode')
+    payscrow_transaction_id = data.get('transactionId')
 
-    if event == 'payment.success' and txn_ref:
+    if payment_status == 'Paid' and txn_ref:
         escrow = EscrowTransaction.query.filter_by(transaction_number=txn_ref).first()
         if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
             escrow.status = EscrowStatus.IN_ESCROW
             escrow.paid_at = _utcnow()
-            escrow.payscrow_ref = data.get('payscrow_ref')
+            escrow.escrow_code = escrow_code
+            if payscrow_transaction_id:
+                escrow.payscrow_transaction_id = payscrow_transaction_id
 
             order = escrow.order
             if order:
@@ -268,6 +324,30 @@ def release_escrow():
     if escrow.status not in [EscrowStatus.IN_ESCROW, EscrowStatus.DELIVERED, EscrowStatus.SHIPPED]:
         return jsonify({"message": f"Cannot release funds at status: {escrow.status}"}), 400
 
+    if not escrow.payscrow_transaction_id or not escrow.escrow_code:
+        return jsonify({"message": "Missing escrow code or Payscrow ID to release funds."}), 400
+
+    # Call PayScrow API to apply code and release funds
+    payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+    base_url = "https://api.payscrow.net" if payscrow_key else "https://api.payscrow.dev"
+    headers = {
+        "BrokerApiKey": payscrow_key,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "transactionId": escrow.payscrow_transaction_id,
+        "code": escrow.escrow_code
+    }
+    
+    try:
+        resp = requests.post(f"{base_url}/api/v3/escrow/escrowtransactions/applycode", json=payload, headers=headers)
+        resp_data = resp.json()
+        if not resp_data.get('success'):
+            return jsonify({"message": "Failed to release escrow via Payscrow", "errors": resp_data.get('errors')}), 400
+    except Exception as e:
+        logging.error(f"Payscrow release API error: {e}")
+        return jsonify({"message": "Could not connect to Escrow provider"}), 500
+
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
@@ -280,6 +360,22 @@ def release_escrow():
         reference_id=escrow.transaction_number,
         description=f"Payout for Order #{order.id}",
     )
+    
+    # Since Payscrow paid them directly to their bank, write a matching DEBIT so balance remains accurate
+    from app.models.finance import Ledger as L
+    from sqlalchemy import func
+    credits = db.session.query(func.sum(L.amount)).filter_by(vendor_id=order.vendor_id, transaction_type='CREDIT').scalar() or 0
+    debits = db.session.query(func.sum(L.amount)).filter_by(vendor_id=order.vendor_id, transaction_type='DEBIT').scalar() or 0
+    balance_after_debit = float(credits) - float(debits) - net_amount
+    
+    db.session.add(L(
+        vendor_id=order.vendor_id,
+        transaction_type='DEBIT',
+        amount=net_amount,
+        description=f"Auto-Settled via Payscrow (Order #{order.id})",
+        reference_id=escrow.transaction_number + "-SETTLED",
+        balance_after=balance_after_debit,
+    ))
 
     # Create Receipt
     db.session.add(Receipt(order_id=order.id))
@@ -369,8 +465,40 @@ def raise_dispute():
     if order.buyer_id != int(user_id) and order.vendor_id != int(user_id):
         return jsonify({"message": "Unauthorized"}), 403
 
+    if escrow.status == EscrowStatus.DISPUTED:
+        return jsonify({"message": "A dispute is already open on this transaction."}), 400
+
+    if escrow.status not in [EscrowStatus.IN_ESCROW, EscrowStatus.DELIVERED, EscrowStatus.SHIPPED]:
+        return jsonify({"message": f"Cannot raise a dispute at status: {escrow.status}"}), 400
+
+    # Determine who is disputing: buyer = 'customer', vendor = 'merchant'
+    requested_by = "customer" if order.buyer_id == int(user_id) else "merchant"
+
+    # Notify Payscrow to officially freeze funds on their end
+    payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+    base_url = "https://api.payscrow.net" if payscrow_key else "https://api.payscrow.dev"
+    headers = {
+        "BrokerApiKey": payscrow_key,
+        "Content-Type": "application/json"
+    }
+
+    if escrow.payscrow_ref and payscrow_key:
+        try:
+            resp = requests.post(
+                f"{base_url}/api/v3/marketplace/transactions/{escrow.payscrow_ref}/broker/raise-dispute",
+                json={"requestedBy": requested_by, "complaint": reason or "No reason provided."},
+                headers=headers,
+                timeout=10
+            )
+            if not resp.json().get('success'):
+                logging.warning(f"Payscrow dispute API returned non-success: {resp.text}")
+        except Exception as e:
+            logging.error(f"Payscrow dispute API error: {e}")
+            # We still mark it locally — don't block the user if network issue
+
+    dispute_id = f"DISP-{uuid.uuid4().hex[:8].upper()}"
     escrow.status = EscrowStatus.DISPUTED
-    escrow.dispute_id = f"DISP-{uuid.uuid4().hex[:8].upper()}"
+    escrow.dispute_id = dispute_id
     escrow.dispute_reason = reason
 
     # Notify both parties
