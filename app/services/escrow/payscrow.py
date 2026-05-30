@@ -49,16 +49,10 @@ class PayscrowProvider(BaseEscrowProvider):
         total_amount = float(order.total_amount)
         
         # Calculate splits
-        # Vendor gets 88%
+        # Payscrow API requires that the sum of settlement accounts EXACTLY equals the transaction amount.
+        # It handles fee deduction internally after the transaction succeeds.
         vendor_payout = round(total_amount * 0.88, 2)
-        
-        # Siiqo gets 12% MINUS Payscrow's Escrow fee (3.5% + 100 NGN)
-        siiqo_payout = round((total_amount * 0.12) - (total_amount * 0.035 + 100), 2)
-        
-        # Clamp Siiqo payout to 0 if it goes negative for very small amounts
-        if siiqo_payout < 0:
-            vendor_payout = vendor_payout + siiqo_payout # absorb the negative balance
-            siiqo_payout = 0
+        siiqo_payout = round(total_amount - vendor_payout, 2) # Ensure exact sum
 
         fee_amount = round(total_amount * 0.12, 2) # Logical Siiqo fee to save in our DB
         
