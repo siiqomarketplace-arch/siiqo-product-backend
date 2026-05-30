@@ -691,11 +691,73 @@ PAYSTACK_ANNUAL_PLAN = os.environ.get('PAYSTACK_ANNUAL_PLAN_CODE', '')
 SITE_URL = os.environ.get('SITE_URL', os.environ.get('NEXT_PUBLIC_SITE_URL', 'https://siiqo.com'))
 
 
+@bridge_bp.route('/payments/subscription', methods=['GET'])
+@jwt_required()
+def get_subscription_status():
+    """Return the current user's active subscription details."""
+    user_id = get_jwt_identity()
+    now = _utcnow()
+    active_sub = VendorSubscription.query.filter_by(
+        vendor_id=int(user_id), status='ACTIVE'
+    ).order_by(VendorSubscription.end_date.desc()).first()
+
+    if not active_sub or active_sub.end_date < now:
+        # Mark expired subs as EXPIRED
+        if active_sub and active_sub.end_date < now:
+            active_sub.status = 'EXPIRED'
+            db.session.commit()
+        return jsonify({
+            "plan": "FREE",
+            "status": "inactive",
+            "billing_cycle": None,
+            "end_date": None,
+            "can_upgrade": True,
+            "can_cancel": False,
+        }), 200
+
+    plan_name = active_sub.plan.name if active_sub.plan else 'PRO_MONTHLY'
+    billing_cycle = 'annual' if 'ANNUAL' in plan_name else 'monthly'
+
+    return jsonify({
+        "plan": "PRO",
+        "status": "active",
+        "billing_cycle": billing_cycle,
+        "end_date": active_sub.end_date.isoformat() if active_sub.end_date else None,
+        "can_upgrade": billing_cycle == 'monthly',  # can only upgrade monthly -> annual
+        "can_cancel": True,
+    }), 200
+
+
+@bridge_bp.route('/payments/subscription/cancel', methods=['POST'])
+@jwt_required()
+def cancel_subscription():
+    """Cancel the user's active subscription."""
+    user_id = get_jwt_identity()
+    active_sub = VendorSubscription.query.filter_by(
+        vendor_id=int(user_id), status='ACTIVE'
+    ).first()
+
+    if not active_sub:
+        return jsonify({"message": "No active subscription found."}), 404
+
+    # Mark as cancelled — it stays active until end_date
+    active_sub.status = 'CANCELLED_PENDING_EXPIRY'
+    db.session.commit()
+    logging.info(f'[PAYSTACK] User {user_id} cancelled subscription. Active until {active_sub.end_date}')
+
+    return jsonify({
+        "success": True,
+        "message": "Your subscription has been cancelled. You will retain Pro access until the end of your billing period.",
+        "end_date": active_sub.end_date.isoformat() if active_sub.end_date else None,
+    }), 200
+
+
 @bridge_bp.route('/payments/initiate-pro-subscription', methods=['POST'])
 @jwt_required()
 def initiate_pro_subscription():
     """
     Initialise a Paystack subscription checkout.
+    Blocks duplicate subscriptions unless the user is upgrading from monthly to annual.
     Returns authorization_url — frontend redirects the user there.
     """
     user_id = get_jwt_identity()
@@ -705,6 +767,35 @@ def initiate_pro_subscription():
 
     data = request.get_json() or {}
     billing_cycle = data.get('billing_cycle', 'monthly')
+    now = _utcnow()
+
+    # --- DUPLICATE PREVENTION ---
+    # Check if user already has an active subscription
+    existing_sub = VendorSubscription.query.filter_by(
+        vendor_id=user.id, status='ACTIVE'
+    ).first()
+
+    if existing_sub and existing_sub.end_date > now:
+        existing_plan = existing_sub.plan.name if existing_sub.plan else ''
+        existing_cycle = 'annual' if 'ANNUAL' in existing_plan else 'monthly'
+
+        # Block if already on same or better plan
+        if existing_cycle == billing_cycle:
+            return jsonify({
+                "message": f"You already have an active {billing_cycle} Pro subscription valid until {existing_sub.end_date.strftime('%d %b %Y')}.",
+                "already_subscribed": True,
+            }), 409
+
+        if existing_cycle == 'annual':
+            return jsonify({
+                "message": "You already have an Annual Pro subscription, which is the highest plan.",
+                "already_subscribed": True,
+            }), 409
+
+        # Allow upgrade: monthly -> annual. Cancel the old monthly first.
+        if existing_cycle == 'monthly' and billing_cycle == 'annual':
+            existing_sub.status = 'SUPERSEDED'
+            db.session.commit()
 
     # Pick the correct Paystack plan code
     plan_code = PAYSTACK_ANNUAL_PLAN if billing_cycle == 'annual' else PAYSTACK_MONTHLY_PLAN
@@ -720,7 +811,7 @@ def initiate_pro_subscription():
     try:
         payload = {
             "email": user.email,
-            "amount": 4800000 if billing_cycle == 'annual' else 500000,  # Paystack requires amount in kobo
+            "amount": 4800000 if billing_cycle == 'annual' else 500000,
             "plan": plan_code,
             "callback_url": f"{SITE_URL}/payment/subscription-success",
             "metadata": {
