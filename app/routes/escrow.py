@@ -97,7 +97,7 @@ def initiate_escrow():
             "merchantChargePercentage": 0,  # Buyer pays escrow charges if any, or 0
             "webhookNotificationUrl": os.environ.get(
                 'PAYSCROW_WEBHOOK_URL',
-                "https://api.siiqo.com/api/escrow/webhook"
+                "https://devapi.siiqo.app/api/escrow/webhook"
             ),
             "items": [
                 {
