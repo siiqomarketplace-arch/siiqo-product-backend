@@ -15,9 +15,9 @@ class Invoice(db.Model):
     __tablename__ = 'invoices'
 
     id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), unique=True, nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
     vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
     invoice_number = db.Column(
         db.String(100), unique=True, nullable=False, index=True,
@@ -30,15 +30,61 @@ class Invoice(db.Model):
     status = db.Column(db.String(50), default='ISSUED')
     # ISSUED, PAID, OVERDUE, CANCELLED
 
+    # Standalone fields
+    customer_name = db.Column(db.String(255), nullable=True)
+    customer_email = db.Column(db.String(255), nullable=True)
+    customer_phone = db.Column(db.String(50), nullable=True)
+    customer_address = db.Column(db.Text, nullable=True)
+    line_items = db.Column(db.JSON, nullable=True)
+    subtotal = db.Column(db.Numeric(10, 2), nullable=True)
+    discount = db.Column(db.Numeric(10, 2), nullable=True)
+    tax_rate = db.Column(db.Numeric(5, 2), nullable=True)
+    tax_amount = db.Column(db.Numeric(10, 2), nullable=True)
+    total = db.Column(db.Numeric(10, 2), nullable=True)
+    currency = db.Column(db.String(10), default='NGN')
+    notes = db.Column(db.Text, nullable=True)
+    payment_link_token = db.Column(db.String(100), nullable=True, unique=True)
+    payment_method = db.Column(db.String(50), nullable=True)
+
     # Relationships
     order = db.relationship('Order')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'order_id': self.order_id,
+            'vendor_id': self.vendor_id,
+            'buyer_id': self.buyer_id,
+            'invoice_number': self.invoice_number,
+            'customer_name': self.customer_name,
+            'customer_email': self.customer_email,
+            'customer_phone': self.customer_phone,
+            'customer_address': self.customer_address,
+            'line_items': self.line_items or [],
+            'subtotal': str(self.subtotal) if self.subtotal is not None else None,
+            'discount': str(self.discount) if self.discount is not None else None,
+            'tax_rate': str(self.tax_rate) if self.tax_rate is not None else None,
+            'tax_amount': str(self.tax_amount) if self.tax_amount is not None else None,
+            'total': str(self.total) if self.total is not None else None,
+            'amount': str(self.total) if self.total is not None else None,
+            'currency': self.currency,
+            'notes': self.notes,
+            'due_date': self.due_date.isoformat() if isinstance(self.due_date, datetime) else self.due_date,
+            'status': self.status,
+            'pdf_url': self.pdf_url,
+            'payment_link_token': self.payment_link_token,
+            'payment_method': self.payment_method,
+            'created_at': self.issue_date.isoformat() if self.issue_date else None,
+            'updated_at': self.issue_date.isoformat() if self.issue_date else None,
+        }
 
 
 class Receipt(db.Model):
     __tablename__ = 'receipts'
 
     id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), unique=True, nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
+    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
 
     receipt_number = db.Column(
         db.String(100), unique=True, nullable=False, index=True,
@@ -47,8 +93,46 @@ class Receipt(db.Model):
     pdf_url = db.Column(db.String(255), nullable=True)
     issued_at = db.Column(db.DateTime(timezone=True), default=utcnow)
 
+    # Standalone fields
+    customer_name = db.Column(db.String(255), nullable=True)
+    customer_email = db.Column(db.String(255), nullable=True)
+    customer_phone = db.Column(db.String(50), nullable=True)
+    line_items = db.Column(db.JSON, nullable=True)
+    subtotal = db.Column(db.Numeric(10, 2), nullable=True)
+    tax_amount = db.Column(db.Numeric(10, 2), nullable=True)
+    discount = db.Column(db.Numeric(10, 2), nullable=True)
+    total = db.Column(db.Numeric(10, 2), nullable=True)
+    currency = db.Column(db.String(10), default='NGN')
+    payment_method = db.Column(db.String(50), default='Cash')
+    notes = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(50), default='paid')
+
     # Relationships
     order = db.relationship('Order')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'order_id': self.order_id,
+            'vendor_id': self.vendor_id,
+            'receipt_number': self.receipt_number,
+            'customer_name': self.customer_name,
+            'customer_email': self.customer_email,
+            'customer_phone': self.customer_phone,
+            'line_items': self.line_items or [],
+            'subtotal': str(self.subtotal) if self.subtotal is not None else None,
+            'tax_amount': str(self.tax_amount) if self.tax_amount is not None else None,
+            'discount': str(self.discount) if self.discount is not None else None,
+            'total': str(self.total) if self.total is not None else None,
+            'amount': str(self.total) if self.total is not None else None,
+            'currency': self.currency,
+            'payment_method': self.payment_method,
+            'notes': self.notes,
+            'status': self.status,
+            'pdf_url': self.pdf_url,
+            'created_at': self.issued_at.isoformat() if self.issued_at else None,
+            'updated_at': self.issued_at.isoformat() if self.issued_at else None,
+        }
 
 
 class Ledger(db.Model):

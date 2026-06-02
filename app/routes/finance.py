@@ -7,9 +7,10 @@ Handles: Invoices (standalone), Receipts (standalone), Customers (CRM),
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.extensions import db, limiter
-from app.models.finance import InventoryItem, StockMovement, Expense, BrandingSettings, Ledger
-from app.models.user import User
+from app.models.finance import InventoryItem, StockMovement, Expense, BrandingSettings, Ledger, Invoice, Receipt
+from app.models.user import User, Storefront
 from app.models.order import Order
+from app.models.product import Product
 from app.models.crm import CustomerProfile
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, and_
@@ -63,52 +64,13 @@ def _next_receipt_number(settings: BrandingSettings) -> str:
 
 
 from sqlalchemy.orm.attributes import flag_modified
-
 def _get_standalone_docs(user_id: int, doc_type: str) -> list:
-    """Read standalone invoices or receipts from branding settings JSON store."""
-    settings = BrandingSettings.query.filter_by(vendor_id=user_id).first()
-    if not settings or not settings.template_options:
-        return []
-    return settings.template_options.get(f'standalone_{doc_type}s', [])
-
-
-def _save_standalone_doc(user_id: int, doc_type: str, doc: dict):
-    """Append a standalone invoice/receipt to the JSON store."""
-    settings = _get_or_create_branding(user_id)
-    opts = dict(settings.template_options or {})  # Create a copy to ensure detection
-    key = f'standalone_{doc_type}s'
-    docs = list(opts.get(key, []))
-    docs.insert(0, doc)  # newest first
-    opts[key] = docs
-    settings.template_options = opts
-    flag_modified(settings, "template_options")
-    db.session.commit()
-
-
-def _update_standalone_doc(user_id: int, doc_type: str, doc_id: str, updates: dict) -> bool:
-    """Update a field on a stored standalone doc."""
-    settings = BrandingSettings.query.filter_by(vendor_id=user_id).first()
-    if not settings or not settings.template_options:
-        return False
-    
-    opts = dict(settings.template_options)
-    key = f'standalone_{doc_type}s'
-    docs = list(opts.get(key, []))
-    
-    found = False
-    for i, d in enumerate(docs):
-        if str(d.get('id')) == str(doc_id):
-            docs[i] = {**d, **updates}
-            found = True
-            break
-            
-    if found:
-        opts[key] = docs
-        settings.template_options = opts
-        flag_modified(settings, "template_options")
-        db.session.commit()
-        return True
-    return False
+    """Read standalone invoices or receipts from DB directly."""
+    if doc_type == 'invoice':
+        docs = Invoice.query.filter_by(vendor_id=user_id, order_id=None).order_by(Invoice.issue_date.desc()).all()
+    else:
+        docs = Receipt.query.filter_by(vendor_id=user_id, order_id=None).order_by(Receipt.issued_at.desc()).all()
+    return [d.to_dict() for d in docs]
 
 
 @finance_bp.route('/invoices', methods=['GET'])
@@ -118,13 +80,18 @@ def list_invoices():
     """List all standalone invoices for the logged-in user"""
     user_id = get_jwt_identity()
     status_filter = request.args.get('status')
-    docs = _get_standalone_docs(user_id, 'invoice')
+    
+    query = Invoice.query.filter_by(vendor_id=user_id, order_id=None)
     if status_filter:
-        docs = [d for d in docs if d.get('status') == status_filter]
+        query = query.filter_by(status=status_filter)
+    
+    invoices = query.order_by(Invoice.issue_date.desc()).all()
+    invoices_data = [inv.to_dict() for inv in invoices]
+    
     return jsonify({
         'status': 'success',
-        'invoices': docs,
-        'total': len(docs)
+        'invoices': invoices_data,
+        'total': len(invoices_data)
     }), 200
 
 
@@ -154,35 +121,44 @@ def create_invoice():
     settings = _get_or_create_branding(user_id)
     invoice_number = _next_invoice_number(settings)
 
-    invoice = {
-        'id': str(uuid.uuid4()),
-        'invoice_number': invoice_number,
-        'customer_name': customer_name,
-        'customer_email': data.get('customer_email', ''),
-        'customer_phone': data.get('customer_phone', ''),
-        'customer_address': data.get('customer_address', ''),
-        'line_items': line_items,
-        'subtotal': subtotal,
-        'discount': discount,
-        'tax_rate': tax_rate,
-        'tax_amount': tax_amount,
-        'total': total,
-        'amount': total,
-        'currency': data.get('currency', 'NGN'),
-        'notes': data.get('notes', ''),
-        'due_date': data.get('due_date', ''),
-        'status': 'draft',
-        'payment_link_token': str(uuid.uuid4()),
-        'created_at': utcnow().isoformat(),
-        'updated_at': utcnow().isoformat(),
-    }
+    due_date_str = data.get('due_date')
+    due_date = None
+    if due_date_str:
+        try:
+            if 'T' in due_date_str:
+                due_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
+            else:
+                due_date = datetime.strptime(due_date_str, '%Y-%m-%d')
+        except Exception:
+            pass
 
-    _save_standalone_doc(user_id, 'invoice', invoice)
+    invoice = Invoice(
+        vendor_id=user_id,
+        invoice_number=invoice_number,
+        customer_name=customer_name,
+        customer_email=data.get('customer_email', ''),
+        customer_phone=data.get('customer_phone', ''),
+        customer_address=data.get('customer_address', ''),
+        line_items=line_items,
+        subtotal=subtotal,
+        discount=discount,
+        tax_rate=tax_rate,
+        tax_amount=tax_amount,
+        total=total,
+        currency=data.get('currency', 'NGN'),
+        notes=data.get('notes', ''),
+        due_date=due_date,
+        status='draft',
+        payment_link_token=str(uuid.uuid4()),
+    )
+    
+    db.session.add(invoice)
+    db.session.commit()
 
     return jsonify({
         'status': 'success',
         'message': 'Invoice created successfully',
-        'invoice': invoice
+        'invoice': invoice.to_dict()
     }), 201
 
 
@@ -191,11 +167,20 @@ def create_invoice():
 def get_invoice(invoice_id):
     """Get a single standalone invoice"""
     user_id = get_jwt_identity()
-    docs = _get_standalone_docs(user_id, 'invoice')
-    for d in docs:
-        if str(d.get('id')) == str(invoice_id):
-            return jsonify({'status': 'success', 'invoice': d}), 200
-    return jsonify({'message': 'Invoice not found'}), 404
+    invoice = Invoice.query.filter(
+        Invoice.vendor_id == user_id,
+        db.or_(Invoice.id == invoice_id, Invoice.payment_link_token == invoice_id, Invoice.invoice_number == invoice_id)
+    ).first()
+    
+    if not invoice:
+        # scan for UUID string representation
+        invoices = Invoice.query.filter_by(vendor_id=user_id).all()
+        invoice = next((inv for inv in invoices if str(inv.id) == str(invoice_id)), None)
+        
+    if not invoice:
+        return jsonify({'message': 'Invoice not found'}), 404
+        
+    return jsonify({'status': 'success', 'invoice': invoice.to_dict()}), 200
 
 
 @finance_bp.route('/invoices/<string:invoice_id>/status', methods=['PATCH'])
@@ -210,16 +195,17 @@ def update_invoice_status(invoice_id):
     if new_status not in valid_statuses:
         return jsonify({'message': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
 
-    updates = {
-        'status': new_status,
-        'updated_at': utcnow().isoformat(),
-    }
-    if new_status == 'paid' and data.get('payment_method'):
-        updates['payment_method'] = data['payment_method']
-
-    found = _update_standalone_doc(user_id, 'invoice', invoice_id, updates)
-    if not found:
+    invoices = Invoice.query.filter_by(vendor_id=user_id).all()
+    invoice = next((inv for inv in invoices if str(inv.id) == str(invoice_id)), None)
+    
+    if not invoice:
         return jsonify({'message': 'Invoice not found'}), 404
+
+    invoice.status = new_status
+    if new_status == 'paid' and data.get('payment_method'):
+        invoice.payment_method = data['payment_method']
+        
+    db.session.commit()
 
     return jsonify({'status': 'success', 'message': f'Invoice marked as {new_status}'}), 200
 
@@ -234,11 +220,12 @@ def update_invoice_status(invoice_id):
 def list_receipts():
     """List all standalone receipts for the logged-in user"""
     user_id = get_jwt_identity()
-    docs = _get_standalone_docs(user_id, 'receipt')
+    receipts = Receipt.query.filter_by(vendor_id=user_id, order_id=None).order_by(Receipt.issued_at.desc()).all()
+    receipts_data = [r.to_dict() for r in receipts]
     return jsonify({
         'status': 'success',
-        'receipts': docs,
-        'total': len(docs)
+        'receipts': receipts_data,
+        'total': len(receipts_data)
     }), 200
 
 
@@ -247,18 +234,19 @@ def list_receipts():
 def get_receipt(receipt_id):
     """Get a single standalone receipt"""
     user_id = get_jwt_identity()
-    docs = _get_standalone_docs(user_id, 'receipt')
-    for d in docs:
-        if str(d.get('id')) == str(receipt_id):
-            return jsonify({'status': 'success', 'receipt': d}), 200
-    return jsonify({'message': 'Receipt not found'}), 404
+    receipts = Receipt.query.filter_by(vendor_id=user_id, order_id=None).all()
+    receipt = next((r for r in receipts if str(r.id) == str(receipt_id)), None)
+    
+    if not receipt:
+        return jsonify({'message': 'Receipt not found'}), 404
+    return jsonify({'status': 'success', 'receipt': receipt.to_dict()}), 200
 
 
 @finance_bp.route('/receipts', methods=['POST'])
 @jwt_required()
 @limiter.limit("30 per minute")
 def create_receipt():
-    """Create a new standalone receipt"""
+    """Create a new standalone receipt with atomic backend stock sync"""
     user_id = get_jwt_identity()
     data = request.get_json() or {}
 
@@ -275,32 +263,81 @@ def create_receipt():
     settings = _get_or_create_branding(user_id)
     receipt_number = _next_receipt_number(settings)
 
-    receipt = {
-        'id': str(uuid.uuid4()),
-        'receipt_number': receipt_number,
-        'customer_name': customer_name,
-        'customer_email': data.get('customer_email', ''),
-        'customer_phone': data.get('customer_phone', ''),
-        'line_items': line_items,
-        'subtotal': subtotal,
-        'tax_amount': tax_amount,
-        'discount': discount,
-        'total': total,
-        'amount': total,
-        'currency': data.get('currency', 'NGN'),
-        'payment_method': data.get('payment_method', 'Cash'),
-        'notes': data.get('notes', ''),
-        'status': 'paid',
-        'created_at': utcnow().isoformat(),
-        'updated_at': utcnow().isoformat(),
-    }
+    receipt = Receipt(
+        vendor_id=user_id,
+        receipt_number=receipt_number,
+        customer_name=customer_name,
+        customer_email=data.get('customer_email', ''),
+        customer_phone=data.get('customer_phone', ''),
+        line_items=line_items,
+        subtotal=subtotal,
+        tax_amount=tax_amount,
+        discount=discount,
+        total=total,
+        currency=data.get('currency', 'NGN'),
+        payment_method=data.get('payment_method', 'Cash'),
+        notes=data.get('notes', ''),
+        status='paid',
+    )
 
-    _save_standalone_doc(user_id, 'receipt', receipt)
+    db.session.add(receipt)
+    db.session.flush() # get receipt.id
+
+    # Atomic backend stock sync (Task 4)
+    for item in line_items:
+        desc = item.get('description', '').strip()
+        qty = int(item.get('qty', 1))
+        
+        # 1. Deduct from back-office InventoryItem first
+        inv_item = InventoryItem.query.filter(
+            InventoryItem.vendor_id == user_id,
+            InventoryItem.is_active == True,
+            InventoryItem.name.ilike(desc)
+        ).first()
+        
+        if inv_item:
+            qty_before = inv_item.quantity
+            qty_after = max(0, qty_before - qty)
+            inv_item.quantity = qty_after
+            inv_item.updated_at = utcnow()
+            
+            # Create StockMovement record
+            movement = StockMovement(
+                inventory_item_id=inv_item.id,
+                movement_type='OUT',
+                quantity=-qty,
+                quantity_before=qty_before,
+                quantity_after=qty_after,
+                reference_type='RECEIPT',
+                reference_id=receipt.id,
+                notes=f"Offline receipt sale: {receipt_number}",
+                performed_by=user_id
+            )
+            db.session.add(movement)
+            
+            # 2. Also deduct from associated storefront Product if linked
+            if inv_item.product_id:
+                prod = Product.query.get(inv_item.product_id)
+                if prod:
+                    prod.stock_quantity = max(0, prod.stock_quantity - qty)
+        else:
+            # 3. If no InventoryItem but storefront Product matches by name directly
+            from app.models.user import Storefront
+            sf = Storefront.query.filter_by(vendor_id=user_id).first()
+            if sf:
+                prod = Product.query.filter(
+                    Product.storefront_id == sf.id,
+                    Product.name.ilike(desc)
+                ).first()
+                if prod:
+                    prod.stock_quantity = max(0, prod.stock_quantity - qty)
+
+    db.session.commit()
 
     return jsonify({
         'status': 'success',
         'message': 'Receipt created successfully',
-        'receipt': receipt
+        'receipt': receipt.to_dict()
     }), 201
 
 
@@ -315,18 +352,18 @@ def get_finance_summary():
     """Get finance summary stats for the dashboard"""
     user_id = get_jwt_identity()
 
-    # Standalone invoices & receipts
-    invoices = _get_standalone_docs(user_id, 'invoice')
-    receipts = _get_standalone_docs(user_id, 'receipt')
+    # Query invoices & receipts directly from the DB tables instead of JSON!
+    invoices = Invoice.query.filter_by(vendor_id=user_id, order_id=None).all()
+    receipts = Receipt.query.filter_by(vendor_id=user_id, order_id=None).all()
 
-    paid_invoices = [i for i in invoices if i.get('status') == 'paid']
-    pending_invoices = [i for i in invoices if i.get('status') in ('draft', 'sent')]
-    overdue_invoices = [i for i in invoices if i.get('status') == 'overdue']
+    paid_invoices = [i for i in invoices if i.status == 'paid']
+    pending_invoices = [i for i in invoices if i.status in ('draft', 'sent')]
+    overdue_invoices = [i for i in invoices if i.status == 'overdue']
 
-    total_invoiced = sum(float(i.get('total', 0)) for i in invoices)
-    total_paid = sum(float(i.get('total', 0)) for i in paid_invoices)
-    total_pending = sum(float(i.get('total', 0)) for i in pending_invoices)
-    total_receipt_revenue = sum(float(r.get('total', 0)) for r in receipts)
+    total_invoiced = sum(float(i.total or 0) for i in invoices)
+    total_paid = sum(float(i.total or 0) for i in paid_invoices)
+    total_pending = sum(float(i.total or 0) for i in pending_invoices)
+    total_receipt_revenue = sum(float(r.total or 0) for r in receipts)
 
     # CRM customers
     customer_count = CustomerProfile.query.filter_by(vendor_id=user_id).count()
@@ -398,18 +435,12 @@ def get_customers():
 @limiter.limit("30 per minute")
 def get_payment_link(token):
     """Public payment link — look up invoice by payment_link_token"""
-    # Search all vendors' invoices for this token
-    # Since we store in BrandingSettings JSON, we do a simple scan
-    all_settings = BrandingSettings.query.all()
-    for settings in all_settings:
-        if not settings.template_options:
-            continue
-        for inv in settings.template_options.get('standalone_invoices', []):
-            if inv.get('payment_link_token') == token:
-                return jsonify({
-                    'status': 'success',
-                    'invoice': inv
-                }), 200
+    invoice = Invoice.query.filter_by(payment_link_token=token).first()
+    if invoice:
+        return jsonify({
+            'status': 'success',
+            'invoice': invoice.to_dict()
+        }), 200
     return jsonify({'message': 'Payment link not found or expired'}), 404
 
 
@@ -438,20 +469,23 @@ def revenue_status():
             'usage': {'current_month_invoices': 0, 'limit': 6}
         }), 200
 
-    # Count this month's standalone invoices + receipts
-    settings = BrandingSettings.query.filter_by(vendor_id=user_id).first()
-    month_count = 0
-    if settings and settings.template_options:
-        now = utcnow()
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        for doc_type in ('standalone_invoices', 'standalone_receipts'):
-            for doc in settings.template_options.get(doc_type, []):
-                try:
-                    created = datetime.fromisoformat(doc.get('created_at', ''))
-                    if created.replace(tzinfo=timezone.utc) >= month_start:
-                        month_count += 1
-                except Exception:
-                    pass
+    # Count this month's standalone invoices + receipts directly from the DB tables instead of JSON!
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    month_invoices = Invoice.query.filter(
+        Invoice.vendor_id == user_id,
+        Invoice.order_id == None,
+        Invoice.issue_date >= month_start
+    ).count()
+    
+    month_receipts = Receipt.query.filter(
+        Receipt.vendor_id == user_id,
+        Receipt.order_id == None,
+        Receipt.issued_at >= month_start
+    ).count()
+    
+    month_count = month_invoices + month_receipts
 
     # Check for an active subscription in the database
     from app.models.admin import VendorSubscription
@@ -848,7 +882,7 @@ def get_expenses():
         func.sum(Expense.amount)
     ).filter(
         Expense.vendor_id == user_id,
-        Expense.status == 'APPROVED'
+        Expense.status.in_(['APPROVED', 'PENDING'])
     ).scalar() or 0
     
     # This month
@@ -858,7 +892,7 @@ def get_expenses():
         func.sum(Expense.amount)
     ).filter(
         Expense.vendor_id == user_id,
-        Expense.status == 'APPROVED',
+        Expense.status.in_(['APPROVED', 'PENDING']),
         Expense.expense_date >= month_start
     ).scalar() or 0
     
@@ -910,7 +944,7 @@ def create_expense():
         is_recurring=data.get('is_recurring', False),
         recurrence_frequency=data.get('recurrence_frequency'),
         tags=data.get('tags', []),
-        status='PENDING'
+        status='APPROVED'
     )
     
     db.session.add(expense)
@@ -932,9 +966,10 @@ def update_expense(expense_id):
     if not expense:
         return jsonify({'message': 'Expense not found'}), 404
     
-    # Can't update approved expenses
-    if expense.status == 'APPROVED':
-        return jsonify({'message': 'Cannot update approved expense'}), 400
+    # Block edits only if approved by a different user (formal approval workflow)
+    # Self-managed vendors approve their own expenses, so we allow edits freely
+    if expense.status == 'APPROVED' and expense.approved_by and expense.approved_by != int(user_id):
+        return jsonify({'message': 'Cannot update an expense approved by another user'}), 400
     
     data = request.get_json() or {}
     
@@ -975,9 +1010,10 @@ def delete_expense(expense_id):
     if not expense:
         return jsonify({'message': 'Expense not found'}), 404
     
-    # Can't delete approved expenses
-    if expense.status == 'APPROVED':
-        return jsonify({'message': 'Cannot delete approved expense'}), 400
+    # Block deletion only if approved by a different user (formal approval workflow)
+    # Self-managed vendors can delete their own expenses regardless of status
+    if expense.status == 'APPROVED' and expense.approved_by and expense.approved_by != int(user_id):
+        return jsonify({'message': 'Cannot delete an expense approved by another user'}), 400
     
     db.session.delete(expense)
     db.session.commit()
@@ -1004,6 +1040,21 @@ def get_branding_settings():
         # Create default settings
         settings = BrandingSettings(vendor_id=user_id)
         db.session.add(settings)
+        db.session.commit()
+    
+    # Fallback to Storefront values if unconfigured (Task 5)
+    sf = Storefront.query.filter_by(vendor_id=user_id).first()
+    if sf:
+        if not settings.logo_url and sf.store_logo:
+            settings.logo_url = sf.store_logo
+        if not settings.business_address and sf.address:
+            settings.business_address = sf.address
+        if not settings.business_phone and sf.phone:
+            settings.business_phone = sf.phone
+        if not settings.business_email and user.email:
+            settings.business_email = user.email
+        if settings.primary_color == '#0b1b3b' and sf.theme_color:
+            settings.primary_color = sf.theme_color
         db.session.commit()
     
     return jsonify(settings.to_dict()), 200
