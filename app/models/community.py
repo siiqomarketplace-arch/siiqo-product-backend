@@ -19,6 +19,7 @@ class Article(db.Model):
     excerpt = db.Column(db.String(500), nullable=True)
 
     cover_image = db.Column(db.String(255), nullable=True)
+    category = db.Column(db.String(100), nullable=True)
     is_published = db.Column(db.Boolean, default=False)
 
     # SEO

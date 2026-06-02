@@ -331,9 +331,14 @@ def get_categories():
 def get_articles():
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 10)), 50)
+    category = request.args.get('category')
+    
+    query = Article.query.filter_by(is_published=True)
+    if category:
+        query = query.filter_by(category=category)
+        
     paginated = (
-        Article.query
-        .filter_by(is_published=True)
+        query
         .order_by(Article.created_at.desc())
         .paginate(page=page, per_page=per_page, error_out=False)
     )
@@ -342,6 +347,7 @@ def get_articles():
             "id": a.id,
             "title": a.title,
             "slug": a.slug,
+            "category": a.category,
             "excerpt": a.excerpt or (a.content[:150] + "..." if len(a.content) > 150 else a.content),
             "cover_image": a.cover_image,
             "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -359,6 +365,7 @@ def get_article_by_slug(slug):
     return jsonify({
         "id": a.id,
         "title": a.title,
+        "category": a.category,
         "content": a.content,
         "excerpt": a.excerpt,
         "cover_image": a.cover_image,

@@ -604,6 +604,7 @@ def handle_blog():
                 "id": a.id,
                 "title": a.title,
                 "slug": a.slug,
+                "category": a.category,
                 "excerpt": a.excerpt,
                 "cover_image": a.cover_image,
                 "status": "published" if a.is_published else "draft",
@@ -641,6 +642,7 @@ def handle_blog():
         admin_author_id=parsed_id,
         title=title,
         slug=slug,
+        category=data.get('category'),
         content=data.get('content', ''),
         excerpt=data.get('excerpt'),
         cover_image=cover_image_url,
@@ -694,6 +696,8 @@ def manage_blog_article(article_id):
             article.slug = re.sub(r'[^a-z0-9]+', '-', data['title'].lower()).strip('-')
     if 'slug' in data and data['slug']:
         article.slug = data['slug']
+    if 'category' in data:
+        article.category = data['category']
     if 'content' in data:
         article.content = data['content']
     if 'excerpt' in data:
