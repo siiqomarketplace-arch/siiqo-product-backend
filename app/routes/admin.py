@@ -638,6 +638,12 @@ def handle_blog():
         return jsonify({"message": "Title is required"}), 400
     slug = data.get('slug') or re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
 
+    # Ensure slug is unique
+    original_slug = slug
+    import uuid
+    while Article.query.filter_by(slug=slug).first():
+        slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
+
     new_article = Article(
         admin_author_id=parsed_id,
         title=title,
@@ -693,9 +699,22 @@ def manage_blog_article(article_id):
     if 'title' in data and data['title']:
         article.title = data['title']
         if not data.get('slug'):
-            article.slug = re.sub(r'[^a-z0-9]+', '-', data['title'].lower()).strip('-')
+            new_slug = re.sub(r'[^a-z0-9]+', '-', data['title'].lower()).strip('-')
+            # Ensure new slug is unique
+            if new_slug != article.slug:
+                original_slug = new_slug
+                import uuid
+                while Article.query.filter(Article.slug == new_slug, Article.id != article_id).first():
+                    new_slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
+                article.slug = new_slug
     if 'slug' in data and data['slug']:
-        article.slug = data['slug']
+        new_slug = data['slug']
+        if new_slug != article.slug:
+            original_slug = new_slug
+            import uuid
+            while Article.query.filter(Article.slug == new_slug, Article.id != article_id).first():
+                new_slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
+            article.slug = new_slug
     if 'category' in data:
         article.category = data['category']
     if 'content' in data:
