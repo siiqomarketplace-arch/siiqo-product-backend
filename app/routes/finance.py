@@ -944,7 +944,7 @@ def create_expense():
         is_recurring=data.get('is_recurring', False),
         recurrence_frequency=data.get('recurrence_frequency'),
         tags=data.get('tags', []),
-        status='APPROVED'
+        status='PENDING'
     )
     
     db.session.add(expense)
