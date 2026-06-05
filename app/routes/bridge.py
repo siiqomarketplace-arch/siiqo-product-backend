@@ -1114,11 +1114,17 @@ def apply_for_partnership():
     db.session.add(new_user)
     db.session.flush()
 
+    raw_exp = data.get('experience_years') or data.get('experience') or 0
+    try:
+        exp_years = int("".join(filter(str.isdigit, str(raw_exp))) or 0)
+    except Exception:
+        exp_years = 0
+
     partner_app = PartnerApplication(
         user_id=new_user.id,
         business_name=business_name,
         service_type=(data.get('partner_role') or data.get('service_type') or 'LOGISTICS').upper(),
-        experience_years=int(data.get('experience_years') or data.get('experience') or 0),
+        experience_years=exp_years,
         state_of_operation=data.get('state') or data.get('state_of_operation'),
         status='PENDING',
     )
