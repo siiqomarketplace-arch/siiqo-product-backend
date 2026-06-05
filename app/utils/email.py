@@ -10,13 +10,13 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
     # ── LOCAL DEV FALLBACK ────────────────────────────────────────────────────
     # If SMTP credentials are missing, print OTP to console instead of crashing.
     if not mail_server or not mail_username or not mail_password:
-        print("\n" + "="*60)
-        print("⚠  SMTP CREDENTIALS NOT SET IN .env — EMAIL NOT SENT")
-        print(f"   TO      : {to_email}")
-        print(f"   SUBJECT : {subject}")
+        logger.info("\n" + "="*60)
+        logger.info("⚠  SMTP CREDENTIALS NOT SET IN .env — EMAIL NOT SENT")
+        logger.info(f"   TO      : {to_email}")
+        logger.info(f"   SUBJECT : {subject}")
         if 'otp' in context:
-            print(f"   >>>  TEST OTP: {context['otp']}  <<<")
-        print("="*60 + "\n")
+            logger.info(f"   >>>  TEST OTP: {context['otp']}  <<<")
+        logger.info("="*60 + "\n")
         return
 
     # ── BUILD MESSAGE ─────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
                 server.login(mail_username, mail_password)
                 server.send_message(msg)
 
-        print(f"[EMAIL OK] Sent '{subject}' to {to_email}")
+        logger.info(f"[EMAIL OK] Sent '{subject}' to {to_email}")
 
     except Exception as e:
         import traceback
@@ -72,7 +72,7 @@ def send_siiqo_email(to_email, subject, template_name, **context):
         html_content = render_template(f"emails/{template_name}.html", **context)
     except Exception as tmpl_err:
         html_content = f"<h1>Siiqo</h1><p>{subject}</p><p>{context}</p>"
-        print(f"[EMAIL WARN] Template render failed ({tmpl_err}), using plain fallback.")
+        logger.info(f"[EMAIL WARN] Template render failed ({tmpl_err}), using plain fallback.")
 
     # Dispatch to background thread
     thread = threading.Thread(

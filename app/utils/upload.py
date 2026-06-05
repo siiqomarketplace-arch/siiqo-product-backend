@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import os
 import uuid
 import boto3
@@ -46,7 +48,7 @@ def save_uploaded_file(file_obj, subfolder="general"):
             )
             return f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
         except Exception as e:
-            print(f"[WARN] S3 upload failed, falling back to local storage: {e}")
+            logger.info(f"[WARN] S3 upload failed, falling back to local storage: {e}")
             # Fall through to local storage below
             
     # Fallback to local storage if S3 is not configured

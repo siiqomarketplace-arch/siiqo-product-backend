@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import os
 from algoliasearch.search_client import SearchClient
 
@@ -8,7 +10,7 @@ def get_algolia_client():
         try:
             return SearchClient.create(app_id, write_key)
         except Exception as e:
-            print(f"Error initializing Algolia client: {e}")
+            logger.info(f"Error initializing Algolia client: {e}")
     return None
 
 def sync_product_to_algolia(product):
@@ -36,7 +38,7 @@ def sync_product_to_algolia(product):
         }
         index.save_object(record)
     except Exception as e:
-        print(f"Algolia Sync Error (Product): {e}")
+        logger.info(f"Algolia Sync Error (Product): {e}")
 
 def delete_product_from_algolia(product_id):
     client = get_algolia_client()
@@ -46,7 +48,7 @@ def delete_product_from_algolia(product_id):
         index = client.init_index("siiqo_products")
         index.delete_object(str(product_id))
     except Exception as e:
-        print(f"Algolia Delete Error (Product): {e}")
+        logger.info(f"Algolia Delete Error (Product): {e}")
 
 def sync_post_to_algolia(post):
     client = get_algolia_client()
@@ -73,7 +75,7 @@ def sync_post_to_algolia(post):
         }
         index.save_object(record)
     except Exception as e:
-        print(f"Algolia Sync Error (Post): {e}")
+        logger.info(f"Algolia Sync Error (Post): {e}")
 
 def delete_post_from_algolia(post_id):
     client = get_algolia_client()
@@ -83,4 +85,4 @@ def delete_post_from_algolia(post_id):
         index = client.init_index("siiqo_community_posts")
         index.delete_object(str(post_id))
     except Exception as e:
-        print(f"Algolia Delete Error (Post): {e}")
+        logger.info(f"Algolia Delete Error (Post): {e}")

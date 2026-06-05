@@ -2,6 +2,8 @@
 escrow_tasks.py — Background tasks for escrow management
 Handles auto-release, dispute timeouts, and payment reminders
 """
+import logging
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone, timedelta
 from app.extensions import db
 from app.models.escrow import EscrowTransaction, EscrowStatus
@@ -42,7 +44,7 @@ def auto_release_escrow():
     Auto-release escrow funds after 72 hours of delivery confirmation.
     Run this task every hour via cron job or scheduler.
     """
-    print(f"[{utcnow()}] Running auto-release escrow task...")
+    logger.info(f"[{utcnow()}] Running auto-release escrow task...")
     
     # Find escrow transactions that are DELIVERED and older than 72 hours
     cutoff_time = utcnow() - timedelta(hours=72)
@@ -100,14 +102,14 @@ def auto_release_escrow():
             db.session.commit()
             released_count += 1
             
-            print(f"  ✓ Auto-released escrow {escrow.transaction_number} for Order #{order.id}")
+            logger.info(f"  ✓ Auto-released escrow {escrow.transaction_number} for Order #{order.id}")
             
         except Exception as e:
             db.session.rollback()
-            print(f"  ✗ Error auto-releasing escrow {escrow.transaction_number}: {e}")
+            logger.info(f"  ✗ Error auto-releasing escrow {escrow.transaction_number}: {e}")
             continue
     
-    print(f"[{utcnow()}] Auto-release task completed. Released {released_count} escrow(s).")
+    logger.info(f"[{utcnow()}] Auto-release task completed. Released {released_count} escrow(s).")
     return released_count
 
 
@@ -116,7 +118,7 @@ def send_delivery_reminders():
     Send reminders to buyers to confirm delivery.
     Run this task daily.
     """
-    print(f"[{utcnow()}] Running delivery reminder task...")
+    logger.info(f"[{utcnow()}] Running delivery reminder task...")
     
     # Find escrow transactions that are DELIVERED for 48 hours but not released
     cutoff_time = utcnow() - timedelta(hours=48)
@@ -159,14 +161,14 @@ def send_delivery_reminders():
             db.session.commit()
             reminded_count += 1
             
-            print(f"  ✓ Sent delivery reminder for Order #{order.id}")
+            logger.info(f"  ✓ Sent delivery reminder for Order #{order.id}")
             
         except Exception as e:
             db.session.rollback()
-            print(f"  ✗ Error sending reminder for escrow {escrow.transaction_number}: {e}")
+            logger.info(f"  ✗ Error sending reminder for escrow {escrow.transaction_number}: {e}")
             continue
     
-    print(f"[{utcnow()}] Delivery reminder task completed. Sent {reminded_count} reminder(s).")
+    logger.info(f"[{utcnow()}] Delivery reminder task completed. Sent {reminded_count} reminder(s).")
     return reminded_count
 
 
@@ -175,7 +177,7 @@ def check_pending_payments():
     Check for orders stuck in PENDING_PAYMENT for more than 24 hours and cancel them.
     Run this task daily.
     """
-    print(f"[{utcnow()}] Running pending payment check task...")
+    logger.info(f"[{utcnow()}] Running pending payment check task...")
     
     # Find escrow transactions that are PENDING_PAYMENT for more than 24 hours
     cutoff_time = utcnow() - timedelta(hours=24)
@@ -209,31 +211,31 @@ def check_pending_payments():
             db.session.commit()
             cancelled_count += 1
             
-            print(f"  ✓ Cancelled stale order #{order.id}")
+            logger.info(f"  ✓ Cancelled stale order #{order.id}")
             
         except Exception as e:
             db.session.rollback()
-            print(f"  ✗ Error cancelling escrow {escrow.transaction_number}: {e}")
+            logger.info(f"  ✗ Error cancelling escrow {escrow.transaction_number}: {e}")
             continue
     
-    print(f"[{utcnow()}] Pending payment check completed. Cancelled {cancelled_count} order(s).")
+    logger.info(f"[{utcnow()}] Pending payment check completed. Cancelled {cancelled_count} order(s).")
     return cancelled_count
 
 
 # Main task runner (call this from cron job or scheduler)
 def run_all_escrow_tasks():
     """Run all escrow background tasks"""
-    print("=" * 60)
-    print("ESCROW BACKGROUND TASKS")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("ESCROW BACKGROUND TASKS")
+    logger.info("=" * 60)
     
     auto_release_escrow()
     send_delivery_reminders()
     check_pending_payments()
     
-    print("=" * 60)
-    print("ALL TASKS COMPLETED")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("ALL TASKS COMPLETED")
+    logger.info("=" * 60)
 
 
 if __name__ == '__main__':

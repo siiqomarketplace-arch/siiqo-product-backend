@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import os
 import requests
 from bs4 import BeautifulSoup
@@ -84,7 +86,7 @@ def scrape_product_url(url):
             }
         }
     except Exception as e:
-        print(f"Bright Data Scraping Error: {e}")
+        logger.info(f"Bright Data Scraping Error: {e}")
         return {
             "success": False,
             "message": str(e)
@@ -148,7 +150,7 @@ def analyze_storefront_url(url):
                     colors = ['#{:02x}{:02x}{:02x}'.format(r, g, b) for r, g, b in palette]
                     os.remove(tmp_path)
             except Exception as ce:
-                print(f"Color extraction error: {ce}")
+                logger.info(f"Color extraction error: {ce}")
                 
         return {
             "success": True,
@@ -160,7 +162,7 @@ def analyze_storefront_url(url):
             }
         }
     except Exception as e:
-        print(f"Bright Data Scraping Error: {e}")
+        logger.info(f"Bright Data Scraping Error: {e}")
         return {
             "success": False,
             "message": str(e)

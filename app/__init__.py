@@ -23,25 +23,15 @@ def create_app(config_name: str | None = None) -> Flask:
     migrate.init_app(app, db)
 
     # -----------------------------------------------------------------------
-    # Auto-apply pending database migrations on startup (production-safe)
-    # This ensures schema changes are applied when Elastic Beanstalk redeploys
-    # without requiring direct RDS access from a local machine.
+    # Basic Logging Configuration
     # -----------------------------------------------------------------------
-    with app.app_context():
-        try:
-            from flask_migrate import upgrade as db_upgrade
-            db_upgrade()
-        except Exception as _migration_err:
-            # Log but never crash the app — a failed migration is recoverable
-            import logging
-            logging.getLogger(__name__).warning(
-                "Auto-migration skipped or failed (Exception): %s", _migration_err
-            )
-        except SystemExit as _sys_err:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Auto-migration skipped or failed (SystemExit): %s", _sys_err
-            )
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    logger = logging.getLogger(__name__)
+    logger.info("Initializing Siiqo backend...")
     jwt.init_app(app)
     cors.init_app(app, resources={r"/api/*": {"origins": app.config['CORS_ORIGINS']}})
     limiter.init_app(app)

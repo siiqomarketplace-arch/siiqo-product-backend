@@ -2,6 +2,8 @@
 negotiation_tasks.py — Background tasks for negotiation expiry
 Run alongside escrow_tasks via cron (e.g. every hour).
 """
+import logging
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 
 from app.extensions import db
@@ -64,10 +66,10 @@ def expire_pending_negotiations():
             ))
             db.session.commit()
             expired_count += 1
-            print(f"  ✓ Expired negotiation #{neg.id}")
+            logger.info(f"  ✓ Expired negotiation #{neg.id}")
         except Exception as e:
             db.session.rollback()
-            print(f"  ✗ Error expiring negotiation #{neg.id}: {e}")
+            logger.info(f"  ✗ Error expiring negotiation #{neg.id}: {e}")
 
     # ── 2. Accepted-offer checkout-window expiry ─────────────────────────
     accepted_stale = NegotiationRequest.query.filter(
@@ -95,12 +97,12 @@ def expire_pending_negotiations():
             ))
             db.session.commit()
             expired_count += 1
-            print(f"  ✓ Expired accepted negotiation #{neg.id} (checkout window)")
+            logger.info(f"  ✓ Expired accepted negotiation #{neg.id} (checkout window)")
         except Exception as e:
             db.session.rollback()
-            print(f"  ✗ Error expiring accepted negotiation #{neg.id}: {e}")
+            logger.info(f"  ✗ Error expiring accepted negotiation #{neg.id}: {e}")
 
-    print(f"[{now}] Negotiation expiry task done. Expired {expired_count} negotiation(s).")
+    logger.info(f"[{now}] Negotiation expiry task done. Expired {expired_count} negotiation(s).")
     return expired_count
 
 
@@ -144,9 +146,9 @@ def send_accepted_offer_reminders():
             reminded += 1
         except Exception as e:
             db.session.rollback()
-            print(f"  ✗ Reminder error for negotiation #{neg.id}: {e}")
+            logger.info(f"  ✗ Reminder error for negotiation #{neg.id}: {e}")
 
-    print(f"[{now}] Sent {reminded} accepted-offer reminder(s).")
+    logger.info(f"[{now}] Sent {reminded} accepted-offer reminder(s).")
     return reminded
 
 
