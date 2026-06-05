@@ -8,6 +8,7 @@ import uuid as _uuid
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from sqlalchemy.orm import joinedload
 
 from app.extensions import db
 from app.models.user import User, Storefront, UserRole
@@ -151,8 +152,22 @@ def get_settings():
 
 
 # ---------------------------------------------------------------------------
-# POST /vendor/onboard
+# POST /vendor/onboard & GET /vendor/check-slug
 # ---------------------------------------------------------------------------
+
+@vendor_bp.route('/check-slug', methods=['GET'])
+@jwt_required()
+def check_slug():
+    slug = request.args.get('slug', '').lower().strip()
+    if not slug:
+        return jsonify({"available": False, "message": "Slug is required"}), 400
+        
+    RESERVED_WORDS = ['api', 'admin', 'www', 'auth', 'cart', 'checkout', 'dashboard', 'marketplace', 'vendor', 'buyer', 'community', 'finance-tools']
+    if slug in RESERVED_WORDS:
+        return jsonify({"available": False, "message": "Reserved keyword"}), 200
+        
+    exists = Storefront.query.filter_by(store_slug=slug).first() is not None
+    return jsonify({"available": not exists}), 200
 
 @vendor_bp.route('/onboard', methods=['POST'])
 @jwt_required()
@@ -178,11 +193,17 @@ def onboard_vendor():
     if not store_name:
         return jsonify({"message": "Store name is required"}), 400
 
-    # Auto-generate unique slug
-    base_slug = re.sub(r'[^a-z0-9]+', '-', store_name.lower()).strip('-')
+    # Auto-generate unique slug or use provided slug
+    base_slug = data.get('store_slug') or re.sub(r'[^a-z0-9]+', '-', store_name.lower()).strip('-')
     store_slug = base_slug
+    
+    # RESERVED WORDS CHECK
+    RESERVED_WORDS = ['api', 'admin', 'www', 'auth', 'cart', 'checkout', 'dashboard', 'marketplace', 'vendor', 'buyer', 'community', 'finance-tools']
+    if store_slug in RESERVED_WORDS:
+        return jsonify({"message": f"The store URL '{store_slug}' is a reserved system keyword. Please choose another."}), 400
+        
     if Storefront.query.filter_by(store_slug=store_slug).first():
-        store_slug = f"{base_slug}-{_uuid.uuid4().hex[:6]}"
+        return jsonify({"message": f"The store URL '{store_slug}' is already taken. Please choose another."}), 400
 
     user.role = UserRole.VENDOR
 
@@ -619,8 +640,17 @@ def my_products():
     if not user or not sf:
         return jsonify([]), 200
 
-    products = Product.query.filter_by(storefront_id=sf.id).limit(500).all()
-    return jsonify([{
+    page = request.args.get('page', type=int)
+    limit = request.args.get('limit', type=int)
+
+    query = Product.query.filter_by(storefront_id=sf.id).options(joinedload(Product.category))
+    
+    if page and limit:
+        paginated = query.paginate(page=page, per_page=limit, error_out=False)
+        products = paginated.items
+    else:
+        products = query.limit(500).all()
+    products_data = [{
         "id": p.id,
         "name": p.name,
         "price": str(p.price),
@@ -637,7 +667,11 @@ def my_products():
         "floor_price": str(p.floor_price) if p.floor_price else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,  # camelCase alias
-    } for p in products]), 200
+    } for p in products]
+
+    if page and limit:
+        return jsonify({"data": products_data, "total": paginated.total, "pages": paginated.pages}), 200
+    return jsonify(products_data), 200
 
 
 # ---------------------------------------------------------------------------
@@ -652,8 +686,23 @@ def get_orders():
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
 
-    orders = Order.query.filter_by(vendor_id=user.id).order_by(Order.created_at.desc()).limit(500).all()
-    return jsonify([{
+    page = request.args.get('page', type=int)
+    limit = request.args.get('limit', type=int)
+
+    # N+1 Optimization
+    from app.models.order import OrderItem
+    query = Order.query.filter_by(vendor_id=user.id).order_by(Order.created_at.desc()).options(
+        joinedload(Order.buyer),
+        joinedload(Order.items).joinedload(OrderItem.product)
+    )
+
+    if page and limit:
+        paginated = query.paginate(page=page, per_page=limit, error_out=False)
+        orders = paginated.items
+    else:
+        orders = query.limit(500).all()
+
+    orders_data = [{
         "id": o.id,
         "total_amount": str(o.total_amount),
         "status": o.status,
@@ -669,7 +718,11 @@ def get_orders():
             "quantity": item.quantity,
             "price": str(item.price_at_purchase),
         } for item in o.items],
-    } for o in orders]), 200
+    } for o in orders]
+
+    if page and limit:
+        return jsonify({"data": orders_data, "total": paginated.total, "pages": paginated.pages}), 200
+    return jsonify(orders_data), 200
 
 
 @vendor_bp.route('/orders/<int:order_id>/status', methods=['PUT', 'PATCH'])
@@ -722,7 +775,9 @@ def update_order_status(order_id):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return jsonify({"message": "Failed to update order status", "error": str(e)}), 500
+        import logging, traceback
+        logging.error(f"Failed to update order status: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"message": "Failed to update order status", "error": "Internal database error."}), 500
 
     return jsonify({"message": f"Order status updated to {new_status}", "status": "success"}), 200
 
@@ -777,19 +832,39 @@ def get_customers():
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
 
-    profiles = CustomerProfile.query.filter_by(vendor_id=user.id).limit(500).all()
+    page = request.args.get('page', type=int)
+    limit = request.args.get('limit', type=int)
+
+    query = CustomerProfile.query.filter_by(vendor_id=user.id).options(joinedload(CustomerProfile.buyer))
+    
+    if page and limit:
+        paginated = query.paginate(page=page, per_page=limit, error_out=False)
+        profiles = paginated.items
+    else:
+        profiles = query.limit(500).all()
+
+    customers_data = [{
+        "buyer_id": p.buyer_id,
+        "name": p.buyer.full_name if p.buyer else "Unknown",
+        "email": p.buyer.email if p.buyer else "",
+        "total_spent": str(p.total_spent),
+        "total_orders": p.total_orders,
+        "segment": p.segment,
+        "last_purchase_date": p.last_purchase_date.isoformat() if p.last_purchase_date else None,
+        "tags": p.tags if hasattr(p, 'tags') else [],
+    } for p in profiles]
+
+    if page and limit:
+        return jsonify({
+            "status": "success",
+            "customers": customers_data,
+            "total": paginated.total,
+            "pages": paginated.pages
+        }), 200
+
     return jsonify({
         "status": "success",
-        "customers": [{
-            "buyer_id": p.buyer_id,
-            "name": p.buyer.full_name if p.buyer else "Unknown",
-            "email": p.buyer.email if p.buyer else "",
-            "total_spent": str(p.total_spent),
-            "total_orders": p.total_orders,
-            "segment": p.segment,
-            "last_purchase_date": p.last_purchase_date.isoformat() if p.last_purchase_date else None,
-            "tags": p.tags if hasattr(p, 'tags') else [],
-        } for p in profiles],
+        "customers": customers_data,
     }), 200
 
 
