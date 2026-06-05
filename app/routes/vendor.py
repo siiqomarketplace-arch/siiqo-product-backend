@@ -750,6 +750,9 @@ def update_order_status(order_id):
     if new_status not in ALLOWED_STATUSES:
         return jsonify({"message": f"Invalid status. Allowed: {', '.join(ALLOWED_STATUSES)}"}), 400
 
+    if order.payment_method == 'ESCROW' and new_status == 'COMPLETED':
+        return jsonify({"message": "You cannot manually complete an Escrow order. The buyer must confirm delivery to release funds."}), 400
+
     order.status = new_status
 
     # Notify buyer of the status change
