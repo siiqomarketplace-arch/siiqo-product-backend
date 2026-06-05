@@ -333,6 +333,27 @@ def release_escrow():
     if order.buyer_id != int(user_id):
         return jsonify({"message": "Only the buyer can release funds"}), 403
 
+    # Fallback: check Payscrow directly in case webhook was missed
+    if escrow.status == EscrowStatus.PENDING_PAYMENT and escrow.transaction_number:
+        payscrow_key, base_url = _payscrow_env()
+        headers = {"BrokerApiKey": payscrow_key}
+        try:
+            resp = requests.get(f"{base_url}/api/v3/marketplace/transactions/{escrow.transaction_number}/status", headers=headers)
+            if resp.status_code == 200:
+                status_data = resp.json()
+                p_status = str(status_data.get('paymentStatus', '')).lower()
+                if p_status in ['paid', 'completed', 'pendingsettlement', 'processing']:
+                    escrow.status = EscrowStatus.IN_ESCROW
+                    escrow.paid_at = _utcnow()
+                    if status_data.get('escrowCode'):
+                        escrow.escrow_code = status_data.get('escrowCode')
+                    if status_data.get('transactionId'):
+                        escrow.payscrow_transaction_id = status_data.get('transactionId')
+                    db.session.commit()
+        except Exception as e:
+            import logging
+            logging.error(f"Fallback status check failed: {e}")
+
     if escrow.status not in [EscrowStatus.IN_ESCROW, EscrowStatus.DELIVERED, EscrowStatus.SHIPPED]:
         return jsonify({"message": f"Cannot release funds at status: {escrow.status}"}), 400
 
