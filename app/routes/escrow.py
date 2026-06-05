@@ -176,8 +176,10 @@ def payscrow_webhook():
     payment_status = data.get('paymentStatus')
     escrow_code = data.get('escrowCode')
     payscrow_transaction_id = data.get('transactionId')
+    
+    logging.info(f"PAYSCROW WEBHOOK RECEIVED: txn_ref={txn_ref}, payment_status={payment_status}, escrow_code={escrow_code}")
 
-    if payment_status == 'Paid' and txn_ref:
+    if payment_status and str(payment_status).lower() == 'paid' and txn_ref:
         escrow = EscrowTransaction.query.filter_by(transaction_number=txn_ref).first()
         if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
             escrow.status = EscrowStatus.IN_ESCROW
