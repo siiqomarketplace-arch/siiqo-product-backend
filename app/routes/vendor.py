@@ -739,7 +739,8 @@ def update_order_status(order_id):
     if order.vendor_id != user.id:
         return jsonify({"message": "Unauthorized"}), 403
 
-    new_status = ((request.get_json() or {}).get('status') or '').upper().strip()
+    body = request.get_json() or {}
+    new_status = (body.get('status') or '').upper().strip()
     if not new_status:
         return jsonify({"message": "Status is required"}), 400
 
@@ -753,7 +754,36 @@ def update_order_status(order_id):
     if order.payment_method == 'ESCROW' and new_status == 'COMPLETED':
         return jsonify({"message": "You cannot manually complete an Escrow order. The buyer must confirm delivery to release funds."}), 400
 
+    # Stock Restoration
+    if new_status == 'CANCELLED' and order.status != 'CANCELLED':
+        for item in order.items:
+            if item.product:
+                item.product.stock_quantity = (item.product.stock_quantity or 0) + item.quantity
+        
+        # Also sync EscrowTransaction status if applicable
+        from app.models.escrow import EscrowTransaction, EscrowStatus
+        if order.payment_method == 'ESCROW':
+            escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+            if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
+                escrow.status = EscrowStatus.CANCELLED
+
     order.status = new_status
+
+    # Save tracking number if provided alongside the status update
+    tracking_number = (body.get('tracking_number') or body.get('trackingNumber') or '').strip()
+    if tracking_number:
+        order.tracking_number = tracking_number
+
+    # Keep EscrowTransaction.status in sync with the order shipping status.
+    # This is required so that auto-release timer and delivery reminders work correctly —
+    # both tasks query EscrowTransaction.status == DELIVERED, not Order.status.
+    from app.models.escrow import EscrowTransaction, EscrowStatus
+    if order.payment_method == 'ESCROW' and new_status in ('SHIPPED', 'DELIVERED'):
+        escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+        if escrow and escrow.status == EscrowStatus.IN_ESCROW and new_status == 'SHIPPED':
+            escrow.status = EscrowStatus.SHIPPED
+        elif escrow and escrow.status in (EscrowStatus.IN_ESCROW, EscrowStatus.SHIPPED) and new_status == 'DELIVERED':
+            escrow.status = EscrowStatus.DELIVERED
 
     # Notify buyer of the status change
     from app.models.communication import Notification

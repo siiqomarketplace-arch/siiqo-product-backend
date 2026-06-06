@@ -97,6 +97,9 @@ def add_to_cart():
     if not product or not product.is_active:
         return jsonify({"message": "Product is not available"}), 400
 
+    if product.vendor_id == int(user_id):
+        return jsonify({"message": "You cannot purchase your own product."}), 403
+
     if product.stock_quantity < quantity:
         return jsonify({"message": f"Only {product.stock_quantity} in stock"}), 400
 

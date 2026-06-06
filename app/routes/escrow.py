@@ -75,55 +75,65 @@ from app.services.escrow import get_escrow_provider
 def initiate_escrow():
     user_id = get_jwt_identity()
     data = request.get_json() or {}
-    order_id = data.get('orderId') or data.get('order_id')
+    order_id_param = data.get('orderId') or data.get('order_id')
 
-    order = db.session.get(Order, order_id)
-    if not order:
+    # Handle comma-separated list of order IDs for Unified Payment
+    order_ids = [int(oid) for oid in str(order_id_param).split(',') if oid.isdigit()]
+    if not order_ids:
         return jsonify({"message": "Order not found"}), 404
-    if order.buyer_id != int(user_id):
-        return jsonify({"message": "Unauthorized"}), 403
 
-    escrow_txn = EscrowTransaction.query.filter_by(order_id=order.id).first()
-    if not escrow_txn or not escrow_txn.payment_link:
-        vendor_bank = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
-        if not vendor_bank:
-            return jsonify({"message": "Vendor has not set up a receiving bank account."}), 400
+    orders = Order.query.filter(Order.id.in_(order_ids)).all()
+    if not orders:
+        return jsonify({"message": "Orders not found"}), 404
 
-        existing_txn_number = escrow_txn.transaction_number if escrow_txn else None
+    for order in orders:
+        if order.buyer_id != int(user_id):
+            return jsonify({"message": "Unauthorized"}), 403
 
-        # Delegate logic to Escrow Service Provider
-        provider = get_escrow_provider()
-        result = provider.initiate_transaction(order, vendor_bank, existing_txn_number)
-        
-        if not result.get("success"):
-            return jsonify({"message": result.get("error_message") or "Escrow init failed"}), 400
+    escrow_txns = EscrowTransaction.query.filter(EscrowTransaction.order_id.in_([o.id for o in orders])).all()
+    existing_txn_number = next((e.transaction_number for e in escrow_txns if e.payment_link), None)
 
+    # Delegate logic to Escrow Service Provider (Unified Payment)
+    provider = get_escrow_provider()
+    result = provider.initiate_transaction(orders, existing_txn_number)
+    
+    if not result.get("success"):
+        return jsonify({"message": result.get("error_message") or "Escrow init failed"}), 400
+
+    txn_map = {e.order_id: e for e in escrow_txns}
+    
+    for order in orders:
+        escrow_txn = txn_map.get(order.id)
         if not escrow_txn:
+            # fee_amount for an individual order in a master transaction
+            # the result['fee_amount'] is total, so we calculate proportional
+            individual_fee = round(float(order.total_amount) * 0.12, 2)
             escrow_txn = EscrowTransaction(
                 order_id=order.id,
                 transaction_number=result['transaction_number'],
                 status=EscrowStatus.PENDING_PAYMENT,
-                amount=result['amount'],
-                fee_percent=0.00,
-                fee_amount=result['fee_amount'],
+                amount=float(order.total_amount),
+                fee_percent=12.00,
+                fee_amount=individual_fee,
                 payment_link=result['payment_link'],
                 payscrow_transaction_id=result['provider_transaction_id'],
                 payscrow_ref=result['provider_reference'],
             )
             db.session.add(escrow_txn)
         else:
+            escrow_txn.transaction_number = result['transaction_number']
             escrow_txn.payment_link = result['payment_link']
             escrow_txn.payscrow_transaction_id = result['provider_transaction_id']
             escrow_txn.payscrow_ref = result['provider_reference']
             
-        db.session.commit()
+    db.session.commit()
 
     return jsonify({
         "success": True,
-        "paymentLink": escrow_txn.payment_link,
-        "transactionNumber": escrow_txn.transaction_number,
-        "amount": str(escrow_txn.amount),
-        "status": escrow_txn.status,
+        "paymentLink": result['payment_link'],
+        "transactionNumber": result['transaction_number'],
+        "amount": str(result['amount']),
+        "status": EscrowStatus.PENDING_PAYMENT,
     }), 200
 
 
@@ -164,10 +174,14 @@ def payscrow_webhook():
     sig_header = request.headers.get('X-PayScrow-Signature', '')
     secret = os.environ.get('PAYSCROW_WEBHOOK_SECRET', '')
 
-    if secret:
-        expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, sig_header):
-            return jsonify({"message": "Invalid signature"}), 401
+    if not secret:
+        logging.error("PAYSCROW_WEBHOOK_SECRET is not configured. Failing closed.")
+        return jsonify({"message": "Webhook configuration error"}), 500
+
+    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig_header):
+        logging.warning("Invalid PayScrow webhook signature")
+        return jsonify({"message": "Invalid signature"}), 401
 
     data = request.get_json(force=True) or {}
     
@@ -180,108 +194,81 @@ def payscrow_webhook():
     logging.info(f"PAYSCROW WEBHOOK RECEIVED: txn_ref={txn_ref}, payment_status={payment_status}, escrow_code={escrow_code}")
 
     if payment_status and str(payment_status).lower() == 'paid' and txn_ref:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=txn_ref).first()
-        if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
-            escrow.status = EscrowStatus.IN_ESCROW
-            escrow.paid_at = _utcnow()
-            escrow.escrow_code = escrow_code
-            if payscrow_transaction_id:
-                escrow.payscrow_transaction_id = payscrow_transaction_id
+        escrows = EscrowTransaction.query.filter_by(transaction_number=txn_ref).all()
+        processed_orders = []
+        
+        for escrow in escrows:
+            if escrow.status == EscrowStatus.PENDING_PAYMENT:
+                escrow.status = EscrowStatus.IN_ESCROW
+                escrow.paid_at = _utcnow()
+                escrow.escrow_code = escrow_code
+                if payscrow_transaction_id:
+                    escrow.payscrow_transaction_id = payscrow_transaction_id
 
-            order = escrow.order
-            if order:
-                order.status = 'PAID'
-                # Notify buyer
-                db.session.add(Notification(
-                    user_id=order.buyer_id,
-                    title="Payment Confirmed",
-                    message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
-                    type="ESCROW",
-                    order_id=order.id,
-                ))
-                # Notify vendor
-                db.session.add(Notification(
-                    user_id=order.vendor_id,
-                    title="Payment Received in Escrow",
-                    message=f"Payment for Order #{order.id} is secured in escrow. Please ship the order.",
-                    type="ESCROW",
-                    order_id=order.id,
-                ))
-                
-                # Send Emails
-                from app.utils.email import send_siiqo_email
-                from app.models.user import User
-                
-                buyer = db.session.get(User, order.buyer_id)
-                if buyer:
-                    try:
-                        send_siiqo_email(
-                            to_email=buyer.email,
-                            subject=f"Order Confirmation #{order.id} - Siiqo",
-                            template_name="order_confirmation",
-                            first_name=buyer.first_name or "there",
-                            order_id=order.id,
-                            payment_method="ESCROW",
-                        )
-                    except Exception as e:
-                        import logging
-                        logging.warning(f"[EMAIL WARN] Failed to send webhook order confirmation to buyer: {e}")
+                order = escrow.order
+                if order:
+                    order.status = 'PAID'
+                    processed_orders.append((escrow, order))
+                    # Notify buyer
+                    db.session.add(Notification(
+                        user_id=order.buyer_id,
+                        title="Payment Confirmed",
+                        message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
+                        type="ESCROW",
+                        order_id=order.id,
+                    ))
+                    # Notify vendor
+                    db.session.add(Notification(
+                        user_id=order.vendor_id,
+                        title="Payment Received in Escrow",
+                        message=f"Payment for Order #{order.id} is secured in escrow. Please ship the order.",
+                        type="ESCROW",
+                        order_id=order.id,
+                    ))
 
-                vendor = db.session.get(User, order.vendor_id)
-                if vendor:
-                    try:
-                        send_siiqo_email(
-                            to_email=vendor.email,
-                            subject="New Escrow Order - Siiqo",
-                            template_name="order_received_vendor",
-                            first_name=vendor.first_name or "Vendor",
-                            order_id=order.id,
-                            total_amount=f"₦{float(order.total_amount):,.2f}",
-                            payment_method="ESCROW"
-                        )
-                    except Exception as e:
-                        import logging
-                        logging.warning(f"[EMAIL WARN] Failed to send webhook order received to vendor: {e}")
+        db.session.commit()
 
-            db.session.commit()
+        # Send transactional emails AFTER commit (non-blocking — failures don't affect the DB state)
+        from app.utils.email import send_siiqo_email
+        from app.models.user import User
 
-            # Send Email Notifications AFTER commit
-            if order:
-                from app.utils.email import send_siiqo_email
-                # Email Buyer
-                if order.buyer:
-                    try:
-                        send_siiqo_email(
-                            to_email=order.buyer.email,
-                            subject="Siiqo Payment Secured",
-                            template_name="payment_escrow",
-                            first_name=order.buyer.first_name or "Buyer",
-                            order_id=order.id,
-                            amount=f"₦{escrow.amount:,.2f}"
-                        )
-                        # And order confirmation
-                        send_siiqo_email(
-                            to_email=order.buyer.email,
-                            subject="Siiqo Order Confirmation",
-                            template_name="order_confirmation",
-                            first_name=order.buyer.first_name or "Buyer",
-                            order_id=order.id
-                        )
-                    except Exception:
-                        pass
-                
-                # Email Vendor
-                if order.vendor:
-                    try:
-                        send_siiqo_email(
-                            to_email=order.vendor.email,
-                            subject="New Siiqo Order Received!",
-                            template_name="order_received_vendor",
-                            vendor_name=order.vendor.first_name or "Vendor",
-                            order_id=order.id
-                        )
-                    except Exception:
-                        pass
+        for escrow, order in processed_orders:
+            buyer = db.session.get(User, order.buyer_id)
+            if buyer:
+                try:
+                    send_siiqo_email(
+                        to_email=buyer.email,
+                        subject=f"Order Confirmation #{order.id} - Siiqo",
+                        template_name="order_confirmation",
+                        first_name=buyer.first_name or "there",
+                        order_id=order.id,
+                        payment_method="ESCROW",
+                    )
+                    send_siiqo_email(
+                        to_email=buyer.email,
+                        subject="Siiqo Payment Secured",
+                        template_name="payment_escrow",
+                        first_name=buyer.first_name or "Buyer",
+                        order_id=order.id,
+                        amount=f"₦{float(escrow.amount):,.2f}",
+                    )
+                except Exception as e:
+                    logging.warning(f"[EMAIL WARN] Failed to send buyer emails for Order #{order.id}: {e}")
+
+            vendor = db.session.get(User, order.vendor_id)
+            if vendor:
+                try:
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject="New Escrow Order - Siiqo",
+                        template_name="order_received_vendor",
+                        first_name=vendor.first_name or "Vendor",
+                        order_id=order.id,
+                        total_amount=f"₦{float(order.total_amount):,.2f}",
+                        payment_method="ESCROW",
+                    )
+                except Exception as e:
+                    logging.warning(f"[EMAIL WARN] Failed to send vendor email for Order #{order.id}: {e}")
 
     return jsonify({"received": True}), 200
 
@@ -393,21 +380,9 @@ def release_escrow():
         description=f"Payout for Order #{order.id}",
     )
     
-    # Since Payscrow paid them directly to their bank, write a matching DEBIT so balance remains accurate
-    from app.models.finance import Ledger as L
-    from sqlalchemy import func
-    credits = db.session.query(func.sum(L.amount)).filter_by(vendor_id=order.vendor_id, transaction_type='CREDIT').scalar() or 0
-    debits = db.session.query(func.sum(L.amount)).filter_by(vendor_id=order.vendor_id, transaction_type='DEBIT').scalar() or 0
-    balance_after_debit = float(credits) - float(debits) - net_amount
-    
-    db.session.add(L(
-        vendor_id=order.vendor_id,
-        transaction_type='DEBIT',
-        amount=net_amount,
-        description=f"Auto-Settled via Payscrow (Order #{order.id})",
-        reference_id=escrow.transaction_number + "-SETTLED",
-        balance_after=balance_after_debit,
-    ))
+    # With Unified Payment, Siiqo holds the funds centrally.
+    # The vendor's balance remains positive. They can withdraw it via the withdrawal system.
+
 
     # Create Receipt
     db.session.add(Receipt(order_id=order.id))

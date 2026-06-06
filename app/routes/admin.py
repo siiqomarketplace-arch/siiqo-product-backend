@@ -432,6 +432,162 @@ def get_pending_escrow():
     }), 200
 
 
+@admin_bp.route('/escrow/transactions', methods=['GET'])
+@jwt_required()
+def get_all_escrow_transactions():
+    """
+    Returns ALL escrow transactions for the admin escrow dashboard.
+    Normalises data into the shape the frontend AdminEscrowDashboard expects:
+      { id, vendor_id, buyer_id, product, total_amount, platform_fee,
+        status ("held" | "disputed" | "released" | "refunded"),
+        created_at, auto_release_date, logistics_provider }
+    """
+    admin_id = get_jwt_identity()
+    if not _get_admin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    from app.models.order import Order, OrderItem
+    from app.models.product import Product
+    from datetime import timedelta
+
+    # Status map: backend canonical → frontend display key
+    STATUS_MAP = {
+        EscrowStatus.PENDING_PAYMENT: "held",
+        EscrowStatus.IN_ESCROW:       "held",
+        EscrowStatus.SHIPPED:         "held",
+        EscrowStatus.DELIVERED:       "held",
+        EscrowStatus.RELEASED:        "released",
+        EscrowStatus.DISPUTED:        "disputed",
+        EscrowStatus.REFUNDED:        "refunded",
+        EscrowStatus.CANCELLED:       "refunded",
+    }
+
+    transactions = EscrowTransaction.query.order_by(
+        EscrowTransaction.created_at.desc()
+    ).limit(1000).all()
+
+    result = []
+    for txn in transactions:
+        order = txn.order
+        if not order:
+            continue
+
+        # Derive a human-readable product name from first order item
+        first_item = order.items[0] if order.items else None
+        product_name = (
+            first_item.product.name if first_item and first_item.product
+            else f"Order #{order.id}"
+        )
+
+        # Auto-release date = updated_at + 72 h when status is DELIVERED
+        auto_release_date = None
+        if txn.status == EscrowStatus.DELIVERED and txn.updated_at:
+            auto_release_date = (txn.updated_at + timedelta(hours=72)).isoformat()
+
+        result.append({
+            "id": txn.transaction_number,
+            "order_id": order.id,
+            "vendor_id": str(order.vendor_id),
+            "buyer_id": str(order.buyer_id),
+            "product": product_name,
+            "total_amount": float(txn.amount),
+            "platform_fee": float(txn.fee_amount or 0),
+            "status": STATUS_MAP.get(txn.status, "held"),
+            "escrow_status": txn.status,   # raw backend status for admin detail
+            "created_at": txn.created_at.isoformat() if txn.created_at else None,
+            "auto_release_date": auto_release_date,
+            "logistics_provider": order.logistics_provider_id or "Standard Delivery",
+            "dispute_id": txn.dispute_id,
+            "dispute_reason": txn.dispute_reason,
+        })
+
+    return jsonify({"data": result, "count": len(result)}), 200
+
+
+@admin_bp.route('/escrow/refund/<int:order_id>', methods=['POST'])
+@jwt_required()
+def admin_refund_buyer(order_id):
+    """
+    Admin refunds the buyer (dispute resolved in buyer's favour).
+    Calls PayScrow's broker refund endpoint to reverse the transaction,
+    then marks the escrow as REFUNDED and notifies both parties.
+    """
+    admin_id = get_jwt_identity()
+    if not _require_superadmin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+    if not escrow:
+        return jsonify({"message": "Escrow transaction not found"}), 404
+
+    if escrow.status == EscrowStatus.REFUNDED:
+        return jsonify({"message": "Funds already refunded"}), 400
+
+    if escrow.status == EscrowStatus.RELEASED:
+        return jsonify({"message": "Funds already released to vendor — cannot refund"}), 400
+
+    # Call PayScrow broker refund / cancel endpoint
+    if escrow.payscrow_ref:
+        import os, requests as _requests
+        payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+        _is_sandbox = (
+            not payscrow_key
+            or payscrow_key.startswith('ps_9')
+            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+        )
+        base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
+        headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
+        try:
+            resp = _requests.post(
+                f"{base_url}/api/v3/marketplace/transactions/{escrow.payscrow_ref}/broker/refund",
+                json={"reason": "Admin dispute resolution — refund to buyer"},
+                headers=headers,
+                timeout=15,
+            )
+            resp_data = resp.json()
+            if not resp_data.get('success'):
+                logging.warning(
+                    f"[ADMIN REFUND] PayScrow refund returned non-success for Order #{order_id}: {resp.text}"
+                )
+                # Continue — still update our DB so order isn't stuck
+        except Exception as e:
+            logging.error(f"[ADMIN REFUND] PayScrow refund error for Order #{order_id}: {e}")
+    else:
+        logging.warning(
+            f"[ADMIN REFUND] Order #{order_id} has no payscrow_ref — skipping PayScrow call."
+        )
+
+    escrow.status = EscrowStatus.REFUNDED
+    order = escrow.order
+    if order:
+        if order.status != 'CANCELLED':
+            for item in order.items:
+                if item.product:
+                    item.product.stock_quantity = (item.product.stock_quantity or 0) + item.quantity
+        order.status = 'CANCELLED'
+
+    # Notify buyer — they get their money back
+    if order:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Refund Processed",
+            message=f"Your dispute for Order #{order_id} was resolved in your favour. A refund of ₦{float(escrow.amount):,.2f} has been initiated.",
+            type="ESCROW",
+            order_id=order_id,
+        ))
+        # Notify vendor — they don't get paid
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Dispute Resolved — Refund Issued",
+            message=f"The dispute for Order #{order_id} was resolved in the buyer's favour. Funds have been refunded to the buyer.",
+            type="ESCROW",
+            order_id=order_id,
+        ))
+
+    db.session.commit()
+    return jsonify({"message": "Refund processed successfully.", "status": "success"}), 200
+
+
 @admin_bp.route('/escrow/verify/<int:order_id>', methods=['POST'])
 @jwt_required()
 def admin_verify_payment(order_id):
@@ -467,6 +623,41 @@ def admin_release_funds(order_id):
     if escrow.status == EscrowStatus.RELEASED:
         return jsonify({"message": "Funds already released"}), 400
 
+    # Call PayScrow's applycode to actually move the money — required for DISPUTED orders
+    # where funds are frozen on PayScrow's side.
+    if escrow.payscrow_transaction_id and escrow.escrow_code:
+        import os, requests as _requests
+        payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+        _is_sandbox = (
+            not payscrow_key
+            or payscrow_key.startswith('ps_9')
+            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+        )
+        base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
+        headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
+        try:
+            resp = _requests.post(
+                f"{base_url}/api/v3/escrow/escrowtransactions/applycode",
+                json={"transactionId": escrow.payscrow_transaction_id, "code": escrow.escrow_code},
+                headers=headers,
+                timeout=15,
+            )
+            resp_data = resp.json()
+            if not resp_data.get('success'):
+                logging.warning(
+                    f"[ADMIN RELEASE] PayScrow applycode returned non-success for Order #{order_id}: {resp.text}"
+                )
+                # Do NOT hard-fail — admin may be resolving a dispute where PayScrow
+                # already released on their side. Continue with DB update.
+        except Exception as e:
+            logging.error(f"[ADMIN RELEASE] PayScrow applycode error for Order #{order_id}: {e}")
+            # Non-fatal: still update our DB so the order is not stuck forever.
+    else:
+        logging.warning(
+            f"[ADMIN RELEASE] Order #{order_id} has no payscrow_transaction_id or escrow_code — "
+            "skipping PayScrow applycode call (manual bank transfer or missing data)."
+        )
+
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order = escrow.order
@@ -484,6 +675,14 @@ def admin_release_funds(order_id):
             title="Funds Released by Admin",
             message=f"₦{net_amount:,.2f} has been credited to your ledger for Order #{order.id}.",
             type="ESCROW",
+            order_id=order.id,
+        ))
+        # Also notify buyer
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Order Complete",
+            message=f"Order #{order.id} has been resolved by Siiqo support. The order is now complete.",
+            type="ORDER",
             order_id=order.id,
         ))
 
