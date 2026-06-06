@@ -424,6 +424,7 @@ def buyer_order_history():
     for o in orders:
         vendor = db.session.get(User, o.vendor_id)
         vendor_store = vendor.storefront if vendor else None
+        escrow = EscrowTransaction.query.filter_by(order_id=o.id).first()
         result.append({
             "id": o.id,
             "total": float(o.total_amount),
@@ -435,6 +436,10 @@ def buyer_order_history():
                 else (vendor.full_name if vendor else "Unknown Vendor")
             ),
             "vendor_id": o.vendor_id,
+            # Expose escrow status and OTP so the buyer UI can show the delivery OTP
+            "escrow_status": escrow.status if escrow else None,
+            "transaction_number": escrow.transaction_number if escrow else None,
+            "delivery_otp": escrow.escrow_code if escrow else None,
         })
 
     return jsonify({"status": "success", "orders": result}), 200
@@ -469,12 +474,16 @@ def get_buyer_order_detail(order_id):
             "id": order.id,
             "status": order.status,
             "total_amount": float(order.total_amount),
+            "tracking_number": order.tracking_number,
             "items": items,
             "buyer_name": buyer.full_name if buyer else "",
             "buyer_phone": buyer.phone if buyer else "",
+            "delivery_address": buyer.address if buyer and hasattr(buyer, 'address') else None,
             "vendor_id": order.vendor_id,
             "vendor_name": vendor_store.store_name if vendor_store else "Unknown Vendor",
             "escrow": escrow.to_dict() if escrow else None,
+            # Convenience alias so both buyer order pages get the OTP directly
+            "delivery_otp": escrow.escrow_code if escrow else None,
         },
     }), 200
 
@@ -514,9 +523,26 @@ def submit_review():
     user_id = get_jwt_identity()
     data = request.get_json() or {}
     order_id = data.get('order_id')
-    vendor_rating = int(data.get('vendor_rating', 5))
-    product_rating = data.get('product_rating')
+    # Accept both field names the frontend sends
     review_text = (data.get('review') or data.get('review_text') or '').strip()
+
+    # Validate vendor_rating is an integer 1–5
+    try:
+        vendor_rating = int(data.get('vendor_rating', 0))
+    except (ValueError, TypeError):
+        vendor_rating = 0
+    if vendor_rating < 1 or vendor_rating > 5:
+        return jsonify({"message": "vendor_rating must be between 1 and 5"}), 400
+
+    # product_rating is optional but must also be 1–5 if provided
+    product_rating = data.get('product_rating')
+    if product_rating is not None:
+        try:
+            product_rating = int(product_rating)
+            if product_rating < 1 or product_rating > 5:
+                product_rating = None
+        except (ValueError, TypeError):
+            product_rating = None
 
     if not order_id:
         return jsonify({"message": "order_id is required"}), 400

@@ -65,6 +65,8 @@ class EscrowTransaction(db.Model):
             "fee_amount": str(self.fee_amount) if self.fee_amount else None,
             "currency": self.currency,
             "payment_link": self.payment_link,
+            # escrow_code is the buyer's delivery OTP — needed for the buyer UI
+            "escrow_code": self.escrow_code,
             "dispute_id": self.dispute_id,
             "dispute_reason": self.dispute_reason,
             "paid_at": self.paid_at.isoformat() if self.paid_at else None,

@@ -61,12 +61,50 @@ def auto_release_escrow():
             order = escrow.order
             if not order:
                 continue
-            
-            # Release funds
+
+            # Call PayScrow applycode to actually move the money before updating DB
+            if escrow.payscrow_transaction_id and escrow.escrow_code:
+                import os, requests as _req
+                payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+                is_sandbox = (
+                    not payscrow_key
+                    or payscrow_key.startswith('ps_9')
+                    or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+                )
+                base_url = "https://api.payscrow.dev" if is_sandbox else "https://api.payscrow.net"
+                headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
+                try:
+                    resp = _req.post(
+                        f"{base_url}/api/v3/escrow/escrowtransactions/applycode",
+                        json={
+                            "transactionId": escrow.payscrow_transaction_id,
+                            "code": escrow.escrow_code,
+                        },
+                        headers=headers,
+                        timeout=15,
+                    )
+                    resp_data = resp.json()
+                    if not resp_data.get('success'):
+                        logger.warning(
+                            f"  ⚠ PayScrow applycode non-success for ESC {escrow.transaction_number}: {resp.text}"
+                        )
+                        # Continue — update DB regardless so order isn't stuck
+                except Exception as api_err:
+                    logger.error(
+                        f"  ⚠ PayScrow applycode error for ESC {escrow.transaction_number}: {api_err}"
+                    )
+                    # Non-fatal: still mark released in our DB
+            else:
+                logger.warning(
+                    f"  ⚠ No payscrow_transaction_id/escrow_code for ESC {escrow.transaction_number} — "
+                    "skipping PayScrow call (manual bank transfer or missing data)."
+                )
+
+            # Release funds in DB
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = utcnow()
             order.status = 'COMPLETED'
-            
+
             # Credit vendor ledger (net of fee)
             net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
             _credit_vendor_ledger(

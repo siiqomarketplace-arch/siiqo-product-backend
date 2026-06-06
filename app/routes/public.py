@@ -76,6 +76,15 @@ def get_products():
 
     def _product_dict(p, is_sponsored=False):
         sf = p.storefront
+        # Compute rating from reviews (use .count() since lazy='dynamic')
+        try:
+            approved_reviews = p.reviews.filter_by(is_approved=True).all()
+            ratings = [r.vendor_rating for r in approved_reviews]
+            avg_rating = round(sum(ratings) / len(ratings), 1) if ratings else None
+            review_count = len(ratings)
+        except Exception:
+            avg_rating = None
+            review_count = 0
         return {
             "id": p.id,
             "name": p.name,
@@ -100,6 +109,10 @@ def get_products():
             "category": p.category.name if p.category else "General",
             "is_negotiable": p.is_negotiable,
             "is_sponsored": is_sponsored,
+            # ── ratings (now included in listing so marketplace cards show real stars) ──
+            "avg_rating": avg_rating,
+            "rating": avg_rating,         # alias — frontend reads either key
+            "review_count": review_count,
         }
 
     products = [_product_dict(p, p.id in sponsored_ids) for p in paginated.items]
@@ -124,14 +137,17 @@ def get_product_details(product_id):
     if not p or not p.is_active:
         return jsonify({"message": "Product not found"}), 404
 
-    # Average rating
+    # Average rating — p.reviews is a dynamic relationship, use query
     avg_rating = None
     review_count = 0
-    if p.reviews:
-        ratings = [r.vendor_rating for r in p.reviews if r.is_approved]
+    try:
+        approved = p.reviews.filter_by(is_approved=True).all()
+        ratings = [r.vendor_rating for r in approved]
         if ratings:
             avg_rating = round(sum(ratings) / len(ratings), 1)
             review_count = len(ratings)
+    except Exception:
+        pass
 
     return jsonify({
         "id": p.id,

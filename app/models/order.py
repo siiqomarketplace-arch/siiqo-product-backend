@@ -47,6 +47,7 @@ class Order(db.Model):
     # Logistics information
     logistics_provider_id = db.Column(db.String(100), nullable=True) # e.g. "siiqo_partner_1" or "self_pickup"
     logistics_fee = db.Column(db.Numeric(10, 2), default=0.00)
+    tracking_number = db.Column(db.String(100), nullable=True)  # Set by vendor when order is shipped
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

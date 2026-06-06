@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, and_
 import uuid
 
-finance_bp = Blueprint('finance', __name__, url_prefix='/api/finance')
+finance_bp = Blueprint('finance', __name__)
 
 
 def utcnow():

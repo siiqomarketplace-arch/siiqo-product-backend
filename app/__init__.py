@@ -127,4 +127,69 @@ def create_app(config_name: str | None = None) -> Flask:
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
 
+    # -----------------------------------------------------------------------
+    # Background scheduler — escrow auto-release and delivery reminders
+    # Only starts in the main process to avoid duplicate jobs under gunicorn.
+    # Set DISABLE_SCHEDULER=true in .env to turn off (e.g. when running
+    # Alembic migrations or one-off management commands).
+    # -----------------------------------------------------------------------
+    if not app.config.get('TESTING') and not os.environ.get('DISABLE_SCHEDULER'):
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+            from apscheduler.triggers.interval import IntervalTrigger
+            from app.tasks.escrow_tasks import (
+                auto_release_escrow,
+                send_delivery_reminders,
+                check_pending_payments,
+            )
+
+            scheduler = BackgroundScheduler(daemon=True)
+
+            # Run auto-release every hour
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, auto_release_escrow),
+                trigger=IntervalTrigger(hours=1),
+                id='auto_release_escrow',
+                name='Auto-release delivered escrow after 72 h',
+                replace_existing=True,
+            )
+            # Send buyer delivery reminders once a day
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, send_delivery_reminders),
+                trigger=IntervalTrigger(hours=24),
+                id='send_delivery_reminders',
+                name='Remind buyers to confirm delivery',
+                replace_existing=True,
+            )
+            # Cancel stale unpaid orders once a day
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, check_pending_payments),
+                trigger=IntervalTrigger(hours=24),
+                id='check_pending_payments',
+                name='Cancel orders stuck in PENDING_PAYMENT for 24 h',
+                replace_existing=True,
+            )
+
+            scheduler.start()
+            logger.info("APScheduler started — escrow background tasks are active.")
+        except ImportError:
+            logger.warning(
+                "APScheduler not installed. Escrow auto-release will NOT run automatically. "
+                "Install it with: pip install APScheduler==3.10.4"
+            )
+        except Exception as e:
+            logger.error(f"Failed to start APScheduler: {e}")
+
     return app
+
+
+def _run_in_context(app, task_fn):
+    """Run an escrow task function inside the Flask application context."""
+    with app.app_context():
+        try:
+            task_fn()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                f"[SCHEDULER] Error in task '{task_fn.__name__}': {e}"
+            )

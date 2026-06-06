@@ -11,7 +11,7 @@ def _payscrow_env():
     return key, url
 
 class PayscrowProvider(BaseEscrowProvider):
-    def initiate_transaction(self, order, vendor_bank, existing_txn_number=None):
+    def initiate_transaction(self, orders, existing_txn_number=None):
         payscrow_key, base_url = _payscrow_env()
         
         if not payscrow_key:
@@ -20,19 +20,27 @@ class PayscrowProvider(BaseEscrowProvider):
                 "error_message": "Payscrow API key not configured."
             }
 
-        txn_number = existing_txn_number if existing_txn_number else f"ESC-{uuid.uuid4().hex[:12].upper()}"
-        vendor_payout = float(order.total_amount)
-        fee_amount = 0.0
+        # Handle both single order and list of orders
+        if not isinstance(orders, list):
+            orders = [orders]
 
-        # Safe defaults to satisfy strict API constraints
-        vendor_name = (order.vendor.first_name if order.vendor and order.vendor.first_name else "Siiqo Vendor")
-        buyer_name = (order.buyer.first_name if order.buyer and order.buyer.first_name else "Siiqo Buyer")
+        if not orders:
+            return {"success": False, "error_message": "No orders provided."}
+
+        txn_number = existing_txn_number if existing_txn_number else f"ESC-{uuid.uuid4().hex[:12].upper()}"
+        
+        # Calculate totals across all orders
+        total_amount = sum(float(order.total_amount) for order in orders)
+        fee_amount = round(total_amount * 0.12, 2)
+
+        # Use the first order for buyer details
+        buyer = orders[0].buyer
+        buyer_name = (buyer.first_name if buyer and buyer.first_name else "Siiqo Buyer")
         
         import re
         def format_phone(phone_str):
             if not phone_str:
                 return "08012345678"
-            # Strip non-digits
             digits = re.sub(r'\D', '', phone_str)
             if digits.startswith('234') and len(digits) == 13:
                 return '0' + digits[3:]
@@ -40,22 +48,13 @@ class PayscrowProvider(BaseEscrowProvider):
                 return digits
             if len(digits) == 10:
                 return '0' + digits
-            # Fallback for completely invalid strings
             return "08012345678"
             
-        vendor_phone = format_phone(order.vendor.phone if order.vendor else None)
-        buyer_phone = format_phone(order.buyer.phone if order.buyer else None)
-
-        total_amount = float(order.total_amount)
+        buyer_phone = format_phone(buyer.phone if buyer else None)
         
-        # Calculate splits
-        # Payscrow API requires that the sum of settlement accounts EXACTLY equals the transaction amount.
-        # It handles fee deduction internally after the transaction succeeds.
-        vendor_payout = round(total_amount * 0.88, 2)
-        siiqo_payout = round(total_amount - vendor_payout, 2) # Ensure exact sum
-
-        fee_amount = round(total_amount * 0.12, 2) # Logical Siiqo fee to save in our DB
-        
+        # Siiqo Master Bank Account (Unified Payment)
+        # Siiqo acts as the sole merchant. We collect 100% of the funds in the Siiqo Master Account.
+        # Payouts to individual vendors will be handled by Siiqo internally upon delivery.
         siiqo_bank_code = os.environ.get("SIIQO_BANK_CODE", "011") # Default First Bank
         siiqo_account_number = os.environ.get("SIIQO_BANK_ACCOUNT", "3050025256")
         siiqo_account_name = os.environ.get("SIIQO_BANK_NAME", "Siiqo Marketplace")
@@ -67,27 +66,29 @@ class PayscrowProvider(BaseEscrowProvider):
         
         settlement_accounts = [
             {
-                "bankCode": vendor_bank.bank_code,
-                "accountNumber": vendor_bank.account_number,
-                "accountName": vendor_bank.account_name,
-                "amount": vendor_payout
-            }
-        ]
-        
-        if siiqo_payout > 0:
-            settlement_accounts.append({
                 "bankCode": siiqo_bank_code,
                 "accountNumber": siiqo_account_number,
                 "accountName": siiqo_account_name,
-                "amount": siiqo_payout
-            })
+                "amount": total_amount
+            }
+        ]
         
+        # Generate item descriptions for all orders
+        items_payload = []
+        for o in orders:
+            items_payload.append({
+                "name": f"Siiqo Order #{o.id}",
+                "description": f"Payment for order #{o.id} on Siiqo Marketplace",
+                "quantity": 1,
+                "price": float(o.total_amount)
+            })
+
         payload = {
             "transactionReference": txn_number,
-            "merchantEmailAddress": order.vendor.email if order.vendor else "vendor@siiqo.com",
-            "merchantName": vendor_name,
-            "merchantPhoneNo": vendor_phone,
-            "customerEmailAddress": order.buyer.email if order.buyer else "buyer@siiqo.com",
+            "merchantEmailAddress": "support@siiqo.com",
+            "merchantName": "Siiqo Marketplace",
+            "merchantPhoneNo": "08012345678",
+            "customerEmailAddress": buyer.email if buyer else "buyer@siiqo.com",
             "customerName": buyer_name,
             "customerPhoneNo": buyer_phone,
             "currencyCode": "NGN",
@@ -98,14 +99,7 @@ class PayscrowProvider(BaseEscrowProvider):
                 'PAYSCROW_WEBHOOK_URL',
                 "https://devapi.siiqo.app/api/escrow/webhook"
             ),
-            "items": [
-                {
-                    "name": f"Siiqo Order #{order.id}",
-                    "description": f"Payment for order #{order.id} on Siiqo Marketplace",
-                    "quantity": 1,
-                    "price": float(order.total_amount)
-                }
-            ],
+            "items": items_payload,
             "settlementAccounts": settlement_accounts
         }
         
