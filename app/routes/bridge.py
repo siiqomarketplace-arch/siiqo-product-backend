@@ -67,20 +67,8 @@ def update_product(product_id):
 @bridge_bp.route('/products/delete/<int:product_id>', methods=['DELETE'])
 @jwt_required()
 def delete_product(product_id):
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    if not user or user.role not in [UserRole.VENDOR, UserRole.ADMIN]:
-        return jsonify({"message": "Vendor access required"}), 403
-
-    product = db.session.get(Product, product_id)
-    if not product:
-        return jsonify({"message": "Product not found"}), 404
-    if user.storefront and product.storefront_id != user.storefront.id:
-        return jsonify({"message": "Unauthorized"}), 403
-
-    product.is_active = False  # Soft delete
-    db.session.commit()
-    return jsonify({"message": "Product deleted", "status": "success"}), 200
+    from app.routes.vendor import delete_product as _delete_product
+    return _delete_product(product_id)
 
 
 @bridge_bp.route('/products/categories', methods=['GET'])

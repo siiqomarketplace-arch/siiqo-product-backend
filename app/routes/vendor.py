@@ -418,6 +418,18 @@ def add_product():
     except (ValueError, TypeError):
         stock_qty = 1
 
+    # Check for duplicate active product names under the same vendor
+    existing_product = Product.query.filter(
+        Product.storefront_id == sf.id,
+        Product.name.ilike(name),
+        Product.is_active == True
+    ).first()
+    if existing_product:
+        return jsonify({
+            "message": f"You already have an active product named '{name}'. Please use a different name or edit the existing listing.",
+            "code": "DUPLICATE_PRODUCT_NAME"
+        }), 409
+
     # Resolve category: accept category_id (int) or category (name string → look up id)
     category_id = None
     if data.get('category_id'):
@@ -449,6 +461,13 @@ def add_product():
         single = request.files.get('image') or request.files.get('images-file')
         if single:
             image_files = [single]
+            
+    # Enforce MAX 5 images per product
+    if len(image_files) > 5:
+        return jsonify({
+            "message": "Too many images. Maximum 5 images allowed per product.",
+            "code": "IMAGE_LIMIT_EXCEEDED"
+        }), 400
     for img_file in image_files:
         if img_file and img_file.filename:
             try:
@@ -579,6 +598,13 @@ def edit_product(product_id):
         single = request.files.get('image') or request.files.get('images-file')
         if single:
             image_files = [single]
+            
+    current_images_count = len(product.images or [])
+    if current_images_count + len(image_files) > 5:
+        return jsonify({
+            "message": f"Too many images. You have {current_images_count} existing images and are uploading {len(image_files)} more. Maximum 5 allowed.",
+            "code": "IMAGE_LIMIT_EXCEEDED"
+        }), 400
     for img_file in image_files:
         if img_file and img_file.filename:
             try:
@@ -621,7 +647,8 @@ def delete_product(product_id):
     if not product or (sf and product.storefront_id != sf.id):
         return jsonify({"message": "Product not found"}), 404
 
-    db.session.delete(product)
+    # Perform SOFT delete
+    product.is_active = False
     db.session.commit()
     
     # Remove from Algolia
@@ -630,7 +657,7 @@ def delete_product(product_id):
     except Exception as e:
         logging.warning(f"Failed to delete from Algolia: {e}")
         
-    return jsonify({"message": "Product deleted"}), 200
+    return jsonify({"message": "Product deleted", "status": "success"}), 200
 
 @vendor_bp.route('/products/my-products', methods=['GET'])
 @jwt_required()
@@ -643,7 +670,11 @@ def my_products():
     page = request.args.get('page', type=int)
     limit = request.args.get('limit', type=int)
 
-    query = Product.query.filter_by(storefront_id=sf.id).options(joinedload(Product.category))
+    # Exclude soft-deleted products from the dashboard
+    query = Product.query.filter_by(
+        storefront_id=sf.id, 
+        is_active=True
+    ).options(joinedload(Product.category))
     
     if page and limit:
         paginated = query.paginate(page=page, per_page=limit, error_out=False)

@@ -26,6 +26,7 @@ class Config:
     JWT_SECRET_KEY = _require_env('JWT_SECRET_KEY', 'dev-jwt-secret-change-in-production')
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
+    MAX_CONTENT_LENGTH = 20 * 1024 * 1024  # 20MB max payload
 
     # Database
     _db_url = os.environ.get('DATABASE_URL') or 'sqlite:///siiqo.db'
