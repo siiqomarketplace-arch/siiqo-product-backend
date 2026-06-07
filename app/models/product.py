@@ -48,7 +48,18 @@ class Product(db.Model):
     # ── Negotiation fields ──────────────────────────────────────────
     is_negotiable = db.Column(db.Boolean, default=False)
     floor_price   = db.Column(db.Numeric(10, 2), nullable=True)  # hidden minimum; NULL = no floor
-    
+
+    # ── Product type & digital/service fields ────────────────────────
+    product_type  = db.Column(db.String(20), default='physical')   # physical | digital | service
+    file_url      = db.Column(db.String(500), nullable=True)       # download link for digital
+    booking_link  = db.Column(db.String(500), nullable=True)       # booking URL for services
+
+    # ── Inventory / SEO extras ───────────────────────────────────────
+    sku              = db.Column(db.String(100), nullable=True)
+    weight           = db.Column(db.Numeric(8, 2), nullable=True)  # kg
+    seo_title        = db.Column(db.String(255), nullable=True)
+    seo_description  = db.Column(db.Text, nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
