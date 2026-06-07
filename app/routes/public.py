@@ -164,6 +164,8 @@ def get_product_details(product_id):
         "avg_rating": avg_rating,
         "review_count": review_count,
         "is_negotiable": p.is_negotiable,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         "storefront": {
             "id": p.storefront.id,
             "vendor_id": p.storefront.vendor_id,  # Added for chat functionality
