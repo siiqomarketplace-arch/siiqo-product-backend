@@ -449,6 +449,10 @@ def add_product():
         price=price,
         stock_quantity=stock_qty,
         category_id=category_id,
+        condition=data.get('condition', 'New'),
+        location=data.get('location'),
+        latitude=float(data['latitude']) if data.get('latitude') else None,
+        longitude=float(data['longitude']) if data.get('longitude') else None,
         is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
         floor_price=float(data['floor_price']) if data.get('floor_price') else None,
     )
@@ -549,6 +553,21 @@ def edit_product(product_id):
 
     if 'description' in data:
         product.description = data['description']
+
+    if 'condition' in data:
+        product.condition = data['condition']
+    if 'location' in data:
+        product.location = data['location']
+    if 'latitude' in data:
+        try:
+            product.latitude = float(data['latitude'])
+        except (ValueError, TypeError):
+            product.latitude = None
+    if 'longitude' in data:
+        try:
+            product.longitude = float(data['longitude'])
+        except (ValueError, TypeError):
+            product.longitude = None
 
     # Accept 'price', 'price-text', or 'product_price' (product_price may be in cents)
     if 'product_price' in data and 'price' not in data:
@@ -695,6 +714,10 @@ def my_products():
         "category": p.category.name if p.category else "",   # resolved name
         "vendor_id": sf.vendor_id,             # needed for cart vendor filtering
         "is_negotiable": p.is_negotiable,
+        "condition": p.condition,
+        "location": p.location,
+        "latitude": p.latitude,
+        "longitude": p.longitude,
         "floor_price": str(p.floor_price) if p.floor_price else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,  # camelCase alias

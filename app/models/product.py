@@ -38,6 +38,12 @@ class Product(db.Model):
     images = db.Column(db.JSON, default=list) # Array of image URLs
     is_active = db.Column(db.Boolean, default=True)
 
+    # ── Condition & Location ─────────────────────────────────────────
+    condition = db.Column(db.String(50), default='New')
+    location = db.Column(db.String(255), nullable=True)
+    latitude = db.Column(db.Float, nullable=True)
+    longitude = db.Column(db.Float, nullable=True)
+
     # ── Negotiation fields ──────────────────────────────────────────
     is_negotiable = db.Column(db.Boolean, default=False)
     floor_price   = db.Column(db.Numeric(10, 2), nullable=True)  # hidden minimum; NULL = no floor

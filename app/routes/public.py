@@ -157,6 +157,10 @@ def get_product_details(product_id):
         "images": p.images or [],
         "stock_quantity": p.stock_quantity,
         "category_id": p.category_id,
+        "condition": p.condition,
+        "location": p.location,
+        "latitude": p.latitude,
+        "longitude": p.longitude,
         "avg_rating": avg_rating,
         "review_count": review_count,
         "is_negotiable": p.is_negotiable,
@@ -244,6 +248,10 @@ def get_storefront_details(slug):
             "images": p.images or [],
             "description": p.description,
             "stock_quantity": p.stock_quantity,
+            "condition": p.condition,
+            "location": p.location,
+            "latitude": p.latitude,
+            "longitude": p.longitude,
             "is_negotiable": p.is_negotiable,
         })
 
