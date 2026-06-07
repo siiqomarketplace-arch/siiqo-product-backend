@@ -438,7 +438,10 @@ def add_product():
         except (ValueError, TypeError):
             pass
     elif data.get('category'):
-        cat = Category.query.filter(Category.name.ilike(data['category'].strip())).first()
+        cat = Category.query.filter(
+            Category.name.ilike(data['category'].strip()) |
+            Category.slug.ilike(data['category'].strip())
+        ).first()
         if cat:
             category_id = cat.id
 
@@ -606,7 +609,10 @@ def edit_product(product_id):
         except (ValueError, TypeError):
             product.category_id = None
     elif 'category' in data and data['category']:
-        cat = Category.query.filter(Category.name.ilike(data['category'].strip())).first()
+        cat = Category.query.filter(
+            Category.name.ilike(data['category'].strip()) |
+            Category.slug.ilike(data['category'].strip())
+        ).first()
         if cat:
             product.category_id = cat.id
 
