@@ -113,6 +113,10 @@ def get_products():
             "avg_rating": avg_rating,
             "rating": avg_rating,         # alias — frontend reads either key
             "review_count": review_count,
+            "condition": p.condition,
+            "location": p.location,
+            "latitude": p.latitude,
+            "longitude": p.longitude,
         }
 
     products = [_product_dict(p, p.id in sponsored_ids) for p in paginated.items]
@@ -164,8 +168,8 @@ def get_product_details(product_id):
         "avg_rating": avg_rating,
         "review_count": review_count,
         "is_negotiable": p.is_negotiable,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "created_at": p.created_at.isoformat() + "Z" if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() + "Z" if p.updated_at else None,
         "storefront": {
             "id": p.storefront.id,
             "vendor_id": p.storefront.vendor_id,  # Added for chat functionality
@@ -317,6 +321,10 @@ def search():
             "images": p.images or [],
             "storefront": p.storefront.store_name if p.storefront else None,
             "storefront_slug": p.storefront.store_slug if p.storefront else None,
+            "condition": p.condition,
+            "location": p.location,
+            "latitude": p.latitude,
+            "longitude": p.longitude,
         } for p in products],
         "storefronts": [s.to_public_dict() for s in storefronts],
     }), 200
@@ -381,7 +389,6 @@ def get_articles():
         "total": paginated.total,
         "pages": paginated.pages,
     }), 200
-
 
 @public_bp.route('/blog/<string:slug>', methods=['GET'])
 def get_article_by_slug(slug):

@@ -690,10 +690,10 @@ def my_products():
     page = request.args.get('page', type=int)
     limit = request.args.get('limit', type=int)
 
-    # Exclude soft-deleted products from the dashboard
-    query = Product.query.filter_by(
-        storefront_id=sf.id, 
-        is_deleted=False
+    # Exclude soft-deleted products from the dashboard (handling both False and NULL)
+    query = Product.query.filter(
+        Product.storefront_id == sf.id,
+        db.or_(Product.is_deleted == False, Product.is_deleted.is_(None))
     ).options(joinedload(Product.category))
     
     if page and limit:

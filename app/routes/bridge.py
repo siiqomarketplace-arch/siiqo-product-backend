@@ -118,6 +118,14 @@ def get_catalogs():
                 "images": p.images or [],
                 "description": p.description,
                 "category": p.category.name if p.category else "",
+                "condition": p.condition,
+                "location": p.location,
+                "latitude": p.latitude,
+                "longitude": p.longitude,
+                "is_negotiable": p.is_negotiable,
+                "floor_price": str(p.floor_price) if p.floor_price else None,
+                "status": "active" if p.is_active else "inactive",
+                "quantity": p.stock_quantity,
             } for p in products],
         })
 
