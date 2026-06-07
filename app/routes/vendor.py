@@ -667,6 +667,7 @@ def delete_product(product_id):
         return jsonify({"message": "Product not found"}), 404
 
     # Perform SOFT delete
+    product.is_deleted = True
     product.is_active = False
     db.session.commit()
     
@@ -692,7 +693,7 @@ def my_products():
     # Exclude soft-deleted products from the dashboard
     query = Product.query.filter_by(
         storefront_id=sf.id, 
-        is_active=True
+        is_deleted=False
     ).options(joinedload(Product.category))
     
     if page and limit:
