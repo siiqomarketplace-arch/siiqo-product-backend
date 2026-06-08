@@ -126,6 +126,7 @@ def get_conversation(partner_id):
             "is_read": m.is_read,
             "order_id": m.order_id,
             "created_at": m.created_at.isoformat() if m.created_at else None,
+            "is_mine": str(m.sender_id) == str(user_id),
         } for m in messages],
         "page": page,
         "pages": paginated.pages,
