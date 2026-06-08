@@ -64,40 +64,49 @@ def auto_release_escrow():
 
             # Call PayScrow applycode to actually move the money before updating DB
             if escrow.payscrow_transaction_id and escrow.escrow_code:
-                import os, requests as _req
-                payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-                is_sandbox = (
-                    not payscrow_key
-                    or payscrow_key.startswith('ps_9')
-                    or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-                )
-                base_url = "https://api.payscrow.dev" if is_sandbox else "https://api.payscrow.net"
-                headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
-                try:
-                    resp = _req.post(
-                        f"{base_url}/api/v3/escrow/escrowtransactions/applycode",
-                        json={
-                            "transactionId": escrow.payscrow_transaction_id,
-                            "code": escrow.escrow_code,
-                        },
-                        headers=headers,
-                        timeout=15,
-                    )
-                    resp_data = resp.json()
-                    if not resp_data.get('success'):
-                        logger.warning(
-                            f"  ⚠ PayScrow applycode non-success for ESC {escrow.transaction_number}: {resp.text}"
+                raw_code = str(escrow.escrow_code).strip()
+                code_is_real = raw_code.isdigit() and 4 <= len(raw_code) <= 10
+                if code_is_real:
+                    import os, requests as _req
+                    payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
+                    base_url = os.environ.get('PAYSCROW_BASE_URL')
+                    if not base_url:
+                        is_sandbox = (
+                            not payscrow_key
+                            or payscrow_key.startswith('ps_9')
+                            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
                         )
-                        # Continue — update DB regardless so order isn't stuck
-                except Exception as api_err:
-                    logger.error(
-                        f"  ⚠ PayScrow applycode error for ESC {escrow.transaction_number}: {api_err}"
+                        base_url = "https://api.payscrow.dev" if is_sandbox else "https://api.payscrow.net"
+                    headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
+                    try:
+                        resp = _req.post(
+                            f"{base_url}/api/v3/escrow/escrowtransactions/applycode",
+                            json={
+                                "transactionId": escrow.payscrow_transaction_id,
+                                "code": raw_code,
+                            },
+                            headers=headers,
+                            timeout=15,
+                        )
+                        resp_data = resp.json()
+                        if not resp_data.get('success'):
+                            logger.warning(
+                                f"  ⚠ PayScrow applycode non-success for ESC {escrow.transaction_number}: {resp.text}"
+                            )
+                    except Exception as api_err:
+                        logger.warning(
+                            f"  ⚠ PayScrow applycode unreachable for ESC {escrow.transaction_number}: {api_err} "
+                            "— releasing internally"
+                        )
+                else:
+                    logger.info(
+                        f"  ⚠ Escrow code '{raw_code[:40]}' for ESC {escrow.transaction_number} is not numeric "
+                        "— releasing internally (sandbox placeholder or email message)"
                     )
-                    # Non-fatal: still mark released in our DB
             else:
                 logger.warning(
                     f"  ⚠ No payscrow_transaction_id/escrow_code for ESC {escrow.transaction_number} — "
-                    "skipping PayScrow call (manual bank transfer or missing data)."
+                    "releasing internally."
                 )
 
             # Release funds in DB

@@ -7,7 +7,14 @@ from app.services.escrow.base import BaseEscrowProvider
 def _payscrow_env():
     # Return (api_key, base_url)
     key = os.environ.get('PAYSCROW_API_KEY', '')
-    url = os.environ.get('PAYSCROW_BASE_URL', 'https://api.payscrow.net')
+    url = os.environ.get('PAYSCROW_BASE_URL')
+    if not url:
+        is_sandbox = (
+            not key
+            or key.startswith('ps_9')  # sandbox key prefix
+            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+        )
+        url = "https://api.payscrow.dev" if is_sandbox else "https://api.payscrow.net"
     return key, url
 
 class PayscrowProvider(BaseEscrowProvider):

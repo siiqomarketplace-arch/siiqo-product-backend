@@ -530,12 +530,14 @@ def admin_refund_buyer(order_id):
     if escrow.payscrow_ref:
         import os, requests as _requests
         payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-        _is_sandbox = (
-            not payscrow_key
-            or payscrow_key.startswith('ps_9')
-            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-        )
-        base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
+        base_url = os.environ.get('PAYSCROW_BASE_URL')
+        if not base_url:
+            _is_sandbox = (
+                not payscrow_key
+                or payscrow_key.startswith('ps_9')
+                or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+            )
+            base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
         headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
         try:
             resp = _requests.post(
@@ -628,12 +630,14 @@ def admin_release_funds(order_id):
     if escrow.payscrow_transaction_id and escrow.escrow_code:
         import os, requests as _requests
         payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-        _is_sandbox = (
-            not payscrow_key
-            or payscrow_key.startswith('ps_9')
-            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-        )
-        base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
+        base_url = os.environ.get('PAYSCROW_BASE_URL')
+        if not base_url:
+            _is_sandbox = (
+                not payscrow_key
+                or payscrow_key.startswith('ps_9')
+                or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+            )
+            base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
         headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
         try:
             resp = _requests.post(
