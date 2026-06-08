@@ -340,7 +340,6 @@ def release_escrow():
                         escrow.payscrow_transaction_id = status_data.get('transactionId')
                     db.session.commit()
         except Exception as e:
-            import logging
             logging.error(f"Fallback status check failed: {e}")
 
     if escrow.status not in [EscrowStatus.IN_ESCROW, EscrowStatus.DELIVERED, EscrowStatus.SHIPPED]:
