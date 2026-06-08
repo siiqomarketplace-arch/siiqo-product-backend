@@ -4,8 +4,6 @@ escrow.py — Escrow lifecycle routes
 Handles: initiate, status, webhook (PayScrow), release, dispute, admin actions
 """
 import uuid
-import hmac
-import hashlib
 import os
 from datetime import datetime, timezone
 
@@ -182,20 +180,9 @@ def escrow_status():
 def payscrow_webhook():
     """
     Receives payment confirmation from PayScrow.
-    Verifies HMAC signature, then advances escrow status to IN_ESCROW.
+    No webhook secret required (confirmed by PayScrow team).
     """
     payload = request.get_data()
-    sig_header = request.headers.get('X-PayScrow-Signature', '')
-    secret = os.environ.get('PAYSCROW_WEBHOOK_SECRET', '')
-
-    if not secret:
-        logging.error("PAYSCROW_WEBHOOK_SECRET is not configured. Failing closed.")
-        return jsonify({"message": "Webhook configuration error"}), 500
-
-    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, sig_header):
-        logging.warning("Invalid PayScrow webhook signature")
-        return jsonify({"message": "Invalid signature"}), 401
 
     data = request.get_json(force=True) or {}
     
