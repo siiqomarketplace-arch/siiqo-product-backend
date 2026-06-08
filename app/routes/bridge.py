@@ -414,28 +414,65 @@ def buyer_checkout():
 @jwt_required()
 def buyer_order_history():
     user_id = get_jwt_identity()
-    orders = Order.query.filter_by(buyer_id=user_id).order_by(Order.created_at.desc()).limit(500).all()
+    from app.models.order import OrderItem
+    from sqlalchemy.orm import joinedload
+    orders = (
+        Order.query
+        .filter_by(buyer_id=user_id)
+        .order_by(Order.created_at.desc())
+        .options(
+            joinedload(Order.items).joinedload(OrderItem.product),
+            joinedload(Order.buyer),
+        )
+        .limit(500)
+        .all()
+    )
 
     result = []
     for o in orders:
         vendor = db.session.get(User, o.vendor_id)
         vendor_store = vendor.storefront if vendor else None
         escrow = EscrowTransaction.query.filter_by(order_id=o.id).first()
+
+        # Build items list so the buyer UI can show product names & quantities
+        items = [{
+            "name": (item.product.name if item.product else "Product"),
+            "product_name": (item.product.name if item.product else "Product"),
+            "qty": item.quantity,
+            "quantity": item.quantity,
+            "price": float(item.price_at_purchase),
+            "unit_price": float(item.price_at_purchase),
+            "image": (item.product.images[0] if item.product and item.product.images else None),
+        } for item in (o.items or [])]
+
         result.append({
             "id": o.id,
+            "order_id": o.id,
             "total": float(o.total_amount),
+            "total_amount": float(o.total_amount),
             "status": o.status,
-            "payment_method": o.payment_method or "payscrow",
+            # Always return uppercase so frontend comparison works cleanly
+            "payment_method": (o.payment_method or "ESCROW").upper(),
+            # ISO string for normalization + human-friendly date
+            "created_at": o.created_at.isoformat() if o.created_at else None,
             "date": o.created_at.strftime('%d %b %Y') if o.created_at else "",
+            "vendor": (
+                vendor_store.store_name if vendor_store
+                else (vendor.full_name if vendor else "Unknown Vendor")
+            ),
             "vendor_name": (
                 vendor_store.store_name if vendor_store
                 else (vendor.full_name if vendor else "Unknown Vendor")
             ),
+            "store_name": (vendor_store.store_name if vendor_store else None),
             "vendor_id": o.vendor_id,
-            # Expose escrow status and OTP so the buyer UI can show the delivery OTP
+            "items": items,
+            # Escrow fields
             "escrow_status": escrow.status if escrow else None,
             "transaction_number": escrow.transaction_number if escrow else None,
             "delivery_otp": escrow.escrow_code if escrow else None,
+            "logistics": o.logistics_provider if hasattr(o, 'logistics_provider') else None,
+            "city": o.delivery_city if hasattr(o, 'delivery_city') else None,
         })
 
     return jsonify({"status": "success", "orders": result}), 200

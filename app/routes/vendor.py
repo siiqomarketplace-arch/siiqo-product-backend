@@ -807,7 +807,10 @@ def get_orders():
         "total_amount": str(o.total_amount),
         "status": o.status,
         "created_at": o.created_at.isoformat() if o.created_at else None,
+        "payment_method": o.payment_method or "ESCROW",
+        "buyer_id": o.buyer_id,
         "buyer": {
+            "id": o.buyer_id,
             "name": o.buyer.full_name if o.buyer else "Unknown",
             "email": o.buyer.email if o.buyer else "",
             "phone": o.buyer.phone if o.buyer else "",
