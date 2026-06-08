@@ -168,6 +168,13 @@ def get_product_details(product_id):
         "avg_rating": avg_rating,
         "review_count": review_count,
         "is_negotiable": p.is_negotiable,
+        "product_type": p.product_type,
+        "file_url": p.file_url,
+        "booking_link": p.booking_link,
+        "sku": p.sku,
+        "weight": str(p.weight) if p.weight else None,
+        "seo_title": p.seo_title,
+        "seo_description": p.seo_description,
         "created_at": p.created_at.isoformat() + "Z" if p.created_at else None,
         "updated_at": p.updated_at.isoformat() + "Z" if p.updated_at else None,
         "storefront": {

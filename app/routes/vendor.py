@@ -458,6 +458,13 @@ def add_product():
         longitude=float(data['longitude']) if data.get('longitude') else None,
         is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
         floor_price=float(data['floor_price']) if data.get('floor_price') else None,
+        product_type=data.get('product_type', 'physical'),
+        file_url=data.get('file_url'),
+        booking_link=data.get('booking_link'),
+        sku=data.get('sku'),
+        weight=float(data['weight']) if data.get('weight') else None,
+        seo_title=data.get('seo_title') or data.get('seoTitle'),
+        seo_description=data.get('seo_description') or data.get('seoDescription'),
     )
 
     # Handle multiple image files (frontend appends each as 'images')
@@ -650,6 +657,29 @@ def edit_product(product_id):
         except (ValueError, TypeError):
             pass
 
+    # Extended Siiqo fields
+    if 'product_type' in data:
+        product.product_type = data['product_type']
+    if 'file_url' in data:
+        product.file_url = data['file_url']
+    if 'booking_link' in data:
+        product.booking_link = data['booking_link']
+    if 'sku' in data:
+        product.sku = data['sku']
+    if 'weight' in data:
+        try:
+            product.weight = float(data['weight']) if data['weight'] else None
+        except (ValueError, TypeError):
+            pass
+    if 'seo_title' in data:
+        product.seo_title = data['seo_title']
+    elif 'seoTitle' in data:
+        product.seo_title = data['seoTitle']
+    if 'seo_description' in data:
+        product.seo_description = data['seo_description']
+    elif 'seoDescription' in data:
+        product.seo_description = data['seoDescription']
+
     db.session.commit()
     
     # Sync to Algolia
@@ -726,6 +756,15 @@ def my_products():
         "latitude": p.latitude,
         "longitude": p.longitude,
         "floor_price": str(p.floor_price) if p.floor_price else None,
+        "product_type": p.product_type,
+        "file_url": p.file_url,
+        "booking_link": p.booking_link,
+        "sku": p.sku,
+        "weight": str(p.weight) if p.weight else None,
+        "seo_title": p.seo_title,
+        "seoTitle": p.seo_title,
+        "seo_description": p.seo_description,
+        "seoDescription": p.seo_description,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,  # camelCase alias
     } for p in products]
