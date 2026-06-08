@@ -418,7 +418,7 @@ def buyer_order_history():
     from sqlalchemy.orm import joinedload
     orders = (
         Order.query
-        .filter_by(buyer_id=user_id)
+        .filter_by(buyer_id=int(user_id))
         .order_by(Order.created_at.desc())
         .options(
             joinedload(Order.items).joinedload(OrderItem.product),
@@ -471,7 +471,7 @@ def buyer_order_history():
             "escrow_status": escrow.status if escrow else None,
             "transaction_number": escrow.transaction_number if escrow else None,
             "delivery_otp": escrow.escrow_code if escrow else None,
-            "logistics": o.logistics_provider if hasattr(o, 'logistics_provider') else None,
+            "logistics": o.logistics_provider_id if hasattr(o, 'logistics_provider_id') else None,
             "city": o.delivery_city if hasattr(o, 'delivery_city') else None,
         })
 

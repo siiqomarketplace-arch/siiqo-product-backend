@@ -31,16 +31,38 @@ vendor_bp = Blueprint('vendor', __name__)
 
 def _get_vendor(user_id) -> User | None:
     user = db.session.get(User, int(user_id))
-    if not user or user.role not in [UserRole.VENDOR, UserRole.ADMIN]:
+    if not user:
         return None
-    return user
+    # Primary check: role-based access
+    if user.role in [UserRole.VENDOR, UserRole.ADMIN]:
+        return user
+    # Fallback: if user has a storefront but role was never updated, heal and allow
+    if user.storefront is not None:
+        user.role = UserRole.VENDOR
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        return user
+    return None
 
 
 def _require_vendor_storefront(user_id):
-    """Returns (user, storefront) or raises a 403 response tuple."""
+    """Returns (user, storefront) or (None, None) if not a vendor."""
     user = db.session.get(User, int(user_id))
-    if not user or user.role not in [UserRole.VENDOR, UserRole.ADMIN]:
+    if not user:
         return None, None
+    # Primary check: role-based access
+    if user.role not in [UserRole.VENDOR, UserRole.ADMIN]:
+        # Fallback: if user has a storefront but role was never updated, heal and allow
+        if user.storefront is not None:
+            user.role = UserRole.VENDOR
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        else:
+            return None, None
     if not user.storefront:
         return user, None
     return user, user.storefront
