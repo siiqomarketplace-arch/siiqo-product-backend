@@ -158,7 +158,7 @@ class PayscrowProvider(BaseEscrowProvider):
             "returnUrl": "https://siiqo.com/CartSystem?success=true",
             "webhookNotificationUrl": os.environ.get(
                 'PAYSCROW_WEBHOOK_URL',
-                "https://api.siiqo.com/api/escrow/webhook"
+                "https://devapi.siiqo.app/api/escrow/webhook"
             ),
             "items": items_payload,
             "settlementAccounts": settlement_accounts
