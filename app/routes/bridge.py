@@ -428,6 +428,36 @@ def buyer_order_history():
         .all()
     )
 
+    # ── Live PayScrow sync for stuck PENDING orders ──────────────────────────
+    # If an order is PENDING but already has an escrow record, the webhook
+    # was likely missed. Check PayScrow directly and heal the status now.
+    from app.routes.escrow import _payscrow_env as _ps_env
+    import requests as _http
+    ps_key, ps_base = _ps_env()
+
+    for o in orders:
+        if o.status == 'PENDING':
+            escrow_check = EscrowTransaction.query.filter_by(order_id=o.id).first()
+            if escrow_check and escrow_check.transaction_number and ps_key:
+                try:
+                    r = _http.get(
+                        f"{ps_base}/api/v3/marketplace/transactions/{escrow_check.transaction_number}/status",
+                        headers={"BrokerApiKey": ps_key},
+                        timeout=8,
+                    )
+                    if r.status_code == 200:
+                        ps_status = str(r.json().get('paymentStatus', '')).lower()
+                        if ps_status in ['paid', 'completed', 'pendingsettlement', 'processing']:
+                            escrow_check.status = 'IN_ESCROW'
+                            escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
+                            if r.json().get('escrowCode'):
+                                escrow_check.escrow_code = r.json().get('escrowCode')
+                            o.status = 'PAID'
+                            db.session.commit()
+                except Exception:
+                    pass  # non-fatal — just show whatever status we have
+    # ─────────────────────────────────────────────────────────────────────────
+
     result = []
     for o in orders:
         vendor = db.session.get(User, o.vendor_id)
