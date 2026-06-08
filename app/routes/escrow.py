@@ -92,6 +92,18 @@ def initiate_escrow():
         if order.buyer_id != int(user_id):
             return jsonify({"message": "Unauthorized"}), 403
 
+    # Validate that all vendors have bank accounts for Payscrow split payouts
+    from app.models.withdrawal import VendorBankAccount
+    for order in orders:
+        bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
+        if not bank_acc:
+            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
+        if not bank_acc:
+            sf = order.vendor.storefront if order.vendor else None
+            if not (sf and sf.bank_code and sf.account_number):
+                v_name = order.vendor.full_name if order.vendor else f"ID {order.vendor_id}"
+                return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
+
     escrow_txns = EscrowTransaction.query.filter(EscrowTransaction.order_id.in_([o.id for o in orders])).all()
     existing_txn_number = next((e.transaction_number for e in escrow_txns if e.payment_link), None)
 

@@ -547,6 +547,13 @@ def submit_review():
     if not order or order.buyer_id != int(user_id):
         return jsonify({"message": "Order not found or unauthorized"}), 404
 
+    # Order status gate: Order must be completed/delivered, or escrow released/refunded
+    order_status = (order.status or "").upper()
+    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+    escrow_status = (escrow.status or "").upper() if escrow else ""
+    if order_status not in ['COMPLETED', 'DELIVERED'] and escrow_status not in ['RELEASED', 'REFUNDED']:
+        return jsonify({"message": "You can only review orders that have been delivered or completed."}), 400
+
     # Prevent duplicate reviews
     existing = Review.query.filter_by(order_id=order_id, buyer_id=user_id).first()
     if existing:

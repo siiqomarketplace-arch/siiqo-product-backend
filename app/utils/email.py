@@ -2,8 +2,11 @@ import os
 import smtplib
 import ssl
 import threading
+import logging
 from email.message import EmailMessage
 from flask import render_template, current_app, request
+
+logger = logging.getLogger(__name__)
 
 def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail_sender, to_email, subject, html_content, context):
     """Background worker for sending emails."""

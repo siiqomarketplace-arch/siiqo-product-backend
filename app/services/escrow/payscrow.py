@@ -36,9 +36,12 @@ class PayscrowProvider(BaseEscrowProvider):
 
         txn_number = existing_txn_number if existing_txn_number else f"ESC-{uuid.uuid4().hex[:12].upper()}"
         
+        from decimal import Decimal
+        from app.models.withdrawal import VendorBankAccount
+        from app.models.user import User
+
         # Calculate totals across all orders
         total_amount = sum(float(order.total_amount) for order in orders)
-        fee_amount = round(total_amount * 0.12, 2)
 
         # Use the first order for buyer details
         buyer = orders[0].buyer
@@ -59,9 +62,7 @@ class PayscrowProvider(BaseEscrowProvider):
             
         buyer_phone = format_phone(buyer.phone if buyer else None)
         
-        # Siiqo Master Bank Account (Unified Payment)
-        # Siiqo acts as the sole merchant. We collect 100% of the funds in the Siiqo Master Account.
-        # Payouts to individual vendors will be handled by Siiqo internally upon delivery.
+        # Siiqo Master Bank Account for commission/fee portion
         siiqo_bank_code = os.environ.get("SIIQO_BANK_CODE", "011") # Default First Bank
         siiqo_account_number = os.environ.get("SIIQO_BANK_ACCOUNT", "3050025256")
         siiqo_account_name = os.environ.get("SIIQO_BANK_NAME", "Siiqo Marketplace")
@@ -71,14 +72,63 @@ class PayscrowProvider(BaseEscrowProvider):
             "Content-Type": "application/json"
         }
         
-        settlement_accounts = [
-            {
+        siiqo_total_fee = Decimal('0.00')
+        vendor_settlements = {}
+        
+        for o in orders:
+            order_total = Decimal(str(o.total_amount))
+            # 12% fee
+            fee = (order_total * Decimal('0.12')).quantize(Decimal('0.01'))
+            vendor_amount = order_total - fee
+            
+            siiqo_total_fee += fee
+            
+            # Fetch vendor's default bank account
+            bank_acc = VendorBankAccount.query.filter_by(vendor_id=o.vendor_id, is_default=True).first()
+            if not bank_acc:
+                bank_acc = VendorBankAccount.query.filter_by(vendor_id=o.vendor_id).first()
+                
+            if not bank_acc:
+                # Fallback to storefront details
+                sf = o.vendor.storefront if o.vendor else None
+                if sf and sf.bank_code and sf.account_number:
+                    b_code = sf.bank_code
+                    acc_num = sf.account_number
+                    acc_name = sf.account_name or (o.vendor.full_name if o.vendor else "Vendor")
+                else:
+                    raise Exception(f"Vendor {o.vendor.full_name if o.vendor else o.vendor_id} has no bank account configured.")
+            else:
+                b_code = bank_acc.bank_code
+                acc_num = bank_acc.account_number
+                acc_name = bank_acc.account_name
+                
+            v_key = (b_code, acc_num)
+            if v_key in vendor_settlements:
+                vendor_settlements[v_key]["amount"] += vendor_amount
+            else:
+                vendor_settlements[v_key] = {
+                    "bankCode": b_code,
+                    "accountNumber": acc_num,
+                    "accountName": acc_name,
+                    "amount": vendor_amount
+                }
+
+        settlement_accounts = []
+        if siiqo_total_fee > 0:
+            settlement_accounts.append({
                 "bankCode": siiqo_bank_code,
                 "accountNumber": siiqo_account_number,
                 "accountName": siiqo_account_name,
-                "amount": total_amount
-            }
-        ]
+                "amount": float(siiqo_total_fee)
+            })
+            
+        for v_sett in vendor_settlements.values():
+            settlement_accounts.append({
+                "bankCode": v_sett["bankCode"],
+                "accountNumber": v_sett["accountNumber"],
+                "accountName": v_sett["accountName"],
+                "amount": float(v_sett["amount"])
+            })
         
         # Generate item descriptions for all orders
         items_payload = []

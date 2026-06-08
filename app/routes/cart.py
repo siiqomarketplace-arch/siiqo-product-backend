@@ -17,7 +17,7 @@ from app.models.finance import Ledger, Invoice
 from app.models.crm import CustomerProfile
 from app.models.partnerships import Referral
 from app.models.communication import Notification
-from app.models.withdrawal import PODPayment
+from app.models.withdrawal import PODPayment, VendorBankAccount
 from app.utils.email import send_siiqo_email
 
 cart_bp = Blueprint('cart', __name__)
@@ -60,6 +60,10 @@ def get_cart():
                 "storefront_slug": sf.store_slug if sf else None,
                 "vendor_name": sf.store_name if sf else None,    # alias for cart filter
                 "vendor_id": sf.vendor_id if sf else None,       # stable ID for cart filter
+                "vendor_has_bank": bool(
+                    (sf.vendor_id and db.session.query(db.exists().where(VendorBankAccount.vendor_id == sf.vendor_id)).scalar()) or
+                    (sf and sf.bank_code and sf.account_number)
+                ) if sf else False,
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
                 # Negotiation fields
@@ -97,7 +101,7 @@ def add_to_cart():
     if not product or not product.is_active:
         return jsonify({"message": "Product is not available"}), 400
 
-    if product.vendor_id == int(user_id):
+    if product.storefront.vendor_id == int(user_id):
         return jsonify({"message": "You cannot purchase your own product."}), 403
 
     if product.stock_quantity < quantity:
@@ -283,6 +287,19 @@ def checkout():
 
     if not vendors:
         return jsonify({"message": "No valid items in cart"}), 400
+
+    # Validate that all vendors have bank accounts if payment method is ESCROW
+    if payment_method == 'ESCROW':
+        for vid in vendors.keys():
+            bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid, is_default=True).first()
+            if not bank_acc:
+                bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid).first()
+            if not bank_acc:
+                vendor_user = db.session.get(User, vid)
+                sf = vendor_user.storefront if vendor_user else None
+                if not (sf and sf.bank_code and sf.account_number):
+                    v_name = sf.store_name if sf else (vendor_user.full_name if vendor_user else f"Vendor ID {vid}")
+                    return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
 
     orders_created = []
 
