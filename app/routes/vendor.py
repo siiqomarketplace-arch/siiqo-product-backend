@@ -452,7 +452,7 @@ def add_product():
         price=price,
         stock_quantity=stock_qty,
         category_id=category_id,
-        condition=data.get('condition', 'New'),
+        condition=data.get('condition') or None,
         location=data.get('location'),
         latitude=float(data['latitude']) if data.get('latitude') else None,
         longitude=float(data['longitude']) if data.get('longitude') else None,

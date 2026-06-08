@@ -117,6 +117,9 @@ def get_products():
             "location": p.location,
             "latitude": p.latitude,
             "longitude": p.longitude,
+            "product_type": p.product_type or "physical",
+            "file_url": p.file_url,
+            "booking_link": p.booking_link,
         }
 
     products = [_product_dict(p, p.id in sponsored_ids) for p in paginated.items]
@@ -266,6 +269,9 @@ def get_storefront_details(slug):
             "latitude": p.latitude,
             "longitude": p.longitude,
             "is_negotiable": p.is_negotiable,
+            "product_type": p.product_type or "physical",
+            "file_url": p.file_url,
+            "booking_link": p.booking_link,
         })
 
     catalogs = [
