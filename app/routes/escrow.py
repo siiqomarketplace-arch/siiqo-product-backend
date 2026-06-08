@@ -528,6 +528,9 @@ def raise_dispute():
     escrow.dispute_id = dispute_id
     escrow.dispute_reason = reason
 
+    # Also update order status so vendor sees DISPUTED in their dashboard
+    order.status = 'DISPUTED'
+
     # Notify both parties
     for uid in [order.buyer_id, order.vendor_id]:
         db.session.add(Notification(

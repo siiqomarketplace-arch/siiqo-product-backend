@@ -50,22 +50,22 @@ def send_message():
         return jsonify({"message": "content or image is required"}), 400
 
     msg = Message(
-        sender_id=user_id,
-        receiver_id=receiver_id,
+        sender_id=int(user_id),
+        receiver_id=int(receiver_id),
         content=content,
         image_url=image_url,
-        order_id=order_id,
+        order_id=int(order_id) if order_id else None,
     )
     db.session.add(msg)
 
     # Create notification for receiver
     sender = db.session.get(User, int(user_id))
     db.session.add(Notification(
-        user_id=receiver_id,
+        user_id=int(receiver_id),
         title=f"New message from {sender.full_name if sender else 'Someone'}",
         message="Sent an image" if (image_url and not content) else content[:100],
         type="CHAT",
-        order_id=order_id,
+        order_id=int(order_id) if order_id else None,
     ))
 
     db.session.commit()
