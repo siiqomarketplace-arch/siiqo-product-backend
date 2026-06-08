@@ -63,7 +63,7 @@ class PayscrowProvider(BaseEscrowProvider):
         buyer_phone = format_phone(buyer.phone if buyer else None)
         
         # Siiqo Master Bank Account for commission/fee portion
-        siiqo_bank_code = os.environ.get("SIIQO_BANK_CODE", "011") # Default First Bank
+        siiqo_bank_code = os.environ.get("SIIQO_BANK_CODE", "011")
         siiqo_account_number = os.environ.get("SIIQO_BANK_ACCOUNT", "3050025256")
         siiqo_account_name = os.environ.get("SIIQO_BANK_NAME", "Siiqo Marketplace")
 
@@ -73,15 +73,17 @@ class PayscrowProvider(BaseEscrowProvider):
         }
         
         siiqo_total_fee = Decimal('0.00')
+        total_vendor_amount = Decimal('0.00')
         vendor_settlements = {}
         
         for o in orders:
             order_total = Decimal(str(o.total_amount))
-            # 12% fee
+            # 12% platform fee; vendor receives 88%
             fee = (order_total * Decimal('0.12')).quantize(Decimal('0.01'))
             vendor_amount = order_total - fee
             
             siiqo_total_fee += fee
+            total_vendor_amount += vendor_amount
             
             # Fetch vendor's default bank account
             bank_acc = VendorBankAccount.query.filter_by(vendor_id=o.vendor_id, is_default=True).first()
@@ -140,6 +142,8 @@ class PayscrowProvider(BaseEscrowProvider):
                 "price": float(o.total_amount)
             })
 
+        # merchantChargePercentage: 0 = buyer pays no extra; merchant (Siiqo) absorbs fee.
+        # This is correct for marketplace escrow where the 12% is already baked into prices.
         payload = {
             "transactionReference": txn_number,
             "merchantEmailAddress": "support@siiqo.com",
@@ -149,7 +153,7 @@ class PayscrowProvider(BaseEscrowProvider):
             "customerName": buyer_name,
             "customerPhoneNo": buyer_phone,
             "currencyCode": "NGN",
-            "merchantChargePercentage": 100,
+            "merchantChargePercentage": 0,
             "redirectUrl": "https://siiqo.com/CartSystem?success=true",
             "returnUrl": "https://siiqo.com/CartSystem?success=true",
             "webhookNotificationUrl": os.environ.get(
@@ -160,41 +164,59 @@ class PayscrowProvider(BaseEscrowProvider):
             "settlementAccounts": settlement_accounts
         }
         
+        logging.info(f"[PAYSCROW] Initiating transaction {txn_number} — total={total_amount}, settlements={len(settlement_accounts)}")
+
         try:
-            resp = requests.post(f"{base_url}/api/v3/marketplace/transactions/start", json=payload, headers=headers)
+            resp = requests.post(f"{base_url}/api/v3/marketplace/transactions/start", json=payload, headers=headers, timeout=15)
             try:
                 resp_data = resp.json()
             except Exception as e:
-                logging.error(f"Payscrow JSON Decode Error: {e}, Status: {resp.status_code}, Text: {resp.text}")
+                logging.error(f"[PAYSCROW] JSON Decode Error: {e}, Status: {resp.status_code}, Body: {resp.text[:500]}")
                 return {
                     "success": False,
-                    "error_message": f"Payscrow invalid response: {resp.status_code}"
+                    "error_message": f"Payment gateway returned an invalid response (HTTP {resp.status_code}). Please try again."
                 }
-                
+
             if not resp_data.get('success'):
-                logging.error(f"Payscrow API error: {resp_data}")
+                # Extract the most useful error detail from Payscrow response
+                errors = resp_data.get('errors') or resp_data.get('message') or resp_data.get('error') or {}
+                if isinstance(errors, dict):
+                    error_detail = "; ".join(f"{k}: {v}" for k, v in errors.items())
+                elif isinstance(errors, list):
+                    error_detail = "; ".join(str(e) for e in errors)
+                else:
+                    error_detail = str(errors)
+                logging.error(f"[PAYSCROW] API rejected payload for {txn_number}: {resp_data}")
                 return {
                     "success": False,
-                    "error_message": "Escrow init failed: " + str(resp_data.get('errors'))
+                    "error_message": f"Payment gateway error: {error_detail or 'Unknown error. Please try again.'}"
                 }
             
             data = resp_data.get('data', {})
+            # Compute aggregate fee for the escrow route to store per-order
+            total_fee_float = float(siiqo_total_fee)
             return {
                 "success": True,
                 "payment_link": data.get('paymentLink'),
                 "transaction_number": txn_number,
                 "provider_transaction_id": str(data.get('transactionId')) if data.get('transactionId') else None,
                 "provider_reference": str(data.get('transactionNumber')) if data.get('transactionNumber') else None,
-                "amount": float(order.total_amount),
-                "fee_amount": fee_amount,
+                "amount": total_amount,
+                "fee_amount": total_fee_float,
                 "error_message": None
             }
             
-        except Exception as e:
-            logging.error(f"Payscrow HTTP error: {e}")
+        except requests.exceptions.Timeout:
+            logging.error(f"[PAYSCROW] Request timed out for {txn_number}")
             return {
                 "success": False,
-                "error_message": "Could not connect to Escrow provider"
+                "error_message": "Payment gateway timed out. Please try again."
+            }
+        except Exception as e:
+            logging.error(f"[PAYSCROW] HTTP error for {txn_number}: {e}")
+            return {
+                "success": False,
+                "error_message": "Could not reach the payment gateway. Please check your connection and try again."
             }
 
     def verify_transaction(self, provider_reference):

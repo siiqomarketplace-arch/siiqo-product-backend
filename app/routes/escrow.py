@@ -144,9 +144,9 @@ def initiate_escrow():
 
     return jsonify({
         "success": True,
-        "paymentLink": result['payment_link'],
-        "transactionNumber": result['transaction_number'],
-        "amount": str(result['amount']),
+        "paymentLink": result.get('payment_link'),
+        "transactionNumber": result.get('transaction_number'),
+        "amount": str(result.get('amount', 0)),
         "status": EscrowStatus.PENDING_PAYMENT,
     }), 200
 
