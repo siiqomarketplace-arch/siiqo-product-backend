@@ -119,13 +119,13 @@ def initiate_escrow():
         if not escrow_txn:
             # fee_amount for an individual order in a master transaction
             # the result['fee_amount'] is total, so we calculate proportional
-            individual_fee = round(float(order.total_amount) * 0.12, 2)
+            individual_fee = round(float(order.total_amount) * 0.06, 2)
             escrow_txn = EscrowTransaction(
                 order_id=order.id,
                 transaction_number=result['transaction_number'],
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(order.total_amount),
-                fee_percent=12.00,
+                fee_percent=6.00,
                 fee_amount=individual_fee,
                 payment_link=result['payment_link'],
                 payscrow_transaction_id=result['provider_transaction_id'],

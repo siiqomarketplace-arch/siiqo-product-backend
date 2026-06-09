@@ -78,8 +78,8 @@ class PayscrowProvider(BaseEscrowProvider):
         
         for o in orders:
             order_total = Decimal(str(o.total_amount))
-            # 12% platform fee; vendor receives 88%
-            fee = (order_total * Decimal('0.12')).quantize(Decimal('0.01'))
+            # 6% platform fee — deducted from vendor payout only; vendor receives 94%
+            fee = (order_total * Decimal('0.06')).quantize(Decimal('0.01'))
             vendor_amount = order_total - fee
             
             siiqo_total_fee += fee
