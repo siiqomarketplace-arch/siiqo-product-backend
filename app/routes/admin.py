@@ -418,6 +418,8 @@ def get_pending_escrow():
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
+    from app.models.order import Order, OrderItem
+
     pending = EscrowTransaction.query.filter(
         EscrowTransaction.status.in_([
             EscrowStatus.PENDING_PAYMENT,
@@ -426,9 +428,45 @@ def get_pending_escrow():
         ])
     ).order_by(EscrowTransaction.created_at.desc()).limit(500).all()
 
+    result = []
+    for e in pending:
+        order = e.order
+        buyer = db.session.get(User, order.buyer_id) if order else None
+        vendor = db.session.get(User, order.vendor_id) if order else None
+        vendor_store = vendor.storefront if vendor else None
+
+        items = []
+        if order:
+            for item in order.items:
+                items.append({
+                    "name": item.product.name if item.product else "Unknown Product",
+                    "quantity": item.quantity,
+                    "price": float(item.price_at_purchase),
+                })
+
+        result.append({
+            **e.to_dict(),
+            # Richer fields for dispute resolution
+            "order_id": order.id if order else None,
+            "order_status": order.status if order else None,
+            "order_created_at": order.created_at.isoformat() if order and order.created_at else None,
+            "payment_method": order.payment_method if order else None,
+            # Buyer
+            "buyer_id": buyer.id if buyer else None,
+            "buyer_name": buyer.full_name if buyer else "Unknown",
+            "buyer_email": buyer.email if buyer else "",
+            # Vendor
+            "vendor_id": vendor.id if vendor else None,
+            "vendor_name": vendor_store.store_name if vendor_store else (vendor.full_name if vendor else "Unknown"),
+            "vendor_email": vendor.email if vendor else "",
+            # Items
+            "items": items,
+            "total_amount": float(e.amount),
+        })
+
     return jsonify({
-        "pending_escrow": [e.to_dict() for e in pending],
-        "count": len(pending),
+        "pending_escrow": result,
+        "count": len(result),
     }), 200
 
 
