@@ -209,11 +209,11 @@ def calculate_compliance_score(vendor_id) -> float:
         # Storefront details
         sf = user.storefront
         if sf:
-            # Vetted/Verified by admin (50 pts)
-            if sf.is_verified:
+            # Identity Verification Verified by admin (50 pts)
+            if sf.verification_status == 'VERIFIED' or sf.is_verified:
                 score += 50.0
-            # CAC Business Registration number provided (50 pts)
-            if sf.cac_reg:
+            # CAC or NIN provided (50 pts)
+            if sf.cac_reg or user.nin:
                 score += 50.0
 
         # Linked bank account verified via Paystack (25 pts)

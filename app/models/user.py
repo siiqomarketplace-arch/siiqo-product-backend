@@ -41,6 +41,7 @@ class User(db.Model):
     # Referral & Loyalty
     referral_code = db.Column(db.String(20), unique=True, nullable=True, index=True)
     points_balance = db.Column(db.Numeric(10, 2), default=0.00)
+    nin = db.Column(db.String(11), nullable=True)
 
     # Location (for hyper-local features)
     city = db.Column(db.String(100), nullable=True)
@@ -108,6 +109,7 @@ class User(db.Model):
             "state": self.state,
             "trust_score": self.trust_score_or_default,
             "trust_tier": self.trust_tier_or_default,
+            "nin": self.nin or "",
         }
 
 
@@ -149,6 +151,10 @@ class Storefront(db.Model):
     phone = db.Column(db.String(20), nullable=True)
     website = db.Column(db.String(255), nullable=True)
     cac_reg = db.Column(db.String(100), nullable=True)
+    account_type = db.Column(db.String(20), default='INDIVIDUAL', nullable=False)
+    nin_document_url = db.Column(db.String(255), nullable=True)
+    cac_document_url = db.Column(db.String(255), nullable=True)
+    verification_status = db.Column(db.String(20), default='NOT_SUBMITTED', nullable=False)
     template_options = db.Column(db.JSON, nullable=True)
     social_links = db.Column(db.JSON, nullable=True)
     working_hours = db.Column(db.JSON, nullable=True)
@@ -196,4 +202,10 @@ class Storefront(db.Model):
             # ── trust fields ──
             "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
             "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
+            # ── verification fields ──
+            "account_type": self.account_type,
+            "cac_reg": self.cac_reg,
+            "nin_document_url": self.nin_document_url,
+            "cac_document_url": self.cac_document_url,
+            "verification_status": self.verification_status,
         }

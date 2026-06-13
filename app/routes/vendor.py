@@ -244,10 +244,16 @@ def onboard_vendor():
         phone=data.get('phone'),
         website=data.get('website'),
         cac_reg=data.get('cac_reg'),
+        account_type=data.get('account_type', 'INDIVIDUAL'),
     )
+
+    if 'nin' in data:
+        user.nin = data['nin']
 
     logo_file = request.files.get('logo') or request.files.get('store_logo')
     banner_file = request.files.get('banner') or request.files.get('banner_url')
+    nin_doc = request.files.get('nin_document') or request.files.get('nin_doc')
+    cac_doc = request.files.get('cac_document') or request.files.get('cac_doc')
 
     if logo_file:
         try:
@@ -260,6 +266,22 @@ def onboard_vendor():
             storefront.banner_url = save_uploaded_file(banner_file, subfolder='storefronts')
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
+
+    if nin_doc:
+        try:
+            storefront.nin_document_url = save_uploaded_file(nin_doc, subfolder='verifications')
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+
+    if cac_doc:
+        try:
+            storefront.cac_document_url = save_uploaded_file(cac_doc, subfolder='verifications')
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+
+    # Auto-flag as pending verification if CAC/NIN or verification files are submitted
+    if storefront.cac_reg or user.nin or storefront.nin_document_url or storefront.cac_document_url:
+        storefront.verification_status = 'PENDING_VERIFY_SUB'
 
     db.session.add(storefront)
     db.session.commit()
@@ -314,6 +336,7 @@ def update_settings():
         'phone': 'phone',
         'website': 'website',
         'cac_reg': 'cac_reg',
+        'account_type': 'account_type',
         'meta_title': 'meta_title',
         'meta_description': 'meta_description',
         'logo_url': 'store_logo',
@@ -325,6 +348,9 @@ def update_settings():
     # Also update user personal info if provided
     if 'phone' in data:
         user.phone = data['phone']
+
+    if 'nin' in data:
+        user.nin = data['nin']
         
     if 'fullname' in data:
         name_parts = data['fullname'].strip().split(' ', 1)
@@ -361,6 +387,29 @@ def update_settings():
             sf.banner_url = save_uploaded_file(request.files['banner_url'], subfolder='storefronts')
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
+
+    # Verification file uploads
+    uploaded_doc = False
+    if 'nin_document' in request.files or 'nin_doc' in request.files:
+        nin_file = request.files.get('nin_document') or request.files.get('nin_doc')
+        try:
+            sf.nin_document_url = save_uploaded_file(nin_file, subfolder='verifications')
+            uploaded_doc = True
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+
+    if 'cac_document' in request.files or 'cac_doc' in request.files:
+        cac_file = request.files.get('cac_document') or request.files.get('cac_doc')
+        try:
+            sf.cac_document_url = save_uploaded_file(cac_file, subfolder='verifications')
+            uploaded_doc = True
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+
+    # Auto-flag as pending if identity details or documents are updated and not verified yet
+    if 'cac_reg' in data or 'nin' in data or uploaded_doc:
+        if sf.verification_status != 'VERIFIED':
+            sf.verification_status = 'PENDING_VERIFY_SUB'
 
     db.session.commit()
 

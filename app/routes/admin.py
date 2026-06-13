@@ -244,6 +244,7 @@ def update_user_status(user_id):
         user.is_active = True
         if user.storefront:
             user.storefront.is_verified = True
+            user.storefront.verification_status = 'VERIFIED'
             try:
                 send_siiqo_email(
                     to_email=user.email,
@@ -267,8 +268,24 @@ def update_user_status(user_id):
                 )
             except Exception:
                 pass
+    elif status == 'rejected':
+        if user.storefront:
+            user.storefront.verification_status = 'REJECTED'
+            user.storefront.is_verified = False
+            try:
+                send_siiqo_email(
+                    to_email=user.email,
+                    subject="Verification Update: Siiqo Application Status",
+                    template_name="vendor_verification_rejected",
+                    first_name=user.first_name or "Vendor",
+                    store_name=user.storefront.store_name,
+                )
+            except Exception:
+                pass
     elif status == 'unverified':
         user.is_verified = False
+        if user.storefront:
+            user.storefront.verification_status = 'NOT_SUBMITTED'
 
     db.session.commit()
 
@@ -332,7 +349,12 @@ def get_all_storefronts():
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
-    storefronts = Storefront.query.order_by(Storefront.created_at.desc()).limit(500).all()
+    status = request.args.get('status')
+    query = Storefront.query
+    if status:
+        query = query.filter_by(verification_status=status)
+
+    storefronts = query.order_by(Storefront.created_at.desc()).limit(500).all()
     return jsonify({
         "storefronts": [{
             "id": s.id,
@@ -340,6 +362,7 @@ def get_all_storefronts():
             "store_slug": s.store_slug,
             "vendor_name": s.vendor.full_name if s.vendor else "Unknown",
             "vendor_email": s.vendor.email if s.vendor else "",
+            "phone": s.phone or (s.vendor.phone if s.vendor else None),
             "is_verified": s.is_verified,
             "is_published": s.is_published,
             "is_live": s.is_live,
@@ -347,6 +370,13 @@ def get_all_storefronts():
             "city": s.city,
             "state": s.state,
             "created_at": s.created_at.isoformat() if s.created_at else None,
+            # verification details
+            "account_type": s.account_type,
+            "cac_reg": s.cac_reg,
+            "nin": s.vendor.nin if s.vendor else None,
+            "nin_document_url": s.nin_document_url,
+            "cac_document_url": s.cac_document_url,
+            "verification_status": s.verification_status,
         } for s in storefronts],
         "count": len(storefronts),
     }), 200
