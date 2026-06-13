@@ -18,6 +18,14 @@ def save_uploaded_file(file_obj, subfolder="general"):
     """
     if not file_obj or not file_obj.filename:
         return None
+
+    # Read content into memory to check size (max 10MB per file)
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    file_obj.seek(0, 2)  # Seek to end
+    file_size = file_obj.tell()
+    file_obj.seek(0)  # Reset to beginning
+    if file_size > MAX_FILE_SIZE:
+        raise ValueError(f"File is too large ({file_size // (1024*1024)}MB). Maximum allowed size is 10MB.")
         
     if not allowed_file(file_obj.filename):
         raise ValueError("Invalid file type. Only image files are allowed.")
