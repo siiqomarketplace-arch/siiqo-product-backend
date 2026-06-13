@@ -52,18 +52,21 @@ class Order(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    payment_link_id = db.Column(db.Integer, db.ForeignKey('payment_links.id'), nullable=True)
+
     # Relationships
     buyer = db.relationship('User', foreign_keys=[buyer_id])
     vendor = db.relationship('User', foreign_keys=[vendor_id])
     items = db.relationship('OrderItem', back_populates='order', cascade="all, delete-orphan")
     escrow = db.relationship('EscrowTransaction', back_populates='order', uselist=False)
+    payment_link = db.relationship('PaymentLink', backref='orders')
 
 class OrderItem(db.Model):
     __tablename__ = 'order_items'
     
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
-    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=True)
     
     price_at_purchase = db.Column(db.Numeric(10, 2), nullable=False)
     quantity = db.Column(db.Integer, nullable=False)

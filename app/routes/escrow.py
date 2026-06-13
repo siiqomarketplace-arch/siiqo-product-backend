@@ -209,6 +209,13 @@ def payscrow_webhook():
                 order = escrow.order
                 if order:
                     order.status = 'PAID'
+                    
+                    if order.payment_link_id:
+                        from app.models.payment_link import PaymentLink
+                        link = db.session.get(PaymentLink, order.payment_link_id)
+                        if link and link.link_type == 'INVOICE':
+                            link.status = 'PAID'
+
                     processed_orders.append((escrow, order))
                     # Notify buyer
                     db.session.add(Notification(
@@ -349,7 +356,8 @@ def release_escrow():
 
     # escrow_code may be null, a placeholder string, or a real numeric code.
     # We only require it if we plan to call applycode. If it's missing we release internally.
-    raw_code = str(escrow.escrow_code).strip() if escrow.escrow_code else ""
+    user_submitted_code = (data.get('escrowCode') or data.get('escrow_code') or '').strip()
+    raw_code = user_submitted_code if user_submitted_code else (str(escrow.escrow_code).strip() if escrow.escrow_code else "")
     code_is_real = raw_code.isdigit() and 4 <= len(raw_code) <= 10
 
     if code_is_real:
@@ -375,6 +383,12 @@ def release_escrow():
                 logging.warning(
                     f"Payscrow applycode non-success for {escrow.transaction_number}: {resp.text}"
                 )
+                is_sandbox = not payscrow_key or payscrow_key.startswith('ps_9') or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
+                if not is_sandbox:
+                    return jsonify({
+                        "success": False,
+                        "message": f"Payscrow release failed: {resp_data.get('message', 'Invalid release code')}"
+                    }), 400
                 # Non-fatal on sandbox/test — continue to release internally
         except Exception as e:
             logging.warning(
@@ -427,6 +441,36 @@ def release_escrow():
     ))
 
     db.session.commit()
+
+    # Send email notification to vendor and buyer (non-blocking)
+    from app.utils.email import send_siiqo_email
+    from app.models.user import User
+
+    vendor = db.session.get(User, order.vendor_id)
+    if vendor and vendor.email:
+        try:
+            send_siiqo_email(
+                to_email=vendor.email,
+                subject="Siiqo - Payout Released",
+                template_name="system_notice",
+                first_name=vendor.first_name or "Vendor",
+                notice_text=f"Congratulations! Payout of ₦{net_amount:,.2f} has been released to your Siiqo wallet for Order #{order.id}. You can view your balance and initiate a withdrawal in your vendor dashboard."
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL WARN] Failed to send payout release email to vendor: {e}")
+
+    buyer = db.session.get(User, order.buyer_id)
+    if buyer and buyer.email:
+        try:
+            send_siiqo_email(
+                to_email=buyer.email,
+                subject="Siiqo - Order Completed",
+                template_name="system_notice",
+                first_name=buyer.first_name or "Buyer",
+                notice_text=f"Thank you! Order #{order.id} is now complete. The funds have been released to the vendor. We hope you enjoyed shopping on Siiqo!"
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL WARN] Failed to send order completed email to buyer: {e}")
 
     return jsonify({
         "success": True,

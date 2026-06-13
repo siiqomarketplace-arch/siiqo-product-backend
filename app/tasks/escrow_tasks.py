@@ -147,6 +147,37 @@ def auto_release_escrow():
             ))
             
             db.session.commit()
+            
+            # Send email notifications (non-blocking)
+            from app.utils.email import send_siiqo_email
+            from app.models.user import User
+
+            vendor = db.session.get(User, order.vendor_id)
+            if vendor and vendor.email:
+                try:
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject="Siiqo - Payout Released",
+                        template_name="system_notice",
+                        first_name=vendor.first_name or "Vendor",
+                        notice_text=f"Congratulations! Payout of ₦{net_amount:,.2f} has been released to your Siiqo wallet for Order #{order.id} (auto-released after 72 hours)."
+                    )
+                except Exception as e:
+                    logger.warning(f"[EMAIL WARN] Failed to send payout release email to vendor: {e}")
+
+            buyer = db.session.get(User, order.buyer_id)
+            if buyer and buyer.email:
+                try:
+                    send_siiqo_email(
+                        to_email=buyer.email,
+                        subject="Siiqo - Order Completed",
+                        template_name="system_notice",
+                        first_name=buyer.first_name or "Buyer",
+                        notice_text=f"Thank you! Order #{order.id} is now complete. The funds have been released to the vendor. We hope you enjoyed shopping on Siiqo!"
+                    )
+                except Exception as e:
+                    logger.warning(f"[EMAIL WARN] Failed to send order completed email to buyer: {e}")
+
             released_count += 1
             
             logger.info(f"  ✓ Auto-released escrow {escrow.transaction_number} for Order #{order.id}")
@@ -226,8 +257,8 @@ def check_pending_payments():
     """
     logger.info(f"[{utcnow()}] Running pending payment check task...")
     
-    # Find escrow transactions that are PENDING_PAYMENT for more than 24 hours
-    cutoff_time = utcnow() - timedelta(hours=24)
+    # Find escrow transactions that are PENDING_PAYMENT for more than 1 hour
+    cutoff_time = utcnow() - timedelta(hours=1)
     
     stale_escrows = EscrowTransaction.query.filter(
         EscrowTransaction.status == EscrowStatus.PENDING_PAYMENT,
@@ -242,6 +273,11 @@ def check_pending_payments():
             if not order:
                 continue
             
+            # Restore stock quantity for the items in the cancelled order
+            for item in order.items:
+                if item.product:
+                    item.product.stock_quantity = (item.product.stock_quantity or 0) + item.quantity
+
             # Cancel order and escrow
             escrow.status = EscrowStatus.CANCELLED
             order.status = 'CANCELLED'
@@ -250,7 +286,7 @@ def check_pending_payments():
             db.session.add(Notification(
                 user_id=order.buyer_id,
                 title="Order Cancelled",
-                message=f"Order #{order.id} was cancelled due to non-payment within 24 hours.",
+                message=f"Order #{order.id} was cancelled due to non-payment within 1 hour.",
                 type="ORDER",
                 order_id=order.id,
             ))

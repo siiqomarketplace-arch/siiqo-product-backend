@@ -12,6 +12,7 @@ from .communication import Notification, Message
 from .social import Post, PostLike, PostComment, Follow, PostView, UserActivity
 from .withdrawal import VendorBankAccount, Withdrawal, PODPayment
 from .negotiation import NegotiationRequest, NegotiationHistory
+from .payment_link import PaymentLink
 
 __all__ = [
     'User', 'Storefront', 'UserRole',
@@ -29,4 +30,5 @@ __all__ = [
     'Post', 'PostLike', 'PostComment', 'Follow', 'PostView', 'UserActivity',
     'VendorBankAccount', 'Withdrawal', 'PODPayment',
     'NegotiationRequest', 'NegotiationHistory',
+    'PaymentLink',
 ]
