@@ -76,6 +76,18 @@ class User(db.Model):
         friendly = prefix.replace('.', ' ').replace('_', ' ').replace('-', ' ').title()
         return friendly
 
+    @property
+    def trust_score_or_default(self) -> int:
+        if not self.trust_profile:
+            return 500
+        return self.trust_profile.total_trust_score
+
+    @property
+    def trust_tier_or_default(self) -> str:
+        if not self.trust_profile:
+            return 'SILVER'
+        return self.trust_profile.trust_tier
+
     def to_public_dict(self) -> dict:
         return {
             "id": self.id,
@@ -94,6 +106,8 @@ class User(db.Model):
             "points_balance": float(self.points_balance or 0),
             "city": self.city,
             "state": self.state,
+            "trust_score": self.trust_score_or_default,
+            "trust_tier": self.trust_tier_or_default,
         }
 
 
@@ -179,4 +193,7 @@ class Storefront(db.Model):
             "user_id": self.vendor_id,
             "vendor_phone": self.phone,
             "whatsapp_link": (f"https://wa.me/{self.phone}" if self.phone else None),
+            # ── trust fields ──
+            "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
+            "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
         }

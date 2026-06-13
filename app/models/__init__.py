@@ -13,6 +13,7 @@ from .social import Post, PostLike, PostComment, Follow, PostView, UserActivity
 from .withdrawal import VendorBankAccount, Withdrawal, PODPayment
 from .negotiation import NegotiationRequest, NegotiationHistory
 from .payment_link import PaymentLink
+from .trust import VendorTrustProfile, TrustScoreHistory
 
 __all__ = [
     'User', 'Storefront', 'UserRole',
@@ -31,4 +32,5 @@ __all__ = [
     'VendorBankAccount', 'Withdrawal', 'PODPayment',
     'NegotiationRequest', 'NegotiationHistory',
     'PaymentLink',
+    'VendorTrustProfile', 'TrustScoreHistory',
 ]

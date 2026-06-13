@@ -96,6 +96,8 @@ def get_products():
             "storefront_id": p.storefront_id,
             "storefront": sf.store_name if sf else None,
             "storefront_slug": sf.store_slug if sf else None,
+            "trust_score": sf.vendor.trust_score_or_default if sf and sf.vendor else 500,
+            "trust_tier": sf.vendor.trust_tier_or_default if sf and sf.vendor else 'SILVER',
             # ── vendor identity (required for chat / messaging) ──
             "vendor_id": sf.vendor_id if sf else None,
             "user_id": sf.vendor_id if sf else None,
@@ -190,6 +192,8 @@ def get_product_details(product_id):
             "state": p.storefront.state,
             "phone": p.storefront.phone,
             "social_links": p.storefront.social_links or {},
+            "trust_score": p.storefront.vendor.trust_score_or_default if p.storefront.vendor else 500,
+            "trust_tier": p.storefront.vendor.trust_tier_or_default if p.storefront.vendor else 'SILVER',
         } if p.storefront else None,
     }), 200
 

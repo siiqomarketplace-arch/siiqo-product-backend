@@ -646,6 +646,14 @@ def submit_review():
     ))
 
     db.session.commit()
+
+    # Trigger trust score recalculation instantly
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        recalculate_vendor_trust(order.vendor_id, reason="Review Submitted")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on review submit: {e}")
+
     return jsonify({"message": "Review submitted. Thank you!", "status": "success"}), 201
 
 
@@ -1169,6 +1177,7 @@ def my_referral_stats():
             "total_referred": len(referrals),
             "pending_rewards": sum(float(r.reward_earned or 0) for r in referrals if r.status == 'PENDING'),
             "total_earned": total_earned,
+            "total_cash_earned": len(referrals) * 100.00,
             "points_balance": float(user.points_balance or 0),
             "referred_users": referred_users,
         },

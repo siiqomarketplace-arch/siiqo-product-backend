@@ -201,15 +201,26 @@ def get_user_detail(user_id):
         return jsonify({"message": "User not found"}), 404
 
     from app.models.order import Order
+    from app.models.partnerships import Referral
+    
     orders = Order.query.filter(
         (Order.buyer_id == user.id) | (Order.vendor_id == user.id)
     ).count()
+
+    referrals_query = Referral.query.filter_by(referrer_id=user.id).all()
+    referrals_list = [{
+        "referred_user_email": r.referred.email if r.referred else "Unknown",
+        "referred_user_name": r.referred.full_name if r.referred else "Unknown",
+        "status": r.status,
+        "created_at": r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else "Unknown"
+    } for r in referrals_query]
 
     return jsonify({
         "user": {
             **user.to_public_dict(),
             "total_orders": orders,
             "storefront": user.storefront.to_public_dict() if user.storefront else None,
+            "referrals_made": referrals_list,
         }
     }), 200
 
@@ -260,6 +271,15 @@ def update_user_status(user_id):
         user.is_verified = False
 
     db.session.commit()
+
+    # Recalculate trust score for storefront verification changes
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        if user.role == 'VENDOR':
+            recalculate_vendor_trust(user.id, reason="Admin Verification Update")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on user status update: {e}")
+
     return jsonify({"message": f"User {user.email} status updated to {status}."}), 200
 
 
@@ -625,6 +645,15 @@ def admin_refund_buyer(order_id):
         ))
 
     db.session.commit()
+
+    # Trigger trust score recalculation on dispute lost
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        if order:
+            recalculate_vendor_trust(order.vendor_id, reason="Dispute Resolved (Refunded)")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on admin refund: {e}")
+
     return jsonify({"message": "Refund processed successfully.", "status": "success"}), 200
 
 
@@ -729,6 +758,15 @@ def admin_release_funds(order_id):
         ))
 
     db.session.commit()
+
+    # Trigger trust score recalculation on dispute won / admin release
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        if order:
+            recalculate_vendor_trust(order.vendor_id, reason="Dispute Resolved (Released)")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on admin release: {e}")
+
     return jsonify({"message": "Funds released successfully.", "status": "success"}), 200
 
 
@@ -1170,3 +1208,74 @@ def revoke_subscription(vendor_id):
     db.session.commit()
 
     return jsonify({"status": "success", "message": f"Revoked active subscriptions for vendor {vendor_id}"}), 200
+
+
+@admin_bp.route('/users/<int:user_id>/adjust-balance', methods=['POST'])
+@jwt_required()
+def adjust_user_balance(user_id):
+    """SuperAdmin manual balance adjustments for referrals or promos."""
+    admin = _require_superadmin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Superadmin access required"}), 403
+
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    data = request.get_json() or {}
+    amount = float(data.get('amount', 0))
+    action = data.get('action', 'CREDIT').strip().upper()
+    description = (data.get('description') or '').strip()
+
+    if amount <= 0:
+        return jsonify({"message": "Amount must be greater than 0"}), 400
+
+    if action not in ('CREDIT', 'DEBIT'):
+        return jsonify({"message": "Action must be CREDIT or DEBIT"}), 400
+
+    from app.models.finance import Ledger
+    from app.models.communication import Notification
+    from sqlalchemy import func
+    import uuid
+
+    # Calculate balance after
+    credits = db.session.query(func.sum(Ledger.amount)).filter_by(
+        vendor_id=user.id, transaction_type='CREDIT'
+    ).scalar() or 0
+    debits = db.session.query(func.sum(Ledger.amount)).filter_by(
+        vendor_id=user.id, transaction_type='DEBIT'
+    ).scalar() or 0
+
+    current_balance = float(credits) - float(debits)
+    if action == 'CREDIT':
+        balance_after = current_balance + amount
+    else:
+        balance_after = current_balance - amount
+
+    ledger_entry = Ledger(
+        vendor_id=user.id,
+        transaction_type=action,
+        amount=amount,
+        description=description or f"Manual balance adjustment by admin",
+        reference_id=f"MANUAL-{uuid.uuid4().hex[:8].upper()}",
+        balance_after=balance_after,
+    )
+    db.session.add(ledger_entry)
+
+    # Notify user
+    notification = Notification(
+        user_id=user.id,
+        title="Wallet Balance Adjusted",
+        message=f"Admin has {'credited' if action == 'CREDIT' else 'debited'} your wallet with ₦{amount:,.2f}. Reason: {description or 'Manual balance adjustment.'}",
+        type="SYSTEM"
+    )
+    db.session.add(notification)
+    
+    db.session.commit()
+
+    return jsonify({
+        "status": "success",
+        "message": f"Successfully {action}ed ₦{amount:,.2f} to user {user.email}",
+        "new_balance": balance_after
+    }), 200
+

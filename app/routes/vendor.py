@@ -1187,3 +1187,25 @@ def analyze_storefront():
 
     return jsonify(result), 200
 
+
+# ---------------------------------------------------------------------------
+# GET /vendor/trust-profile
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/trust-profile', methods=['GET'])
+@jwt_required()
+def get_vendor_trust_profile():
+    user_id = get_jwt_identity()
+    from app.services.trust import get_or_create_trust_profile, recalculate_vendor_trust
+    
+    # Recalculate on load to ensure dashboard displays up-to-date data
+    profile = recalculate_vendor_trust(int(user_id), reason="Dashboard Load")
+    if not profile:
+        profile = get_or_create_trust_profile(int(user_id))
+        
+    if not profile:
+        return jsonify({"message": "Trust profile not found"}), 404
+        
+    return jsonify(profile.to_dict()), 200
+
+

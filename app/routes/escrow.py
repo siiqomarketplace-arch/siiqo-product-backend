@@ -317,6 +317,11 @@ def release_escrow():
                     type="ORDER",
                     order_id=order.id,
                 ))
+                try:
+                    from app.services.referral_service import check_and_reward_referral_on_order_complete
+                    check_and_reward_referral_on_order_complete(order)
+                except Exception as ex:
+                    logging.error(f"[REFERRAL ERR] POD confirm referral reward failed: {ex}")
                 db.session.commit()
                 return jsonify({
                     "success": True,
@@ -405,6 +410,11 @@ def release_escrow():
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
+    try:
+        from app.services.referral_service import check_and_reward_referral_on_order_complete
+        check_and_reward_referral_on_order_complete(order)
+    except Exception as ex:
+        logging.error(f"[REFERRAL ERR] Escrow release referral reward failed: {ex}")
 
     # Credit vendor ledger (net of fee)
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
@@ -441,6 +451,13 @@ def release_escrow():
     ))
 
     db.session.commit()
+
+    # Trigger trust score recalculation instantly
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        recalculate_vendor_trust(order.vendor_id, reason="Escrow Released")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on escrow release: {e}")
 
     # Send email notification to vendor and buyer (non-blocking)
     from app.utils.email import send_siiqo_email
@@ -586,6 +603,13 @@ def raise_dispute():
         ))
 
     db.session.commit()
+
+    # Trigger trust score recalculation instantly
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        recalculate_vendor_trust(order.vendor_id, reason="Dispute Raised")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on dispute raise: {e}")
 
     return jsonify({
         "success": True,

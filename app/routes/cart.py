@@ -322,15 +322,6 @@ def checkout():
                 db.session.add(existing_ref)
                 db.session.flush()
 
-        if existing_ref:
-            referrer = db.session.get(User, existing_ref.referrer_id)
-            if referrer:
-                # 1000 points for 1st order, 50 points for next 99 orders
-                reward = 1000.00 if buyer_order_count == 0 else 50.00
-                existing_ref.status = 'QUALIFIED'
-                existing_ref.reward_earned = float(existing_ref.reward_earned or 0) + reward
-                referrer.points_balance = float(referrer.points_balance or 0) + reward
-
     for vid, items in vendors.items():
         total = sum(
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity

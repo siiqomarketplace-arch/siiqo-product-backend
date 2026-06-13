@@ -41,18 +41,33 @@ def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, desc
 
 def auto_release_escrow():
     """
-    Auto-release escrow funds after 72 hours of delivery confirmation.
+    Auto-release escrow funds after a dynamic holding period based on vendor trust tier:
+    PLATINUM: 24h, GOLD: 48h, SILVER: 72h, BRONZE: 96h.
     Run this task every hour via cron job or scheduler.
     """
     logger.info(f"[{utcnow()}] Running auto-release escrow task...")
     
-    # Find escrow transactions that are DELIVERED and older than 72 hours
-    cutoff_time = utcnow() - timedelta(hours=72)
-    
-    escrows_to_release = EscrowTransaction.query.filter(
-        EscrowTransaction.status == EscrowStatus.DELIVERED,
-        EscrowTransaction.updated_at <= cutoff_time
+    # Find all delivered escrow transactions and filter dynamically in python
+    delivered_escrows = EscrowTransaction.query.filter(
+        EscrowTransaction.status == EscrowStatus.DELIVERED
     ).all()
+    
+    escrows_to_release = []
+    for escrow in delivered_escrows:
+        order = escrow.order
+        if not order:
+            continue
+            
+        try:
+            from app.services.trust import get_vendor_auto_release_hours
+            release_hours = get_vendor_auto_release_hours(order.vendor_id)
+        except Exception as e:
+            logger.error(f"Failed to fetch trust profile for vendor {order.vendor_id}: {e}. Falling back to 72 hours.")
+            release_hours = 72
+            
+        cutoff_time = utcnow() - timedelta(hours=release_hours)
+        if escrow.updated_at <= cutoff_time:
+            escrows_to_release.append(escrow)
     
     released_count = 0
     
@@ -198,15 +213,31 @@ def send_delivery_reminders():
     """
     logger.info(f"[{utcnow()}] Running delivery reminder task...")
     
-    # Find escrow transactions that are DELIVERED for 48 hours but not released
-    cutoff_time = utcnow() - timedelta(hours=48)
-    reminder_cutoff = utcnow() - timedelta(hours=72)  # Don't remind if auto-release is imminent
-    
-    escrows_to_remind = EscrowTransaction.query.filter(
-        EscrowTransaction.status == EscrowStatus.DELIVERED,
-        EscrowTransaction.updated_at <= cutoff_time,
-        EscrowTransaction.updated_at > reminder_cutoff
+    # Find all delivered escrow transactions and filter dynamically based on release thresholds
+    delivered_escrows = EscrowTransaction.query.filter(
+        EscrowTransaction.status == EscrowStatus.DELIVERED
     ).all()
+    
+    escrows_to_remind = []
+    for escrow in delivered_escrows:
+        order = escrow.order
+        if not order:
+            continue
+            
+        try:
+            from app.services.trust import get_vendor_auto_release_hours
+            release_hours = get_vendor_auto_release_hours(order.vendor_id)
+        except Exception:
+            release_hours = 72
+            
+        # Send reminder at dynamic timing (e.g. 12h for Platinum, 24h for Gold, 48h for Silver/Bronze)
+        reminder_trigger_hours = max(12, release_hours - 24)
+        
+        cutoff_time = utcnow() - timedelta(hours=reminder_trigger_hours)
+        release_cutoff = utcnow() - timedelta(hours=release_hours)
+        
+        if escrow.updated_at <= cutoff_time and escrow.updated_at > release_cutoff:
+            escrows_to_remind.append(escrow)
     
     reminded_count = 0
     

@@ -345,6 +345,12 @@ def confirm_pod_payment(order_id):
     # Update order status
     order.status = 'COMPLETED'
     
+    try:
+        from app.services.referral_service import check_and_reward_referral_on_order_complete
+        check_and_reward_referral_on_order_complete(order)
+    except Exception as ex:
+        logging.error(f"[REFERRAL ERR] POD vendor confirm referral reward failed: {ex}")
+    
     # Credit vendor ledger (no platform fee for POD)
     from app.routes.escrow import _credit_vendor_ledger
     _credit_vendor_ledger(
