@@ -173,6 +173,7 @@ def get_all_users():
         else:
             status = 'unverified'
 
+        sf = u.storefront
         user_list.append({
             "id": u.id,
             "email": u.email,
@@ -183,7 +184,24 @@ def get_all_users():
             "is_active": u.is_active,
             "status": status,
             "joined_at": u.created_at.isoformat() if u.created_at else None,
-            "has_storefront": u.storefront is not None,
+            "has_storefront": sf is not None,
+            # KYC / Verification fields
+            "nin": u.nin,
+            "cac_reg": sf.cac_reg if sf else None,
+            "account_type": sf.account_type if sf else None,
+            "verification_status": sf.verification_status if sf else None,
+            "nin_document_url": sf.nin_document_url if sf else None,
+            "cac_document_url": sf.cac_document_url if sf else None,
+            # Storefront basics
+            "store_name": sf.store_name if sf else None,
+            "store_logo": sf.store_logo if sf else None,
+            "store_slug": sf.store_slug if sf else None,
+            "market_presence": {
+                "storefront_link": sf.store_slug if sf else None,
+                "is_published": sf.is_published if sf else False,
+                "product_count": len(sf.products) if sf and sf.products else 0,
+                "website": sf.website if sf else None,
+            } if sf else None,
         })
 
     return jsonify({"users": user_list, "count": len(user_list)}), 200
