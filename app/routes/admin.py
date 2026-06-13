@@ -258,6 +258,26 @@ def update_user_status(user_id):
     status = data.get('status', '')
 
     if status in ('active', 'verified', 'approved'):
+        # Stage 1: Admin approves vendor to go public. Does NOT grant the Verified badge.
+        user.is_verified = True
+        user.is_active = True
+        if user.storefront:
+            user.storefront.is_verified = True
+            # verification_status is intentionally NOT changed here.
+            # The Verified badge is granted separately via 'kyc_approved'.
+            try:
+                send_siiqo_email(
+                    to_email=user.email,
+                    subject="Congratulations! Your Siiqo Store is Approved",
+                    template_name="vendor_approved",
+                    first_name=user.first_name or "Vendor",
+                    store_name=user.storefront.store_name,
+                )
+            except Exception:
+                pass
+
+    elif status == 'kyc_approved':
+        # Stage 2: Admin approves submitted KYC (NIN/CAC). Grants the Verified badge.
         user.is_verified = True
         user.is_active = True
         if user.storefront:
@@ -266,7 +286,7 @@ def update_user_status(user_id):
             try:
                 send_siiqo_email(
                     to_email=user.email,
-                    subject="Congratulations! Your Siiqo Store is Approved",
+                    subject="Your Identity is Verified — Siiqo",
                     template_name="vendor_approved",
                     first_name=user.first_name or "Vendor",
                     store_name=user.storefront.store_name,
