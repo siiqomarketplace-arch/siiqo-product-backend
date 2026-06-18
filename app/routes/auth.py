@@ -524,3 +524,106 @@ def unsubscribe():
     </div>
     </body></html>
     """, 200
+
+
+# ---------------------------------------------------------------------------
+# Telegram Login Widget Verification
+# ---------------------------------------------------------------------------
+
+@auth_bp.route('/telegram-login', methods=['POST'])
+@limiter.limit("10 per minute")
+def telegram_login():
+    import hashlib
+    import hmac
+
+    data = request.get_json() or {}
+    
+    tg_id = data.get('id')
+    first_name = data.get('first_name', '')
+    last_name = data.get('last_name', '')
+    username = data.get('username', '')
+    photo_url = data.get('photo_url', '')
+    auth_date = data.get('auth_date')
+    tg_hash = data.get('hash')
+    
+    if not tg_id or not tg_hash:
+        return jsonify({"message": "Invalid Telegram authentication data"}), 400
+        
+    # Verify hash using the official Telegram widget authentication algorithm
+    check_fields = []
+    for k, v in sorted(data.items()):
+        if k != 'hash' and v is not None:
+            check_fields.append(f"{k}={str(v)}")
+    data_check_string = "\n".join(check_fields)
+    
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '8292348801:AAFwdkZinAtvWyUhFft7qZP95r_qre5WTsM')
+    
+    secret_key = hashlib.sha256(bot_token.encode('utf-8')).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    
+    if calculated_hash != tg_hash:
+        return jsonify({"message": "Telegram authentication failed verification"}), 400
+        
+    # Prevent replay attacks (check session age — 24 hours max)
+    try:
+        auth_timestamp = int(auth_date)
+        current_timestamp = int(datetime.now(timezone.utc).timestamp())
+        if abs(current_timestamp - auth_timestamp) > 86400:
+            return jsonify({"message": "Telegram authentication session expired"}), 400
+    except Exception:
+        return jsonify({"message": "Invalid auth_date"}), 400
+         
+    # Authenticate or Register user deterministically
+    virtual_email = f"tg_{tg_id}@siiqo.app"
+    tg_secret = os.environ.get('TG_AUTH_SECRET', 'siiqo_secret_2024')
+    virtual_password = f"tg_{tg_id}_{tg_secret}"
+    
+    user = User.query.filter_by(email=virtual_email).first()
+    
+    if not user:
+        # Register new user (pre-verified because authenticated via Telegram OAuth)
+        user = User(
+            email=virtual_email,
+            first_name=first_name or 'Telegram',
+            last_name=last_name or 'User',
+            role=UserRole.BUYER,
+            is_verified=True,
+            is_active=True,
+            profile_pic=photo_url or None
+        )
+        user.set_password(virtual_password)
+        db.session.add(user)
+        db.session.flush()
+        user.generate_referral_code()
+        db.session.commit()
+    else:
+        # User exists, ensure they are verified and active
+        if not user.is_verified:
+            user.is_verified = True
+        if not user.is_active:
+            return jsonify({"message": "Your account has been suspended. Please contact support."}), 403
+        
+        # Update details from Telegram if changed
+        updated = False
+        if first_name and user.first_name != first_name:
+            user.first_name = first_name
+            updated = True
+        if last_name and user.last_name != last_name:
+            user.last_name = last_name
+            updated = True
+        if photo_url and user.profile_pic != photo_url:
+            user.profile_pic = photo_url
+            updated = True
+            
+        if updated:
+            db.session.commit()
+        
+    tokens = _make_tokens(user)
+    return jsonify({
+        "message": "Login successful",
+        "user": _user_payload(user),
+        **tokens,
+        "token": tokens["access_token"],
+        "access_token": tokens["access_token"],
+    }), 200
+
