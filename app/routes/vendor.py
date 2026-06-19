@@ -894,7 +894,7 @@ def get_orders():
                     )
                     if r.status_code == 200:
                         ps_status = str(r.json().get('paymentStatus', '')).lower()
-                        if ps_status in ['paid', 'completed', 'pendingsettlement', 'processing']:
+                        if ps_status in ['paid', 'completed', 'pendingsettlement']:
                             escrow_check.status = 'IN_ESCROW'
                             escrow_check.paid_at = escrow_check.paid_at or datetime.now(_tz.utc)
                             if r.json().get('escrowCode'):

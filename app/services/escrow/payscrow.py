@@ -40,8 +40,8 @@ class PayscrowProvider(BaseEscrowProvider):
         from app.models.withdrawal import VendorBankAccount
         from app.models.user import User
 
-        # Calculate totals across all orders
-        total_amount = sum(float(order.total_amount) for order in orders)
+        # Calculate totals across all orders (including delivery fees)
+        total_amount = sum(float(order.total_amount) + float(order.logistics_fee or 0.0) for order in orders)
 
         # Use the first order for buyer details
         buyer = orders[0].buyer
@@ -75,12 +75,15 @@ class PayscrowProvider(BaseEscrowProvider):
         siiqo_total_fee = Decimal('0.00')
         total_vendor_amount = Decimal('0.00')
         vendor_settlements = {}
+        partner_settlements = {}
+
+        from app.models.partnerships import PartnerApplication
         
         for o in orders:
-            order_total = Decimal(str(o.total_amount))
+            p_subtotal = Decimal(str(o.total_amount))
             # 6% platform fee — deducted from vendor payout only; vendor receives 94%
-            fee = (order_total * Decimal('0.06')).quantize(Decimal('0.01'))
-            vendor_amount = order_total - fee
+            fee = (p_subtotal * Decimal('0.06')).quantize(Decimal('0.01'))
+            vendor_amount = p_subtotal - fee
             
             siiqo_total_fee += fee
             total_vendor_amount += vendor_amount
@@ -115,6 +118,50 @@ class PayscrowProvider(BaseEscrowProvider):
                     "amount": vendor_amount
                 }
 
+            # Handle delivery partner split payout if logistics_fee is present
+            log_fee = Decimal(str(o.logistics_fee or '0.00'))
+            if log_fee > 0:
+                partner_id = None
+                if o.logistics_provider_id and o.logistics_provider_id.startswith('siiqo_partner_'):
+                    pid_str = o.logistics_provider_id.replace('siiqo_partner_', '')
+                    if pid_str.isdigit():
+                        partner_id = int(pid_str)
+
+                if partner_id and partner_id > 0:
+                    # Partner gets 100% of their base fee (fee / 1.10)
+                    partner_base_fee = (log_fee / Decimal('1.10')).quantize(Decimal('0.01'))
+                    siiqo_markup = log_fee - partner_base_fee
+                    siiqo_total_fee += siiqo_markup
+
+                    # Fetch partner application for bank details
+                    app = PartnerApplication.query.filter_by(user_id=partner_id, status='APPROVED').first()
+                    if app and app.bank_code and app.account_number:
+                        p_b_code = app.bank_code
+                        p_acc_num = app.account_number
+                        p_acc_name = app.account_name or app.business_name or f"Partner ID {partner_id}"
+                    else:
+                        # Fall back to Siiqo default account if partner hasn't configured bank details
+                        p_b_code = siiqo_bank_code
+                        p_acc_num = siiqo_account_number
+                        p_acc_name = siiqo_account_name
+                        siiqo_total_fee += partner_base_fee
+                        partner_base_fee = Decimal('0.00')
+
+                    if partner_base_fee > 0:
+                        p_key = (p_b_code, p_acc_num)
+                        if p_key in partner_settlements:
+                            partner_settlements[p_key]["amount"] += partner_base_fee
+                        else:
+                            partner_settlements[p_key] = {
+                                "bankCode": p_b_code,
+                                "accountNumber": p_acc_num,
+                                "accountName": p_acc_name,
+                                "amount": partner_base_fee
+                            }
+                else:
+                    # No partner (e.g. self_pickup, siiqo_dispatch) — Siiqo keeps the full logistics fee if any
+                    siiqo_total_fee += log_fee
+
         settlement_accounts = []
         if siiqo_total_fee > 0:
             settlement_accounts.append({
@@ -130,6 +177,14 @@ class PayscrowProvider(BaseEscrowProvider):
                 "accountNumber": v_sett["accountNumber"],
                 "accountName": v_sett["accountName"],
                 "amount": float(v_sett["amount"])
+            })
+
+        for p_sett in partner_settlements.values():
+            settlement_accounts.append({
+                "bankCode": p_sett["bankCode"],
+                "accountNumber": p_sett["accountNumber"],
+                "accountName": p_sett["accountName"],
+                "amount": float(p_sett["amount"])
             })
         
         # Generate item descriptions for all orders

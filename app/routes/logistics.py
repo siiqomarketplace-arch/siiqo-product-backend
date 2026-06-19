@@ -73,6 +73,16 @@ def get_active_partners():
             if state_filter.lower() not in app.state_of_operation.lower():
                 continue
 
+        # Retrieve pricing settings or use sensible defaults
+        pricing = app.pricing_settings if app and app.pricing_settings else {}
+        store_settings = {
+            "pricing_model": pricing.get("pricing_model") or "FLAT",
+            "flat_rate": pricing.get("flat_rate") or 1500,
+            "base_fee": pricing.get("base_fee") or 1000,
+            "per_km_fee": pricing.get("per_km_fee") or 150,
+            "external_api_key": pricing.get("external_api_key") or "",
+        }
+
         partner_data.append({
             "id": p.id,
             "name": p.full_name,
@@ -81,11 +91,10 @@ def get_active_partners():
             "partner_role": service_type,
             "state": app.state_of_operation if app else "Lagos",
             "status": "ACTIVE",
-            "store_settings": {
-                "pricing_model": "FIXED",
-                "base_fee": 1500,
-                "per_km_fee": 150,
-            },
+            "bank_code": app.bank_code if app else None,
+            "account_number": app.account_number if app else None,
+            "account_name": app.account_name if app else None,
+            "store_settings": store_settings,
         })
 
     # Fallback: Siiqo default delivery option

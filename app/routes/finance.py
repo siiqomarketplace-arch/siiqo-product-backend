@@ -95,6 +95,217 @@ def list_invoices():
     }), 200
 
 
+import io
+import os
+import boto3
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+logger = logging.getLogger(__name__)
+
+def save_pdf_file(file_bytes, filename, subfolder="pdfs"):
+    """
+    Saves a PDF file bytes to S3 or local storage.
+    """
+    aws_access_key = current_app.config.get('AWS_ACCESS_KEY_ID')
+    aws_secret_key = current_app.config.get('AWS_SECRET_ACCESS_KEY')
+    bucket_name = current_app.config.get('AWS_S3_BUCKET_NAME')
+    region = current_app.config.get('AWS_REGION', 'us-east-1')
+    
+    unique_filename = f"{uuid.uuid4().hex}_{filename}"
+    s3_key = f"uploads/{subfolder}/{unique_filename}"
+    
+    if aws_access_key and aws_secret_key and bucket_name:
+        try:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                region_name=region
+            )
+            s3_client.upload_fileobj(
+                io.BytesIO(file_bytes),
+                bucket_name,
+                s3_key,
+                ExtraArgs={"ContentType": "application/pdf"}
+            )
+            return f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
+        except Exception as e:
+            logger.info(f"[WARN] S3 upload failed for PDF, falling back to local storage: {e}")
+            
+    # Fallback to local storage
+    upload_dir = os.path.join(current_app.root_path, 'static', 'uploads', subfolder)
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    file_path = os.path.join(upload_dir, unique_filename)
+    with open(file_path, 'wb') as f:
+        f.write(file_bytes)
+        
+    return f"/static/uploads/{subfolder}/{unique_filename}"
+
+
+def generate_pdf_document(doc_type, doc_num, customer_name, customer_email, customer_phone, customer_address, line_items, totals, branding=None):
+    """
+    Generates a professional PDF for an Invoice or Receipt.
+    returns bytes.
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    story = []
+    
+    # Theme colors
+    primary_color = colors.HexColor(branding.primary_color if branding else "#0b1b3b")
+    secondary_color = colors.HexColor(branding.secondary_color if branding else "#E0921C")
+    
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        leading=28,
+        textColor=primary_color,
+        spaceAfter=6
+    )
+    
+    header_style = ParagraphStyle(
+        'HeaderStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#4a5568")
+    )
+    
+    bold_style = ParagraphStyle(
+        'BoldStyle',
+        parent=styles['Normal'],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=14
+    )
+    
+    # Header block
+    biz_name = "Siiqo Vendor Store"
+    biz_email = ""
+    biz_phone = ""
+    biz_address = ""
+    
+    if branding:
+        # Resolve vendor name/business name
+        sf = Storefront.query.filter_by(vendor_id=branding.vendor_id).first()
+        if sf:
+            biz_name = sf.store_name
+        elif branding.vendor:
+            biz_name = branding.vendor.full_name
+            
+        biz_email = branding.business_email or (branding.vendor.email if branding.vendor else "")
+        biz_phone = branding.business_phone or (branding.vendor.phone if branding.vendor else "")
+        biz_address = branding.business_address or ""
+    
+    header_data = [
+        [
+            Paragraph(f"<b>{biz_name}</b><br/>{biz_address}<br/>Phone: {biz_phone}<br/>Email: {biz_email}", header_style),
+            Paragraph(f"<font size=20 color='{primary_color.hexval()}'><b>{doc_type.upper()}</b></font><br/><br/><b># {doc_num}</b><br/>Date: {totals.get('date', '')}", ParagraphStyle('RightHeader', parent=header_style, alignment=2))
+        ]
+    ]
+    
+    header_table = Table(header_data, colWidths=[300, 240])
+    header_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('PADDING', (0,0), (-1,-1), 0),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 20))
+    story.append(HRFlowable(width="100%", thickness=2, color=primary_color, spaceBefore=1, spaceAfter=20))
+    
+    # Bill To block
+    bill_to_data = [
+        [
+            Paragraph("<b>CLIENT:</b>", bold_style),
+            Paragraph("<b>DETAILS:</b>", bold_style)
+        ],
+        [
+            Paragraph(f"{customer_name}<br/>{customer_address}<br/>Phone: {customer_phone}<br/>Email: {customer_email}", header_style),
+            Paragraph(f"Status: <b>{totals.get('status', 'ISSUED').upper()}</b><br/>Currency: <b>{totals.get('currency', 'NGN')}</b>", header_style)
+        ]
+    ]
+    bill_to_table = Table(bill_to_data, colWidths=[270, 270])
+    bill_to_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('PADDING', (0,0), (-1,-1), 2),
+    ]))
+    story.append(bill_to_table)
+    story.append(Spacer(1, 20))
+    
+    # Table headers
+    table_data = [[
+        Paragraph("<b>Item / Description</b>", ParagraphStyle('Th', parent=styles['Normal'], textColor=colors.white, fontName="Helvetica-Bold")),
+        Paragraph("<b>Qty</b>", ParagraphStyle('Th', parent=styles['Normal'], textColor=colors.white, fontName="Helvetica-Bold", alignment=1)),
+        Paragraph("<b>Unit Price</b>", ParagraphStyle('Th', parent=styles['Normal'], textColor=colors.white, fontName="Helvetica-Bold", alignment=2)),
+        Paragraph("<b>Amount</b>", ParagraphStyle('Th', parent=styles['Normal'], textColor=colors.white, fontName="Helvetica-Bold", alignment=2))
+    ]]
+    
+    for item in line_items:
+        desc = item.get('name') or item.get('description') or "Item"
+        qty = item.get('qty', 1)
+        price = item.get('price', 0)
+        amt = float(qty) * float(price)
+        table_data.append([
+            Paragraph(desc, styles['Normal']),
+            Paragraph(str(qty), ParagraphStyle('Center', parent=styles['Normal'], alignment=1)),
+            Paragraph(f"₦{float(price):,.2f}", ParagraphStyle('Right', parent=styles['Normal'], alignment=2)),
+            Paragraph(f"₦{amt:,.2f}", ParagraphStyle('Right', parent=styles['Normal'], alignment=2))
+        ])
+        
+    items_table = Table(table_data, colWidths=[280, 40, 110, 110])
+    items_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), primary_color),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,0), 8),
+        ('TOPPADDING', (0,0), (-1,0), 8),
+        ('BOTTOMPADDING', (0,1), (-1,-1), 6),
+        ('TOPPADDING', (0,1), (-1,-1), 6),
+        ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor("#e2e8f0")),
+    ]))
+    story.append(items_table)
+    story.append(Spacer(1, 15))
+    
+    # Totals block
+    summary_data = [
+        [Paragraph("", styles['Normal']), Paragraph("Subtotal:", bold_style), Paragraph(f"₦{float(totals.get('subtotal', 0)):,.2f}", ParagraphStyle('R', parent=styles['Normal'], alignment=2))],
+        [Paragraph("", styles['Normal']), Paragraph("Discount:", bold_style), Paragraph(f"- ₦{float(totals.get('discount', 0)):,.2f}", ParagraphStyle('R', parent=styles['Normal'], alignment=2))],
+        [Paragraph("", styles['Normal']), Paragraph("Tax:", bold_style), Paragraph(f"₦{float(totals.get('tax_amount', 0)):,.2f}", ParagraphStyle('R', parent=styles['Normal'], alignment=2))],
+        [Paragraph("", styles['Normal']), Paragraph("<b>Total:</b>", bold_style), Paragraph(f"<b>₦{float(totals.get('total', 0)):,.2f}</b>", ParagraphStyle('R', parent=styles['Normal'], alignment=2))]
+    ]
+    summary_table = Table(summary_data, colWidths=[300, 100, 140])
+    summary_table.setStyle(TableStyle([
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+        ('PADDING', (0,0), (-1,-1), 4),
+        ('LINEBELOW', (1,3), (2,3), 1, primary_color),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 30))
+    
+    # Footer notes
+    footer_text = ""
+    if branding:
+        footer_text = branding.invoice_footer if doc_type.lower() == 'invoice' else branding.receipt_footer
+    if not footer_text:
+        footer_text = "Thank you for your business! Powered by Siiqo."
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cbd5e0"), spaceBefore=10, spaceAfter=15))
+    story.append(Paragraph(footer_text, ParagraphStyle('FooterText', parent=styles['Normal'], fontSize=8, textColor=colors.HexColor("#718096"), alignment=1)))
+    
+    doc.build(story)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
+
+
+from flask import current_app
+
 @finance_bp.route('/invoices', methods=['POST'])
 @jwt_required()
 @limiter.limit("30 per minute")
@@ -153,6 +364,38 @@ def create_invoice():
     )
     
     db.session.add(invoice)
+    db.session.flush()
+
+    # Generate PDF
+    try:
+        pdf_totals = {
+            'date': invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else datetime.now().strftime('%Y-%m-%d'),
+            'status': invoice.status,
+            'currency': invoice.currency,
+            'subtotal': invoice.subtotal,
+            'discount': invoice.discount,
+            'tax_amount': invoice.tax_amount,
+            'total': invoice.total
+        }
+        pdf_bytes = generate_pdf_document(
+            doc_type='invoice',
+            doc_num=invoice.invoice_number,
+            customer_name=invoice.customer_name,
+            customer_email=invoice.customer_email,
+            customer_phone=invoice.customer_phone,
+            customer_address=invoice.customer_address,
+            line_items=invoice.line_items,
+            totals=pdf_totals,
+            branding=settings
+        )
+        pdf_path = save_pdf_file(pdf_bytes, f"invoice_{invoice.invoice_number}.pdf")
+        if pdf_path.startswith('/'):
+            invoice.pdf_url = request.host_url.rstrip('/') + pdf_path
+        else:
+            invoice.pdf_url = pdf_path
+    except Exception as e:
+        logger.error(f"[ERROR] Failed to generate PDF for invoice: {e}")
+
     db.session.commit()
 
     return jsonify({
@@ -282,6 +525,36 @@ def create_receipt():
 
     db.session.add(receipt)
     db.session.flush() # get receipt.id
+
+    # Generate PDF
+    try:
+        pdf_totals = {
+            'date': receipt.issued_at.strftime('%Y-%m-%d') if receipt.issued_at else datetime.now().strftime('%Y-%m-%d'),
+            'status': receipt.status,
+            'currency': receipt.currency,
+            'subtotal': receipt.subtotal,
+            'discount': receipt.discount,
+            'tax_amount': receipt.tax_amount,
+            'total': receipt.total
+        }
+        pdf_bytes = generate_pdf_document(
+            doc_type='receipt',
+            doc_num=receipt.receipt_number,
+            customer_name=receipt.customer_name,
+            customer_email=receipt.customer_email,
+            customer_phone=receipt.customer_phone,
+            customer_address='',
+            line_items=receipt.line_items,
+            totals=pdf_totals,
+            branding=settings
+        )
+        pdf_path = save_pdf_file(pdf_bytes, f"receipt_{receipt.receipt_number}.pdf")
+        if pdf_path.startswith('/'):
+            receipt.pdf_url = request.host_url.rstrip('/') + pdf_path
+        else:
+            receipt.pdf_url = pdf_path
+    except Exception as e:
+        logger.error(f"[ERROR] Failed to generate PDF for receipt: {e}")
 
     # Atomic backend stock sync (Task 4)
     for item in line_items:

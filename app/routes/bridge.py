@@ -447,7 +447,7 @@ def buyer_order_history():
                     )
                     if r.status_code == 200:
                         ps_status = str(r.json().get('paymentStatus', '')).lower()
-                        if ps_status in ['paid', 'completed', 'pendingsettlement', 'processing']:
+                        if ps_status in ['paid', 'completed', 'pendingsettlement']:
                             escrow_check.status = 'IN_ESCROW'
                             escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
                             if r.json().get('escrowCode'):
@@ -1246,3 +1246,99 @@ def apply_for_partnership():
 def get_active_partners():
     from app.routes.logistics import get_active_partners as _get_active
     return _get_active()
+
+
+@bridge_bp.route('/vendor/logistics/settings', methods=['GET', 'POST'])
+@jwt_required()
+def partner_vendor_logistics_settings():
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    if user.role == UserRole.PARTNER:
+        app = PartnerApplication.query.filter_by(user_id=user.id, status='APPROVED').first()
+        if not app:
+            return jsonify({"message": "Approved partnership required"}), 403
+
+        if request.method == 'GET':
+            pricing = app.pricing_settings or {}
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "pricing_model": pricing.get('pricing_model', 'FLAT'),
+                    "flat_rate": pricing.get('flat_rate', ''),
+                    "base_fee": pricing.get('base_fee', ''),
+                    "per_km_fee": pricing.get('per_km_fee', ''),
+                    "external_api_key": pricing.get('external_api_key', ''),
+                    "bank_code": app.bank_code or '',
+                    "account_number": app.account_number or '',
+                    "account_name": app.account_name or '',
+                }
+            }), 200
+
+        data = request.get_json() or {}
+        # Build a fresh copy — mutating the existing dict in-place won't trigger
+        # SQLAlchemy's change detection for JSON columns.
+        pricing = dict(app.pricing_settings or {})
+        if 'pricing_model' in data:
+            pricing['pricing_model'] = data['pricing_model']
+        if 'flat_rate' in data:
+            pricing['flat_rate'] = data['flat_rate']
+        if 'base_fee' in data:
+            pricing['base_fee'] = data['base_fee']
+        if 'per_km_fee' in data:
+            pricing['per_km_fee'] = data['per_km_fee']
+        if 'external_api_key' in data:
+            pricing['external_api_key'] = data['external_api_key']
+        # Assign the new dict object so SQLAlchemy detects the change
+        app.pricing_settings = pricing
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(app, 'pricing_settings')
+
+        if 'bank_code' in data:
+            app.bank_code = data['bank_code']
+        if 'account_number' in data:
+            app.account_number = data['account_number']
+        if 'account_name' in data:
+            app.account_name = data['account_name']
+
+        db.session.commit()
+        return jsonify({"message": "Settings updated", "status": "success"}), 200
+
+    else:
+        # Delegate to standard vendor logistics preferences route
+        from app.routes.logistics import vendor_logistics_settings as _vendor_settings
+        return _vendor_settings()
+
+
+@bridge_bp.route('/partners/dashboard/assignments', methods=['GET'])
+@jwt_required()
+def partner_dashboard_assignments():
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or user.role != UserRole.PARTNER:
+        return jsonify({"message": "Partner access required"}), 403
+
+    from app.models.escrow import LogisticsAssignment
+    assignments = LogisticsAssignment.query.filter_by(partner_id=user_id).order_by(
+        LogisticsAssignment.created_at.desc()
+    ).all()
+
+    result = []
+    for a in assignments:
+        order = a.order
+        vendor = order.vendor if order else None
+        sf = vendor.storefront if vendor else None
+        
+        result.append({
+            "id": a.id,
+            "order_id": a.order_id,
+            "status": a.status,
+            "vendor_name": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
+            "delivery_address": order.delivery_address if order and order.delivery_address else (order.delivery_city if order else "N/A"),
+            "delivery_fee": float(a.delivery_fee),
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        })
+
+    return jsonify({"status": "success", "data": result}), 200

@@ -1,5 +1,6 @@
 """Quick verification: imports, app creation, route registration."""
 import sys
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from app import create_app
 
 app = create_app()

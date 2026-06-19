@@ -205,7 +205,7 @@ def payscrow_webhook():
                 escrow.escrow_code = escrow_code
                 if payscrow_transaction_id:
                     escrow.payscrow_transaction_id = payscrow_transaction_id
-
+                
                 order = escrow.order
                 if order:
                     order.status = 'PAID'
@@ -216,13 +216,28 @@ def payscrow_webhook():
                         if link and link.link_type == 'INVOICE':
                             link.status = 'PAID'
 
+                    # Update LogisticsAssignment status
+                    from app.models.escrow import LogisticsAssignment
+                    assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
+                    if assignment and assignment.status == 'PENDING':
+                        assignment.status = 'ASSIGNED'
+                        assignment.assigned_at = _utcnow()
+                        # Notify delivery partner
+                        db.session.add(Notification(
+                            user_id=assignment.partner_id,
+                            title="New Delivery Assignment",
+                            message=f"You have been assigned a new delivery for Order #{order.id}. Delivery fee: ₦{assignment.delivery_fee:,.2f}.",
+                            type="DELIVERY",
+                            order_id=order.id
+                        ))
+
                     processed_orders.append((escrow, order))
                     # Notify buyer
                     db.session.add(Notification(
                         user_id=order.buyer_id,
                         title="Payment Confirmed",
                         message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
-                        type="ESCROW",
+                        type="ORDER",
                         order_id=order.id,
                     ))
                     # Notify vendor
@@ -342,7 +357,7 @@ def release_escrow():
             if resp.status_code == 200:
                 status_data = resp.json()
                 p_status = str(status_data.get('paymentStatus', '')).lower()
-                if p_status in ['paid', 'completed', 'pendingsettlement', 'processing']:
+                if p_status in ['paid', 'completed', 'pendingsettlement']:
                     escrow.status = EscrowStatus.IN_ESCROW
                     escrow.paid_at = _utcnow()
                     if status_data.get('escrowCode'):

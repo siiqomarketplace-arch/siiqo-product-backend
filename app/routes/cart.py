@@ -322,6 +322,8 @@ def checkout():
                 db.session.add(existing_ref)
                 db.session.flush()
 
+    logistics_selections = data.get('logistics_selections', [])
+
     for vid, items in vendors.items():
         total = sum(
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
@@ -330,6 +332,18 @@ def checkout():
         fee_percent = 12.00
         fee_amount = total * (fee_percent / 100)
 
+        # Match logistics selection for this vendor
+        logistics_fee = 0.0
+        logistics_provider_id = None
+        if logistics_selections:
+            for sel in logistics_selections:
+                sel_vid = sel.get('vendorId')
+                if sel_vid is not None and int(sel_vid) == int(vid):
+                    opt = sel.get('selectedOption') or {}
+                    logistics_fee = float(opt.get('fee', 0.0))
+                    logistics_provider_id = opt.get('id')
+                    break
+
         # Create Order
         new_order = Order(
             buyer_id=user_id,
@@ -337,9 +351,35 @@ def checkout():
             total_amount=total,
             status='PENDING',
             payment_method=payment_method,
+            logistics_provider_id=logistics_provider_id,
+            logistics_fee=logistics_fee,
+            delivery_address=data.get('delivery_address'),
+            delivery_city=data.get('delivery_city'),
+            delivery_state=data.get('delivery_state'),
+            delivery_phone=data.get('delivery_phone'),
+            delivery_name=data.get('customer', {}).get('name') if data.get('customer') else None,
         )
         db.session.add(new_order)
         db.session.flush()
+
+        # If a logistics partner is selected, create LogisticsAssignment record
+        if logistics_provider_id and logistics_provider_id.startswith('siiqo_partner_'):
+            pid_str = logistics_provider_id.replace('siiqo_partner_', '')
+            if pid_str.isdigit():
+                partner_id = int(pid_str)
+                # Delivery Partner gets 100% of their base fee (fee / 1.10)
+                partner_base_fee = round(logistics_fee / 1.10, 2)
+                
+                # Create the assignment
+                from app.models.escrow import LogisticsAssignment
+                assignment = LogisticsAssignment(
+                    order_id=new_order.id,
+                    partner_id=partner_id,
+                    status='ASSIGNED' if payment_method == 'POD' else 'PENDING',
+                    delivery_fee=partner_base_fee,
+                    assigned_at=datetime.utcnow() if payment_method == 'POD' else None
+                )
+                db.session.add(assignment)
 
         for item in items:
             product = db.session.query(Product).with_for_update().get(item.product.id)
