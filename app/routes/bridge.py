@@ -787,6 +787,13 @@ def partner_login():
     access_token = create_access_token(identity=str(user.id))
     app_record = PartnerApplication.query.filter_by(user_id=user.id, status='APPROVED').first()
 
+    # Calculate real lifetime earnings from completed deliveries
+    from sqlalchemy import func
+    from app.models.escrow import LogisticsAssignment
+    total_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter_by(
+        partner_id=user.id, status='DELIVERED'
+    ).scalar() or 0.0
+
     return jsonify({
         "access_token": access_token,
         "partner": {
@@ -795,7 +802,7 @@ def partner_login():
             "name": user.full_name,
             "partner_role": app_record.service_type if app_record else "LOGISTICS",
             "status": "ACTIVE",
-            "wallet_balance": 0,
+            "wallet_balance": float(total_earned),
         },
     }), 200
 
@@ -1462,15 +1469,56 @@ def partner_dashboard_assignments():
         order = a.order
         vendor = order.vendor if order else None
         sf = vendor.storefront if vendor else None
-        
+
         result.append({
             "id": a.id,
             "order_id": a.order_id,
             "status": a.status,
+            "vendor": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
             "vendor_name": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
-            "delivery_address": order.delivery_address if order and order.delivery_address else (order.delivery_city if order else "N/A"),
+            "destination": order.delivery_address if order and order.delivery_address else (order.delivery_city if order else "N/A"),
+            "delivery_address": order.delivery_address if order else "N/A",
+            "city": order.delivery_city if order else "",
+            "fee": float(a.delivery_fee),
             "delivery_fee": float(a.delivery_fee),
+            "date": a.created_at.strftime('%d %b %Y') if a.created_at else "",
             "created_at": a.created_at.isoformat() if a.created_at else None,
+            "buyer_name": order.buyer.full_name if order and order.buyer else "N/A",
+            "buyer_phone": order.buyer.phone if order and order.buyer else "",
         })
 
     return jsonify({"status": "success", "data": result}), 200
+
+
+@bridge_bp.route('/partners/earnings', methods=['GET'])
+@jwt_required()
+def partner_earnings():
+    """Return real lifetime earnings for a partner from completed deliveries."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or user.role != UserRole.PARTNER:
+        return jsonify({"message": "Partner access required"}), 403
+
+    from sqlalchemy import func
+    from app.models.escrow import LogisticsAssignment
+
+    total_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter_by(
+        partner_id=user_id, status='DELIVERED'
+    ).scalar() or 0.0
+
+    pending_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter(
+        LogisticsAssignment.partner_id == int(user_id),
+        LogisticsAssignment.status.in_(['ASSIGNED', 'IN_TRANSIT']),
+    ).scalar() or 0.0
+
+    completed_count = LogisticsAssignment.query.filter_by(
+        partner_id=user_id, status='DELIVERED'
+    ).count()
+
+    return jsonify({
+        "status": "success",
+        "total_earned": float(total_earned),
+        "pending_earned": float(pending_earned),
+        "completed_deliveries": completed_count,
+        "currency": "NGN",
+    }), 200

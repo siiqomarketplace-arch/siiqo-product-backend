@@ -118,12 +118,12 @@ def get_active_partners():
 
 
 # ---------------------------------------------------------------------------
-# PATCH /logistics/assignments/<id>/deliver
+# PATCH /logistics/assignments/<id>/deliver  (primary route)
+# PATCH /logistics/assignments/<id>/status   (alias — same logic)
 # ---------------------------------------------------------------------------
 
-@logistics_bp.route('/assignments/<int:assignment_id>/deliver', methods=['PATCH'])
-@jwt_required()
-def deliver_assignment(assignment_id):
+def _do_deliver(assignment_id: int):
+    """Shared logic for both /deliver and /status endpoints."""
     user_id = get_jwt_identity()
     assignment = db.session.get(LogisticsAssignment, assignment_id)
     if not assignment:
@@ -135,8 +135,8 @@ def deliver_assignment(assignment_id):
     data = request.get_json() or {}
     status = (data.get('status') or '').upper()
 
-    if status not in ('IN_TRANSIT', 'DELIVERED'):
-        return jsonify({"message": "Status must be IN_TRANSIT or DELIVERED"}), 400
+    if status not in ('IN_TRANSIT', 'DELIVERED', 'PENDING_PICKUP', 'REJECTED'):
+        return jsonify({"message": "Status must be IN_TRANSIT, DELIVERED, PENDING_PICKUP, or REJECTED"}), 400
 
     assignment.status = status
 
@@ -144,7 +144,6 @@ def deliver_assignment(assignment_id):
         assignment.delivered_at = _utcnow()
         if assignment.order and assignment.order.escrow:
             assignment.order.escrow.status = 'DELIVERED'
-            # Notify buyer to confirm receipt
             db.session.add(Notification(
                 user_id=assignment.order.buyer_id,
                 title="Your Order Has Been Delivered",
@@ -158,6 +157,19 @@ def deliver_assignment(assignment_id):
 
     db.session.commit()
     return jsonify({"message": f"Status updated to {status}", "status": "success"}), 200
+
+
+@logistics_bp.route('/assignments/<int:assignment_id>/deliver', methods=['PATCH'])
+@jwt_required()
+def deliver_assignment(assignment_id):
+    return _do_deliver(assignment_id)
+
+
+@logistics_bp.route('/assignments/<int:assignment_id>/status', methods=['PATCH'])
+@jwt_required()
+def update_assignment_status(assignment_id):
+    """Alias for /deliver — same logic, different URL expected by the dashboard."""
+    return _do_deliver(assignment_id)
 
 
 # ---------------------------------------------------------------------------

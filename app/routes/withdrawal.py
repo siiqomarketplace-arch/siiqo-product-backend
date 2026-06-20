@@ -527,9 +527,8 @@ def get_pod_summary():
 # ---------------------------------------------------------------------------
 
 @withdrawal_bp.route('/banks', methods=['GET'])
-@jwt_required()
 def get_banks():
-    """Get list of Nigerian banks from Paystack"""
+    """Get list of Nigerian banks from Paystack — public, no auth required"""
     try:
         headers = {
             'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
@@ -555,5 +554,52 @@ def get_banks():
         else:
             return jsonify({'message': 'Could not fetch banks'}), 500
             
+    except Exception as e:
+        return jsonify({'message': f'Error: {str(e)}'}), 500
+
+
+@withdrawal_bp.route('/banks/resolve', methods=['GET'])
+def resolve_bank_account():
+    """
+    Resolve (verify) a bank account name — public endpoint.
+    Used by the partner apply form and vendor onboarding to auto-fill account name.
+    Query params: bank_code, account_number
+    """
+    bank_code      = (request.args.get('bank_code') or '').strip()
+    account_number = (request.args.get('account_number') or '').strip()
+
+    if not bank_code or not account_number:
+        return jsonify({'message': 'bank_code and account_number are required'}), 400
+
+    if len(account_number) != 10:
+        return jsonify({'message': 'Account number must be exactly 10 digits'}), 400
+
+    try:
+        headers = {
+            'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
+            'Content-Type': 'application/json',
+        }
+        resp = requests.get(
+            f'{PAYSTACK_BASE_URL}/bank/resolve',
+            headers=headers,
+            params={'account_number': account_number, 'bank_code': bank_code},
+            timeout=10,
+        )
+        data = resp.json()
+
+        if not data.get('status'):
+            return jsonify({
+                'message': data.get('message', 'Could not verify account. Check details.'),
+                'account_name': None,
+            }), 400
+
+        return jsonify({
+            'status': 'success',
+            'account_name': data['data']['account_name'],
+            'account_number': data['data']['account_number'],
+        }), 200
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({'message': f'Verification failed: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'message': f'Error: {str(e)}'}), 500
