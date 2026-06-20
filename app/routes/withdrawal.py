@@ -270,8 +270,113 @@ def get_withdrawals():
 @withdrawal_bp.route('/withdrawals', methods=['POST'])
 @jwt_required()
 def request_withdrawal():
-    """Request a withdrawal (Deactivated — Payscrow direct settlement active)"""
-    return jsonify({'message': 'Manual withdrawals are deactivated. Escrow payouts are processed automatically via Payscrow split settlement directly into your default bank account upon delivery confirmation.'}), 400
+    """
+    Vendor requests a withdrawal.
+
+    With Paystack provider: triggers a Paystack transfer to the vendor's
+    default bank account using the stored recipient_code.
+
+    With Payscrow provider: returns 400 (split settlement is automatic).
+    """
+    provider = os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
+
+    if provider != "paystack":
+        return jsonify({
+            'message': (
+                'Manual withdrawals are currently deactivated. '
+                'Escrow payouts are processed automatically upon delivery confirmation.'
+            )
+        }), 400
+
+    vendor_id = get_jwt_identity()
+
+    # Check available balance
+    balance = _get_ledger_balance(int(vendor_id))
+    pending_amount = db.session.query(func.sum(Withdrawal.amount)).filter_by(
+        vendor_id=vendor_id,
+        status='PENDING',
+    ).scalar() or Decimal('0')
+    available = balance - Decimal(str(pending_amount))
+
+    MIN_WITHDRAWAL = Decimal('1000')  # ₦1,000 minimum
+    if available < MIN_WITHDRAWAL:
+        return jsonify({
+            'message': f'Insufficient balance. Minimum withdrawal is ₦{MIN_WITHDRAWAL:,.2f}. '
+                       f'Your available balance is ₦{available:,.2f}.'
+        }), 400
+
+    # Get vendor's default bank account
+    bank_acc = VendorBankAccount.query.filter_by(
+        vendor_id=vendor_id, is_default=True
+    ).first()
+    if not bank_acc:
+        bank_acc = VendorBankAccount.query.filter_by(vendor_id=vendor_id).first()
+
+    if not bank_acc or not bank_acc.recipient_code:
+        return jsonify({
+            'message': 'No verified bank account found. '
+                       'Please add and verify a bank account in your payout settings first.'
+        }), 400
+
+    data = request.get_json() or {}
+    requested_amount = data.get('amount')
+    if requested_amount:
+        try:
+            requested_amount = Decimal(str(requested_amount))
+            if requested_amount <= 0 or requested_amount > available:
+                return jsonify({'message': 'Invalid withdrawal amount.'}), 400
+        except Exception:
+            return jsonify({'message': 'Invalid amount format.'}), 400
+    else:
+        requested_amount = available  # default: withdraw all
+
+    # Paystack transfer fee is ₦50 flat (waived above ₦5,000 on live tier)
+    # We absorb this — vendor receives full requested amount
+    import uuid as _uuid
+    reference = f"WD-{_uuid.uuid4().hex[:12].upper()}"
+
+    from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+    result = paystack_transfer_to_vendor(
+        recipient_code=bank_acc.recipient_code,
+        amount_ngn=float(requested_amount),
+        reference=reference,
+        reason="Siiqo vendor withdrawal",
+    )
+
+    if not result.get("success"):
+        return jsonify({
+            'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
+        }), 400
+
+    # Record withdrawal + debit ledger
+    transfer_code = result.get("transfer_code", "")
+    new_withdrawal = Withdrawal(
+        vendor_id=int(vendor_id),
+        amount=requested_amount,
+        fee_amount=Decimal('0'),
+        net_amount=requested_amount,
+        status='PENDING',
+        bank_account_id=bank_acc.id,
+        transfer_code=transfer_code,
+        transfer_reference=reference,
+    )
+    db.session.add(new_withdrawal)
+
+    _debit_ledger(
+        vendor_id=int(vendor_id),
+        amount=requested_amount,
+        description=f"Withdrawal to {bank_acc.bank_name} {bank_acc.account_number[-4:]}",
+        reference_id=reference,
+    )
+
+    db.session.commit()
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Withdrawal initiated. Funds will arrive within 24 hours.',
+        'transfer_code': transfer_code,
+        'amount': str(requested_amount),
+    }), 200
 
 
 # ---------------------------------------------------------------------------

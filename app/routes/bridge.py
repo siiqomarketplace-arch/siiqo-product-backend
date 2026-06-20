@@ -428,35 +428,51 @@ def buyer_order_history():
         .all()
     )
 
-    # ── Live PayScrow sync for stuck PENDING orders ──────────────────────────
-    # If an order is PENDING but already has an escrow record, the webhook
-    # was likely missed. Check PayScrow directly and heal the status now.
-    from app.routes.escrow import _payscrow_env as _ps_env
-    import requests as _http
-    ps_key, ps_base = _ps_env()
+    # ── Live payment sync for stuck PENDING orders ──────────────────────────
+    # If an order is PENDING and has an escrow record, the webhook may have
+    # been missed. Verify directly with the active provider.
+    active_provider = os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
 
     for o in orders:
         if o.status == 'PENDING':
             escrow_check = EscrowTransaction.query.filter_by(order_id=o.id).first()
-            if escrow_check and escrow_check.transaction_number and ps_key:
+            if escrow_check and escrow_check.transaction_number:
                 try:
-                    r = _http.get(
-                        f"{ps_base}/api/v3/marketplace/transactions/{escrow_check.transaction_number}/status",
-                        headers={"BrokerApiKey": ps_key},
-                        timeout=8,
-                    )
-                    if r.status_code == 200:
-                        ps_status = str(r.json().get('paymentStatus', '')).lower()
-                        if ps_status in ['paid', 'completed', 'pendingsettlement']:
-                            escrow_check.status = 'IN_ESCROW'
+                    if active_provider == "paystack":
+                        from app.services.escrow.paystack_provider import PaystackProvider
+                        verify = PaystackProvider().verify_transaction(
+                            escrow_check.transaction_number
+                        )
+                        if verify.get("success"):
+                            escrow_check.status = EscrowStatus.IN_ESCROW
                             escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
-                            if r.json().get('escrowCode'):
-                                escrow_check.escrow_code = r.json().get('escrowCode')
                             o.status = 'PAID'
                             db.session.commit()
+                    else:
+                        # Legacy Payscrow sync
+                        from app.routes.escrow import _payscrow_env as _ps_env
+                        import requests as _http
+                        ps_key, ps_base = _ps_env()
+                        if ps_key:
+                            r = _http.get(
+                                f"{ps_base}/api/v3/marketplace/transactions/"
+                                f"{escrow_check.transaction_number}/status",
+                                headers={"BrokerApiKey": ps_key},
+                                timeout=8,
+                            )
+                            if r.status_code == 200:
+                                ps_status = str(r.json().get('paymentStatus', '')).lower()
+                                if ps_status in ['paid', 'completed', 'pendingsettlement']:
+                                    escrow_check.status = EscrowStatus.IN_ESCROW
+                                    escrow_check.paid_at = (
+                                        escrow_check.paid_at or datetime.now(timezone.utc)
+                                    )
+                                    if r.json().get('escrowCode'):
+                                        escrow_check.escrow_code = r.json().get('escrowCode')
+                                    o.status = 'PAID'
+                                    db.session.commit()
                 except Exception:
-                    pass  # non-fatal — just show whatever status we have
-    # ─────────────────────────────────────────────────────────────────────────
+                    pass  # non-fatal — show whatever status we have
 
     result = []
     for o in orders:
@@ -989,21 +1005,137 @@ def paystack_webhook():
     event = request.get_json() or {}
     event_type = event.get('event', '')
 
-    # Handle successful charge (new subscription or one-time payment)
+    # Handle successful charge (new subscription OR marketplace order)
     if event_type in ('charge.success', 'subscription.create'):
         data = event.get('data', {})
         customer_email = data.get('customer', {}).get('email') or data.get('email', '')
+        reference = data.get('reference', '')
+        status = data.get('status', '')
+        metadata = data.get('metadata', {})
 
-        # Extract plan_code correctly:
-        # - charge.success:      data['plan']['plan_code']  (e.g. PLN_xxx)
-        # - subscription.create: data['plan']['plan_code']  (preferred)
-        #                        data['plan_code']          (fallback)
-        # NOTE: data['subscription_code'] is SUB_xxx, NOT a plan code — never use it here
+        # ── MARKETPLACE ORDER ──────────────────────────────────────────────
+        # Marketplace payments have order_ids in metadata and source=marketplace_checkout.
+        # Subscriptions have a plan_code and NO order_ids.
+        order_ids_raw = metadata.get('order_ids', [])
+        is_marketplace_order = (
+            bool(order_ids_raw)
+            and metadata.get('source') == 'marketplace_checkout'
+        )
+
+        if is_marketplace_order and status == 'success' and reference:
+            from app.models.order import Order
+            from app.models.escrow import EscrowTransaction, EscrowStatus
+            from app.models.communication import Notification
+
+            order_ids = [int(x) for x in order_ids_raw if str(x).isdigit()]
+            orders = Order.query.filter(Order.id.in_(order_ids)).all()
+            processed_orders = []
+
+            for order in orders:
+                escrow = EscrowTransaction.query.filter_by(
+                    transaction_number=reference
+                ).filter(
+                    EscrowTransaction.order_id == order.id
+                ).first()
+
+                if not escrow:
+                    # Fallback: match by order_id only
+                    escrow = EscrowTransaction.query.filter_by(
+                        order_id=order.id,
+                        status=EscrowStatus.PENDING_PAYMENT,
+                    ).first()
+
+                if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
+                    escrow.status = EscrowStatus.IN_ESCROW
+                    escrow.paid_at = _utcnow()
+                    # Store Paystack reference in payscrow_transaction_id for
+                    # backward-compat with the release route
+                    escrow.payscrow_transaction_id = reference
+                    order.status = 'PAID'
+
+                    # Activate logistics assignment if pending
+                    from app.models.escrow import LogisticsAssignment
+                    assignment = LogisticsAssignment.query.filter_by(
+                        order_id=order.id
+                    ).first()
+                    if assignment and assignment.status == 'PENDING':
+                        assignment.status = 'ASSIGNED'
+                        assignment.assigned_at = _utcnow()
+                        db.session.add(Notification(
+                            user_id=assignment.partner_id,
+                            title="New Delivery Assignment",
+                            message=(
+                                f"New delivery for Order #{order.id}. "
+                                f"Fee: ₦{assignment.delivery_fee:,.2f}."
+                            ),
+                            type="DELIVERY",
+                            order_id=order.id,
+                        ))
+
+                    db.session.add(Notification(
+                        user_id=order.buyer_id,
+                        title="Payment Confirmed",
+                        message=(
+                            f"Your payment for Order #{order.id} is confirmed. "
+                            "Funds held by Siiqo until you confirm delivery."
+                        ),
+                        type="ORDER",
+                        order_id=order.id,
+                    ))
+                    db.session.add(Notification(
+                        user_id=order.vendor_id,
+                        title="New Paid Order",
+                        message=(
+                            f"Order #{order.id} has been paid. Please ship the order."
+                        ),
+                        type="ESCROW",
+                        order_id=order.id,
+                    ))
+                    processed_orders.append(order)
+
+            db.session.commit()
+
+            # Send emails (non-blocking)
+            from app.utils.email import send_siiqo_email
+            for order in processed_orders:
+                buyer = db.session.get(User, order.buyer_id)
+                if buyer and buyer.email:
+                    try:
+                        send_siiqo_email(
+                            to_email=buyer.email,
+                            subject=f"Order Confirmation #{order.id} - Siiqo",
+                            template_name="order_confirmation",
+                            first_name=buyer.first_name or "there",
+                            order_id=order.id,
+                            payment_method="PAYSTACK",
+                        )
+                    except Exception as e:
+                        logging.warning(f"[EMAIL] buyer order confirm failed #{order.id}: {e}")
+                vendor = db.session.get(User, order.vendor_id)
+                if vendor and vendor.email:
+                    try:
+                        send_siiqo_email(
+                            to_email=vendor.email,
+                            subject="New Order - Siiqo",
+                            template_name="order_received_vendor",
+                            first_name=vendor.first_name or "Vendor",
+                            order_id=order.id,
+                            total_amount=f"₦{float(order.total_amount):,.2f}",
+                            payment_method="PAYSTACK",
+                        )
+                    except Exception as e:
+                        logging.warning(f"[EMAIL] vendor order email failed #{order.id}: {e}")
+
+            logging.info(
+                f"[PAYSTACK WEBHOOK] Marketplace orders activated: {order_ids}, ref={reference}"
+            )
+            return jsonify({"status": "ok"}), 200
+
+        # ── SUBSCRIPTION ───────────────────────────────────────────────────
         plan_code = (
             data.get('plan', {}).get('plan_code')
             or data.get('plan_code', '')
         )
-        status = data.get('status', '')
 
         if customer_email and status == 'success':
             user = User.query.filter_by(email=customer_email).first()
