@@ -18,7 +18,7 @@ def _payscrow_env():
     return key, url
 
 class PayscrowProvider(BaseEscrowProvider):
-    def initiate_transaction(self, orders, existing_txn_number=None):
+    def initiate_transaction(self, orders, existing_txn_number=None, return_url=None):
         payscrow_key, base_url = _payscrow_env()
         
         if not payscrow_key:
@@ -198,7 +198,8 @@ class PayscrowProvider(BaseEscrowProvider):
             })
 
         # merchantChargePercentage: 0 = buyer pays no extra; merchant (Siiqo) absorbs fee.
-        # This is correct for marketplace escrow where the 12% is already baked into prices.
+        default_return = "https://siiqo.com/CartSystem?success=true"
+        final_return_url = return_url or default_return
         payload = {
             "transactionReference": txn_number,
             "merchantEmailAddress": "support@siiqo.com",
@@ -209,8 +210,8 @@ class PayscrowProvider(BaseEscrowProvider):
             "customerPhoneNo": buyer_phone,
             "currencyCode": "NGN",
             "merchantChargePercentage": 0,
-            "redirectUrl": "https://siiqo.com/CartSystem?success=true",
-            "returnUrl": "https://siiqo.com/CartSystem?success=true",
+            "redirectUrl": final_return_url,
+            "returnUrl": final_return_url,
             "webhookNotificationUrl": os.environ.get(
                 'PAYSCROW_WEBHOOK_URL',
                 "https://devapi.siiqo.app/api/escrow/webhook"

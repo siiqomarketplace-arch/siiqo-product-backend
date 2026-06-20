@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Your Siiqo Order & Account</title>
+  <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px; color: #334155; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+    .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #E0921C; }
+    .header h1 { color: #ffffff; margin: 0; font-size: 28px; font-weight: 900; letter-spacing: -0.5px; }
+    .header span { color: #E0921C; }
+    .content { padding: 40px; }
+    .content h2 { color: #0f172a; margin-top: 0; font-size: 22px; font-weight: 700; }
+    .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 16px; }
+    .order-box { background-color: #f1f5f9; border-radius: 12px; padding: 20px 24px; margin: 24px 0; }
+    .order-box p { margin: 6px 0; font-size: 14px; color: #334155; }
+    .order-box strong { color: #0f172a; }
+    .otp-box { background-color: #fff7ed; border: 2px dashed #E0921C; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0; }
+    .otp-box p { margin: 0 0 8px 0; font-size: 14px; color: #7c5a00; font-weight: 600; }
+    .otp-code { font-size: 36px; font-weight: 900; letter-spacing: 8px; color: #0b1b3b; }
+    .btn { display: inline-block; background-color: #0b1b3b; color: #ffffff !important; text-decoration: none; padding: 14px 32px; border-radius: 10px; font-weight: 700; font-size: 15px; margin-top: 8px; }
+    .btn-gold { background-color: #E0921C; }
+    .divider { border: none; border-top: 1px solid #e2e8f0; margin: 28px 0; }
+    .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+    .footer a { color: #E0921C; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Sii<span>qo</span></h1>
+    </div>
+
+    <div class="content">
+      <h2>Hi {{ first_name }}, your order is being processed! 🎉</h2>
+      <p>
+        Thank you for paying via a Siiqo Direct link. Your payment to
+        <strong>{{ vendor_name }}</strong> for <strong>{{ amount }}</strong>
+        is now being processed securely.
+      </p>
+
+      <div class="order-box">
+        <p><strong>Order ID:</strong> #{{ order_id }}</p>
+        <p><strong>Vendor:</strong> {{ vendor_name }}</p>
+        <p><strong>Amount:</strong> {{ amount }}</p>
+        <p><strong>Status:</strong> Payment Pending Confirmation</p>
+      </div>
+
+      <hr class="divider">
+
+      <h2>Track your order on Siiqo</h2>
+      <p>
+        A Siiqo account has been created with your email address so you can
+        track this order, confirm delivery, and raise a dispute if needed.
+      </p>
+      <p>
+        Use the <strong>6-digit code below</strong> to set your password and
+        access your account. This code expires in <strong>30 minutes</strong>.
+      </p>
+
+      <div class="otp-box">
+        <p>Your one-time access code</p>
+        <div class="otp-code">{{ otp }}</div>
+      </div>
+
+      <div style="text-align: center; margin-top: 20px;">
+        <a href="{{ claim_url }}" class="btn btn-gold">
+          Set Password &amp; Track Order →
+        </a>
+      </div>
+
+      <p style="margin-top: 20px; font-size: 13px; color: #94a3b8; text-align: center;">
+        Or go to <a href="https://siiqo.com/auth/forgot-password" style="color: #E0921C;">siiqo.com/auth/forgot-password</a>
+        and enter your email to request a new code anytime.
+      </p>
+
+      <hr class="divider">
+
+      <p style="font-size: 13px; color: #94a3b8;">
+        If you already have a Siiqo account with this email, simply
+        <a href="https://siiqo.com/auth/login?redirect=/user-profile" style="color: #0b1b3b; font-weight: 600;">log in here</a>
+        to see your orders.
+      </p>
+    </div>
+
+    <div class="footer">
+      <p>© Siiqo Marketplace. All rights reserved.</p>
+      <p><a href="https://siiqo.com">siiqo.com</a></p>
+    </div>
+  </div>
+</body>
+</html>

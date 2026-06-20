@@ -2,7 +2,7 @@ import os
 import uuid
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 from flask import Blueprint, request, jsonify
@@ -199,13 +199,15 @@ def pay_payment_link(link_id):
     # Resolve buyer account: if exists, link to it; otherwise find/create a buyer user record
     from app.models.user import User
     buyer_user = User.query.filter_by(email=buyer_email).first()
+    existing_account = buyer_user is not None  # track if this is a pre-existing Siiqo account
+
     if not buyer_user:
-        # Create a light guest user
+        # Create a light guest user — password unknown to buyer until they claim account
         buyer_user = User(
             email=buyer_email,
             phone=buyer_phone,
             role=UserRole.BUYER,
-            is_verified=True, # guest accounts bypass verification
+            is_verified=True,  # guest accounts bypass verification
         )
         buyer_user.set_password(uuid.uuid4().hex)
         parts = buyer_name.split(' ', 1)
@@ -236,15 +238,49 @@ def pay_payment_link(link_id):
     ))
 
     # Calculate platform fees (6% fee)
-    fee_percent = 12.00  # Siiqo standard transaction display fee
-    fee_amount = amount * Decimal('0.12')
+    fee_percent = 6.00
+    fee_amount = amount * Decimal('0.06')
 
-    # Initiate Payscrow Transaction
+    # Build the return URL so buyer lands on a proper success/tracking page
+    site_url = os.environ.get('SITE_URL', 'https://siiqo.com').rstrip('/')
+    import urllib.parse
+    return_url = (
+        f"{site_url}/pay/success"
+        f"?order_id={new_order.id}"
+        f"&email={urllib.parse.quote(buyer_email)}"
+        f"&existing={str(existing_account).lower()}"
+    )
+
+    # Send a "claim your account" / OTP email to the guest buyer NOW (before payment)
+    # so they have credentials ready when they return from the payment gateway.
+    if not existing_account:
+        import random
+        from datetime import timedelta
+        otp = str(random.randint(100000, 999999))
+        buyer_user.reset_otp = otp
+        buyer_user.otp_expiry = _utcnow() + timedelta(minutes=30)
+        db.session.flush()
+        try:
+            from app.utils.email import send_siiqo_email
+            send_siiqo_email(
+                to_email=buyer_email,
+                subject="Your Siiqo Order — Set a Password to Track It",
+                template_name="guest_claim_account",
+                first_name=buyer_user.first_name or "there",
+                order_id=new_order.id,
+                vendor_name=link.vendor.storefront.store_name if link.vendor and link.vendor.storefront else "Vendor",
+                amount=f"₦{float(amount):,.2f}",
+                claim_url=f"{site_url}/auth/reset-password-otp?email={urllib.parse.quote(buyer_email)}&otp={otp}&redirect=/user-profile&mode=claim",
+                otp=otp,
+            )
+        except Exception as e:
+            logging.warning(f"[PAYLINK] Guest claim-account email failed for {buyer_email}: {e}")
+
+    # Initiate payment gateway transaction
     from app.services.escrow import get_escrow_provider
     provider = get_escrow_provider()
-    
-    # We construct a list of orders for the provider API
-    result = provider.initiate_transaction([new_order])
+
+    result = provider.initiate_transaction([new_order], return_url=return_url)
     if not result.get("success"):
         db.session.rollback()
         return jsonify({"message": result.get("error_message") or "Payment gateway initialization failed"}), 400
@@ -255,8 +291,8 @@ def pay_payment_link(link_id):
         transaction_number=result['transaction_number'],
         status=EscrowStatus.PENDING_PAYMENT,
         amount=float(amount),
-        fee_percent=6.00,
-        fee_amount=float(amount * Decimal('0.06')),  # Payscrow service split fee
+        fee_percent=fee_percent,
+        fee_amount=float(fee_amount),
         payment_link=result['payment_link'],
         payscrow_transaction_id=result['provider_transaction_id'],
         payscrow_ref=result['provider_reference'],

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 class BaseEscrowProvider(ABC):
     @abstractmethod
-    def initiate_transaction(self, order, vendor_bank, existing_txn_number=None):
+    def initiate_transaction(self, order, vendor_bank, existing_txn_number=None, return_url=None):
         """
         Initiates a new transaction or updates an existing transaction with the provider.
         Should return a dict containing:

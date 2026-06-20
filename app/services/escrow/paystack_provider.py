@@ -62,7 +62,7 @@ class PaystackProvider(BaseEscrowProvider):
     # ------------------------------------------------------------------
     # initiate_transaction
     # ------------------------------------------------------------------
-    def initiate_transaction(self, orders, existing_txn_number=None):
+    def initiate_transaction(self, orders, existing_txn_number=None, return_url=None):
         key = _paystack_key()
         if not key:
             return {"success": False, "error_message": "Paystack API key not configured."}
@@ -102,7 +102,7 @@ class PaystackProvider(BaseEscrowProvider):
 
         # ── Paystack payload ────────────────────────────────────────────
         site_url = os.environ.get("SITE_URL", "https://siiqo.com")
-        callback_url = f"{site_url}/payment/success"
+        callback_url = return_url or f"{site_url}/payment/success"
         webhook_url = os.environ.get(
             "PAYSTACK_WEBHOOK_URL",
             "https://devapi.siiqo.app/api/payments/webhook",
