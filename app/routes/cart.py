@@ -458,19 +458,12 @@ def checkout():
                 currency='NGN',
             )
             db.session.add(new_escrow)
-            
-            # Notify vendor about escrow order in-app
-            db.session.add(Notification(
-                user_id=vid,
-                title="New Order Received",
-                message=f"You have a new order #{new_order.id} worth ₦{total:,.2f}.",
-                type="ORDER",
-                order_id=new_order.id,
-            ))
-            
-            # (Emails for Escrow orders are now sent in the webhook once payment is secured)
 
-            
+            # NOTE: No in-app notification here — vendor is notified AFTER
+            # the buyer completes payment, via the Paystack/Payscrow webhook.
+            # Sending a notification before payment causes false alerts when
+            # buyers abandon checkout mid-flow.
+
             orders_created.append({
                 "order_id": new_order.id,
                 "vendor_id": vid,
