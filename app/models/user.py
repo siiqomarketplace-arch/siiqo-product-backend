@@ -13,6 +13,7 @@ class UserRole:
     VENDOR = 'VENDOR'
     PARTNER = 'PARTNER'
     ADMIN = 'ADMIN'
+    RIDER = 'RIDER'
 
 
 class User(db.Model):

@@ -294,6 +294,37 @@ def login():
     }), 200
 
 
+@auth_bp.route('/login-rider', methods=['POST'])
+@limiter.limit("10 per minute")
+def login_rider():
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password', '')
+
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.check_password(password):
+        return jsonify({"message": "Invalid email or password"}), 401
+
+    if not user.is_active:
+        return jsonify({"message": "Your account has been deactivated. Contact your manager."}), 403
+
+    if user.role != UserRole.RIDER:
+        return jsonify({"message": "Access denied. Only riders can log in here."}), 403
+
+    tokens = _make_tokens(user)
+    return jsonify({
+        "status": "success",
+        "message": "Login successful",
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+        "rider": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.full_name
+        }
+    }), 200
+
+
 # ---------------------------------------------------------------------------
 # Refresh Token  (uses proper refresh token, not access token)
 # ---------------------------------------------------------------------------

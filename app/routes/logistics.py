@@ -238,21 +238,50 @@ def manage_staff():
     data = request.get_json() or {}
     name = (data.get('staff_name') or data.get('name') or '').strip()
     phone = (data.get('staff_phone') or data.get('phone') or '').strip()
+    email = (data.get('staff_email') or data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
 
     if not name or not phone:
         return jsonify({"message": "Name and phone are required"}), 400
+
+    if not email:
+        return jsonify({"message": "Email is required to create a rider login"}), 400
+
+    # Ensure no existing standard user account has this email
+    existing_user = User.query.filter_by(email=email).first()
+    if existing_user:
+        return jsonify({"message": f"An account with email {email} already exists"}), 409
+
+    # Create standard User account for the Rider (Option A)
+    names = name.split(' ', 1)
+    rider_user = User(
+        email=email,
+        first_name=names[0],
+        last_name=names[1] if len(names) > 1 else '',
+        phone=phone,
+        role=UserRole.RIDER,
+        is_verified=True,
+        is_active=True,
+    )
+    if password:
+        rider_user.set_password(password)
+    else:
+        rider_user.set_password("SiiqoRiderTempPass123!") # Fallback
+    
+    db.session.add(rider_user)
+    db.session.flush()
 
     new_staff = PartnerStaff(
         partner_id=user_id,
         staff_name=name,
         staff_phone=phone,
-        staff_email=data.get('email'),
+        staff_email=email,
         staff_role=(data.get('role') or 'RIDER').upper(),
     )
     db.session.add(new_staff)
     db.session.commit()
     return jsonify({
-        "message": f"{name} added to your team.",
+        "message": f"{name} added to your team and user account created.",
         "id": new_staff.id,
         "status": "success",
     }), 201
@@ -268,6 +297,11 @@ def manage_staff_member(staff_id):
 
     if request.method == 'DELETE':
         staff.is_active = False
+        # Deactivate standard User account
+        if staff.staff_email:
+            user_rec = User.query.filter_by(email=staff.staff_email).first()
+            if user_rec:
+                user_rec.is_active = False
         db.session.commit()
         return jsonify({"message": "Staff member removed.", "status": "success"}), 200
 
@@ -280,3 +314,37 @@ def manage_staff_member(staff_id):
         staff.staff_role = data['role'].upper()
     db.session.commit()
     return jsonify({"message": "Staff updated.", "status": "success"}), 200
+
+
+@logistics_bp.route('/assignments/<int:assignment_id>/assign', methods=['PATCH'])
+@jwt_required()
+def assign_rider_to_assignment(assignment_id):
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or user.role != UserRole.PARTNER:
+        return jsonify({"message": "Partner access required"}), 403
+
+    assignment = db.session.get(LogisticsAssignment, assignment_id)
+    if not assignment or assignment.partner_id != int(user_id):
+        return jsonify({"message": "Assignment not found or unauthorized"}), 404
+
+    data = request.get_json() or {}
+    staff_id = data.get('staff_id')
+    if not staff_id:
+        return jsonify({"message": "staff_id is required"}), 400
+
+    staff = db.session.get(PartnerStaff, int(staff_id))
+    if not staff or staff.partner_id != int(user_id) or not staff.is_active:
+        return jsonify({"message": "Staff member not found or inactive"}), 404
+
+    assignment.rider_name = staff.staff_name
+    assignment.rider_phone = staff.staff_phone
+    assignment.status = 'ASSIGNED'
+    db.session.commit()
+
+    return jsonify({
+        "message": f"Assigned {staff.staff_name} to delivery",
+        "status": "success",
+        "rider_name": staff.staff_name,
+        "rider_phone": staff.staff_phone
+    }), 200

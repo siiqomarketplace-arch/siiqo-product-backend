@@ -1522,3 +1522,85 @@ def partner_earnings():
         "completed_deliveries": completed_count,
         "currency": "NGN",
     }), 200
+
+
+@bridge_bp.route('/rider/dashboard', methods=['GET'])
+@jwt_required()
+def rider_dashboard():
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or user.role != UserRole.RIDER:
+        return jsonify({"message": "Rider access required"}), 403
+
+    from app.models.escrow import LogisticsAssignment
+    
+    # Find assignments where rider's phone number matches
+    assignments = LogisticsAssignment.query.filter(
+        LogisticsAssignment.rider_phone == user.phone
+    ).order_by(LogisticsAssignment.created_at.desc()).all()
+
+    orders_data = []
+    for a in assignments:
+        order = a.order
+        vendor = order.vendor if order else None
+        sf = vendor.storefront if vendor else None
+        buyer = order.buyer if order else None
+        
+        orders_data.append({
+            "id": order.id if order else a.order_id,
+            "pickup_address": sf.address if sf else "N/A",
+            "delivery_address": order.delivery_address if order else "N/A",
+            "buyer_name": buyer.full_name if buyer else "N/A",
+            "buyer_phone": buyer.phone if buyer else "",
+            "vendor_name": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
+            "vendor_phone": sf.phone if sf else (vendor.phone if vendor else ""),
+            "status": a.status,
+        })
+
+    return jsonify({
+        "status": "success",
+        "rider": {
+            "name": user.full_name,
+            "email": user.email,
+        },
+        "orders": orders_data
+    }), 200
+
+
+@bridge_bp.route('/rider/orders/<int:order_id>/deliver', methods=['POST'])
+@jwt_required()
+def rider_mark_delivered(order_id):
+    from datetime import datetime, timezone
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user or user.role != UserRole.RIDER:
+        return jsonify({"message": "Rider access required"}), 403
+
+    from app.models.escrow import LogisticsAssignment
+    assignment = LogisticsAssignment.query.filter_by(
+        order_id=order_id, rider_phone=user.phone
+    ).first()
+    if not assignment:
+        return jsonify({"message": "Assignment not found for this rider"}), 404
+
+    # Update assignment and order status to DELIVERED
+    assignment.status = 'DELIVERED'
+    assignment.delivered_at = datetime.now(timezone.utc)
+    if assignment.order and assignment.order.escrow:
+        assignment.order.escrow.status = 'DELIVERED'
+        
+        # Notify buyer
+        from app.models.communication import Notification
+        db.session.add(Notification(
+            user_id=assignment.order.buyer_id,
+            title="Your Order Has Been Delivered",
+            message=(
+                f"Order #{assignment.order.id} has been delivered. "
+                "Please confirm receipt to release payment to the vendor."
+            ),
+            type="ORDER",
+            order_id=assignment.order.id,
+        ))
+
+    db.session.commit()
+    return jsonify({"status": "success", "message": "Order marked as delivered"}), 200
