@@ -138,6 +138,16 @@ def _do_deliver(assignment_id: int):
     if status not in ('IN_TRANSIT', 'DELIVERED', 'PENDING_PICKUP', 'REJECTED'):
         return jsonify({"message": "Status must be IN_TRANSIT, DELIVERED, PENDING_PICKUP, or REJECTED"}), 400
 
+    # Secure OTP verification for escrow transactions
+    if status == 'DELIVERED':
+        if assignment.order and assignment.order.payment_method == 'ESCROW':
+            escrow = assignment.order.escrow
+            if escrow:
+                provided_otp = str(data.get('delivery_otp') or '').strip()
+                actual_otp = str(escrow.escrow_code or '').strip()
+                if not actual_otp or provided_otp != actual_otp:
+                    return jsonify({"message": "Invalid delivery OTP. Please verify with the buyer."}), 400
+
     assignment.status = status
 
     if status == 'DELIVERED':

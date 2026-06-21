@@ -1476,6 +1476,8 @@ def partner_dashboard_assignments():
             "status": a.status,
             "vendor": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
             "vendor_name": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
+            "vendor_phone": (sf.phone or vendor.phone) if sf else (vendor.phone if vendor else ""),
+            "vendor_id": vendor.id if vendor else None,
             "destination": order.delivery_address if order and order.delivery_address else (order.delivery_city if order else "N/A"),
             "delivery_address": order.delivery_address if order else "N/A",
             "city": order.delivery_city if order else "",
