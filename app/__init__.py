@@ -23,6 +23,33 @@ def create_app(config_name: str | None = None) -> Flask:
     migrate.init_app(app, db)
 
     # -----------------------------------------------------------------------
+    # One-time startup backfill: generate escrow_code for any NULL rows.
+    # This is safe to run on every boot — it's a no-op if nothing needs fixing.
+    # -----------------------------------------------------------------------
+    with app.app_context():
+        try:
+            import random as _random
+            from sqlalchemy import text as _text
+            result = db.session.execute(_text(
+                "UPDATE escrow_transactions SET escrow_code = "
+                "LPAD(FLOOR(RANDOM() * 900000 + 100000)::TEXT, 6, '0') "
+                "WHERE escrow_code IS NULL OR escrow_code = '' "
+                "RETURNING id, order_id"
+            ))
+            fixed = result.fetchall()
+            db.session.commit()
+            if fixed:
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    f"[STARTUP] Backfilled escrow_code for {len(fixed)} order(s): "
+                    f"{[r[1] for r in fixed]}"
+                )
+        except Exception as _e:
+            db.session.rollback()
+            import logging as _log
+            _log.getLogger(__name__).warning(f"[STARTUP] escrow_code backfill skipped: {_e}")
+
+    # -----------------------------------------------------------------------
     # Basic Logging Configuration
     # -----------------------------------------------------------------------
     import logging
