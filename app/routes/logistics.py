@@ -370,6 +370,8 @@ def update_rider_telemetry(assignment_id):
         
     assignment = db.session.get(LogisticsAssignment, assignment_id)
     if not assignment:
+        assignment = LogisticsAssignment.query.filter_by(order_id=assignment_id).first()
+    if not assignment:
         return jsonify({"message": "Assignment not found"}), 404
         
     # Access check: user is either the logistics partner, or the assigned rider
@@ -402,6 +404,8 @@ def get_rider_location(assignment_id):
         return jsonify({"message": "User not found"}), 404
 
     assignment = db.session.get(LogisticsAssignment, assignment_id)
+    if not assignment:
+        assignment = LogisticsAssignment.query.filter_by(order_id=assignment_id).first()
     if not assignment:
         return jsonify({"message": "Assignment not found"}), 404
 

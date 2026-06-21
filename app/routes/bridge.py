@@ -1598,6 +1598,16 @@ def rider_mark_delivered(order_id):
     if not assignment:
         return jsonify({"message": "Assignment not found for this rider"}), 404
 
+    data = request.get_json() or {}
+    # Secure OTP verification for escrow transactions
+    if assignment.order and assignment.order.payment_method == 'ESCROW':
+        escrow = assignment.order.escrow
+        if escrow:
+            provided_otp = str(data.get('delivery_otp') or '').strip()
+            actual_otp = str(escrow.escrow_code or '').strip()
+            if not actual_otp or provided_otp != actual_otp:
+                return jsonify({"message": "Invalid delivery OTP. Please verify with the buyer."}), 400
+
     # Update assignment and order status to DELIVERED
     assignment.status = 'DELIVERED'
     assignment.delivered_at = datetime.now(timezone.utc)
