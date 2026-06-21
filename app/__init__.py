@@ -49,6 +49,30 @@ def create_app(config_name: str | None = None) -> Flask:
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] escrow_code backfill skipped: {_e}")
 
+        # ── Database Schema Auto-Creation & alters for telemetry/partners ─────
+        try:
+            # 1. Run create_all() to auto-generate partner tables
+            db.create_all()
+
+            # 2. Run column additions for telemetry coordinates (if not already present)
+            from sqlalchemy import text as _text
+            for col_def in [
+                "ALTER TABLE logistics_assignments ADD COLUMN current_latitude NUMERIC(9, 6)",
+                "ALTER TABLE logistics_assignments ADD COLUMN current_longitude NUMERIC(9, 6)",
+                "ALTER TABLE logistics_assignments ADD COLUMN location_updated_at TIMESTAMP"
+            ]:
+                try:
+                    db.session.execute(_text(col_def))
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+            import logging as _log
+            _log.getLogger(__name__).info("[STARTUP] Telemetry columns & partner database schema verified/created successfully.")
+        except Exception as _e:
+            db.session.rollback()
+            import logging as _log
+            _log.getLogger(__name__).warning(f"[STARTUP] Database schema update failed: {_e}")
+
     # -----------------------------------------------------------------------
     # Basic Logging Configuration
     # -----------------------------------------------------------------------

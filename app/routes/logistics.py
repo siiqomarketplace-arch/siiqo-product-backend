@@ -358,3 +358,70 @@ def assign_rider_to_assignment(assignment_id):
         "rider_name": staff.staff_name,
         "rider_phone": staff.staff_phone
     }), 200
+
+
+@logistics_bp.route('/assignments/<int:assignment_id>/telemetry', methods=['POST'])
+@jwt_required()
+def update_rider_telemetry(assignment_id):
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+        
+    assignment = db.session.get(LogisticsAssignment, assignment_id)
+    if not assignment:
+        return jsonify({"message": "Assignment not found"}), 404
+        
+    # Access check: user is either the logistics partner, or the assigned rider
+    is_partner = (assignment.partner_id == user.id)
+    is_rider = (user.role == UserRole.RIDER and user.phone == assignment.rider_phone)
+    if not (is_partner or is_rider):
+        return jsonify({"message": "Unauthorized"}), 403
+        
+    data = request.get_json() or {}
+    try:
+        lat = float(data.get('latitude'))
+        lng = float(data.get('longitude'))
+    except (TypeError, ValueError):
+        return jsonify({"message": "Invalid coordinates"}), 400
+        
+    assignment.current_latitude = lat
+    assignment.current_longitude = lng
+    assignment.location_updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+    
+    return jsonify({"status": "success", "message": "Telemetry updated"}), 200
+
+
+@logistics_bp.route('/assignments/<int:assignment_id>/location', methods=['GET'])
+@jwt_required()
+def get_rider_location(assignment_id):
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    assignment = db.session.get(LogisticsAssignment, assignment_id)
+    if not assignment:
+        return jsonify({"message": "Assignment not found"}), 404
+
+    order = assignment.order
+    # Auth check: user is buyer, vendor, partner, or rider
+    is_buyer = (order and order.buyer_id == user.id)
+    is_vendor = (order and order.vendor_id == user.id)
+    is_partner = (assignment.partner_id == user.id)
+    is_rider = (user.role == UserRole.RIDER and user.phone == assignment.rider_phone)
+
+    if not (is_buyer or is_vendor or is_partner or is_rider):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    return jsonify({
+        "status": "success",
+        "assignment_id": assignment.id,
+        "order_id": assignment.order_id,
+        "rider_status": assignment.status,
+        "latitude": float(assignment.current_latitude) if assignment.current_latitude is not None else None,
+        "longitude": float(assignment.current_longitude) if assignment.current_longitude is not None else None,
+        "location_updated_at": assignment.location_updated_at.isoformat() if assignment.location_updated_at else None,
+    }), 200
+

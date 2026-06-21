@@ -923,6 +923,15 @@ def get_orders():
             "email": o.buyer.email if o.buyer else "",
             "phone": o.buyer.phone if o.buyer else "",
         },
+        "shipping_address": {
+            "name": o.delivery_name or (o.buyer.full_name if o.buyer else "Unknown"),
+            "street": o.delivery_address or "N/A",
+            "city": o.delivery_city or "",
+            "state": o.delivery_state or "",
+            "phone": o.delivery_phone or (o.buyer.phone if o.buyer else ""),
+            "country": "Nigeria",
+            "zipCode": ""
+        },
         "items": [{
             "product_id": item.product_id,
             "name": item.product.name if item.product else "Unknown",

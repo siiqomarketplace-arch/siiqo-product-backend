@@ -176,3 +176,114 @@ class PODPayment(db.Model):
             'reconciled_at': self.reconciled_at.isoformat() if self.reconciled_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class PartnerBankAccount(db.Model):
+    """Store logistics partner bank account details for payouts"""
+    __tablename__ = 'partner_bank_accounts'
+
+    id = db.Column(db.Integer, primary_key=True)
+    partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    
+    # Bank details
+    bank_name = db.Column(db.String(100), nullable=False)
+    bank_code = db.Column(db.String(10), nullable=False)  # Paystack bank code
+    account_number = db.Column(db.String(20), nullable=False)
+    account_name = db.Column(db.String(255), nullable=False)
+    
+    # Paystack recipient code (for transfers)
+    recipient_code = db.Column(db.String(100), nullable=True, unique=True)
+    
+    # Verification
+    is_verified = db.Column(db.Boolean, default=False)
+    verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    
+    # Default account
+    is_default = db.Column(db.Boolean, default=False)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    
+    # Relationships
+    partner = db.relationship('User', backref='partner_bank_accounts')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'partner_id': self.partner_id,
+            'bank_name': self.bank_name,
+            'bank_code': self.bank_code,
+            'account_number': self.account_number,
+            'account_name': self.account_name,
+            'is_verified': self.is_verified,
+            'is_default': self.is_default,
+            'verified_at': self.verified_at.isoformat() if self.verified_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class PartnerWithdrawal(db.Model):
+    """Track partner withdrawal requests and payouts"""
+    __tablename__ = 'partner_withdrawals'
+
+    id = db.Column(db.Integer, primary_key=True)
+    partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    bank_account_id = db.Column(db.Integer, db.ForeignKey('partner_bank_accounts.id'), nullable=False)
+    
+    # Withdrawal details
+    withdrawal_number = db.Column(
+        db.String(100), unique=True, nullable=False, index=True,
+        default=lambda: f"PWD-{uuid.uuid4().hex[:10].upper()}"
+    )
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    currency = db.Column(db.String(10), default='NGN')
+    
+    # Fees
+    fee_amount = db.Column(db.Numeric(10, 2), default=50.00)  # Paystack transfer fee
+    net_amount = db.Column(db.Numeric(10, 2), nullable=False)  # Amount - fee
+    
+    # Status tracking
+    status = db.Column(db.String(50), default='PENDING', index=True)
+    # PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED
+    
+    # Paystack transfer details
+    transfer_code = db.Column(db.String(100), nullable=True)
+    transfer_reference = db.Column(db.String(100), nullable=True)
+    
+    # Failure tracking
+    failure_reason = db.Column(db.Text, nullable=True)
+    retry_count = db.Column(db.Integer, default=0)
+    
+    # Admin actions
+    approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    rejected_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    rejected_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    rejection_reason = db.Column(db.Text, nullable=True)
+    
+    # Timestamps
+    requested_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    processed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    
+    # Relationships
+    partner = db.relationship('User', foreign_keys=[partner_id], backref='partner_withdrawals')
+    bank_account = db.relationship('PartnerBankAccount', backref='partner_withdrawals')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'partner_id': self.partner_id,
+            'withdrawal_number': self.withdrawal_number,
+            'amount': str(self.amount),
+            'fee_amount': str(self.fee_amount),
+            'net_amount': str(self.net_amount),
+            'currency': self.currency,
+            'status': self.status,
+            'bank_account': self.bank_account.to_dict() if self.bank_account else None,
+            'transfer_code': self.transfer_code,
+            'failure_reason': self.failure_reason,
+            'requested_at': self.requested_at.isoformat() if self.requested_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }

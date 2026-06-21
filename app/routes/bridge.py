@@ -547,6 +547,9 @@ def get_buyer_order_detail(order_id):
 
     escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
 
+    from app.models.escrow import LogisticsAssignment
+    assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
+
     return jsonify({
         "status": "success",
         "order": {
@@ -557,12 +560,22 @@ def get_buyer_order_detail(order_id):
             "items": items,
             "buyer_name": buyer.full_name if buyer else "",
             "buyer_phone": buyer.phone if buyer else "",
-            "delivery_address": buyer.address if buyer and hasattr(buyer, 'address') else None,
+            "delivery_address": (
+                f"{order.delivery_address}, {order.delivery_city or ''}, {order.delivery_state or ''}".strip(', ')
+                if order.delivery_address
+                else (buyer.address if buyer and hasattr(buyer, 'address') else None)
+            ),
             "vendor_id": order.vendor_id,
             "vendor_name": vendor_store.store_name if vendor_store else "Unknown Vendor",
+            "vendor_address": (
+                f"{vendor_store.address}, {vendor_store.city or ''}, {vendor_store.state or ''}".strip(', ')
+                if vendor_store and vendor_store.address
+                else ((vendor_store.city or "Lagos") if vendor_store else "Lagos")
+            ),
             "escrow": escrow.to_dict() if escrow else None,
             # Convenience alias so both buyer order pages get the OTP directly
             "delivery_otp": escrow.escrow_code if escrow else None,
+            "logistics_assignment_id": assignment.id if assignment else None,
         },
     }), 200
 

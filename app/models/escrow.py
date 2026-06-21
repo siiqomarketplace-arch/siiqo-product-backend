@@ -97,6 +97,11 @@ class LogisticsAssignment(db.Model):
     assigned_at = db.Column(db.DateTime(timezone=True), nullable=True)
     delivered_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # Real-time coordinates telemetry (polling-based)
+    current_latitude = db.Column(db.Numeric(9, 6), nullable=True)
+    current_longitude = db.Column(db.Numeric(9, 6), nullable=True)
+    location_updated_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
