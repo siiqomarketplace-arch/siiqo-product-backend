@@ -1,7 +1,7 @@
 """Add telegram_id and telegram_notification_prefs to users table.
 
-Revision ID: a1b2c3d4e5f6
-Revises: ff00aa11bb22
+Revision ID: b29582db26c8
+Revises: 05672193aa5b
 Create Date: 2026-06-23 04:00:00.000000
 
 """
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 from sqlalchemy.engine.reflection import Inspector
 
 # revision identifiers, used by Alembic.
-revision = 'a1b2c3d4e5f6'
-down_revision = 'ff00aa11bb22'
+revision = 'b29582db26c8'
+down_revision = '05672193aa5b'
 branch_labels = None
 depends_on = None
 
