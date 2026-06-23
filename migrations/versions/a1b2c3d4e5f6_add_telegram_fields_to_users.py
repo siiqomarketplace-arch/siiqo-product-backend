@@ -7,6 +7,7 @@ Create Date: 2026-06-23 04:00:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.engine.reflection import Inspector
 
 # revision identifiers, used by Alembic.
 revision = 'a1b2c3d4e5f6'
@@ -16,21 +17,22 @@ depends_on = None
 
 
 def upgrade():
-    # Add telegram_id — unique, nullable, indexed
-    with op.batch_alter_table('users', schema=None) as batch_op:
-        batch_op.add_column(
-            sa.Column('telegram_id', sa.String(length=50), nullable=True)
-        )
-        batch_op.add_column(
-            sa.Column('telegram_notification_prefs', sa.JSON(), nullable=True)
-        )
-        batch_op.create_unique_constraint('uq_users_telegram_id', ['telegram_id'])
-        batch_op.create_index('ix_users_telegram_id', ['telegram_id'], unique=True)
+    conn = op.get_bind()
+    inspector = Inspector.from_engine(conn)
+    columns = [c['name'] for c in inspector.get_columns('users')]
+    
+    if 'telegram_id' not in columns:
+        op.add_column('users', sa.Column('telegram_id', sa.String(length=50), nullable=True))
+    
+    if 'telegram_notification_prefs' not in columns:
+        op.add_column('users', sa.Column('telegram_notification_prefs', sa.JSON(), nullable=True))
+        
+    indexes = [i['name'] for i in inspector.get_indexes('users')]
+    if 'ix_users_telegram_id' not in indexes:
+        op.create_index('ix_users_telegram_id', 'users', ['telegram_id'], unique=True)
 
 
 def downgrade():
-    with op.batch_alter_table('users', schema=None) as batch_op:
-        batch_op.drop_index('ix_users_telegram_id')
-        batch_op.drop_constraint('uq_users_telegram_id', type_='unique')
-        batch_op.drop_column('telegram_notification_prefs')
-        batch_op.drop_column('telegram_id')
+    op.drop_index('ix_users_telegram_id', table_name='users')
+    op.drop_column('users', 'telegram_notification_prefs')
+    op.drop_column('users', 'telegram_id')
