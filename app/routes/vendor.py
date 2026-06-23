@@ -164,6 +164,8 @@ def get_settings():
         "phone": user.phone,
         "profile_pic": user.profile_pic,
         "is_verified": user.is_verified,
+        "telegram_id": user.telegram_id,
+        "telegram_notification_prefs": user.telegram_notification_prefs or {},
         "personal_info": {
             "fullname": full_name,
             "email": user.email,

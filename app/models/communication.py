@@ -51,3 +51,62 @@ class Message(db.Model):
     # Relationships
     sender = db.relationship('User', foreign_keys=[sender_id])
     receiver = db.relationship('User', foreign_keys=[receiver_id])
+
+
+# ---------------------------------------------------------------------------
+# Telegram Event Listener Hook
+# ---------------------------------------------------------------------------
+
+from sqlalchemy import event
+import requests
+import os
+import threading
+
+def _send_telegram_notification_async(telegram_id, title, message, type_, order_id):
+    bot_url = os.environ.get('BOT_ORCHESTRATOR_URL', 'https://bot.siiqo.app')
+    if not bot_url:
+        return
+    try:
+        requests.post(f"{bot_url.rstrip('/')}/telegram-notification", json={
+            "telegram_id": telegram_id,
+            "title": title,
+            "message": message,
+            "type": type_,
+            "order_id": order_id
+        }, timeout=5)
+    except Exception as e:
+        print(f"[TG Hook Network Exception] {e}")
+
+@event.listens_for(Notification, 'after_insert')
+def after_notification_insert(mapper, connection, target):
+    from app.models.user import User
+    try:
+        # Use connection/session-agnostic get
+        user = db.session.get(User, target.user_id)
+        if user and user.telegram_id:
+            # Map notification type to user notification preferences
+            pref_key = None
+            t = str(target.type or '').upper()
+            if t == 'CHAT':
+                pref_key = 'chats'
+            elif t in ('ORDER', 'REVIEW'):
+                pref_key = 'orders'
+            elif t == 'ESCROW':
+                pref_key = 'payouts'
+
+            if pref_key:
+                prefs = user.telegram_notification_prefs or {}
+                # If specifically toggled off, do not send
+                if prefs.get(pref_key) == False:
+                    return
+
+            # Fire-and-forget in a separate thread so Flask response is unblocked
+            thread = threading.Thread(
+                target=_send_telegram_notification_async,
+                args=(user.telegram_id, target.title, target.message, target.type, target.order_id)
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        print(f"[TG Hook Exception] {e}")
+

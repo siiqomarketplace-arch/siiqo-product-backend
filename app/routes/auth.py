@@ -64,12 +64,18 @@ def register():
     first_name = (data.get('first_name') or '').strip()
     last_name = (data.get('last_name') or '').strip()
     referral_code_used = (data.get('referral_code') or '').strip().upper()
+    telegram_id = data.get('telegram_id')
 
     if not email or not password:
         return jsonify({"message": "Email and password are required"}), 400
 
     if len(password) < 8:
         return jsonify({"message": "Password must be at least 8 characters"}), 400
+
+    if telegram_id:
+        existing_tg = User.query.filter_by(telegram_id=str(telegram_id)).first()
+        if existing_tg:
+            return jsonify({"message": "This Telegram account is already linked to another email."}), 409
 
     existing_user = User.query.filter_by(email=email).first()
     if existing_user:
@@ -85,6 +91,7 @@ def register():
             existing_user.set_password(password)
             if first_name: existing_user.first_name = first_name
             if last_name: existing_user.last_name = last_name
+            if telegram_id: existing_user.telegram_id = str(telegram_id)
             
             db.session.commit()
             
@@ -117,6 +124,7 @@ def register():
         role=UserRole.BUYER,
         is_verified=False,
         is_active=True,
+        telegram_id=str(telegram_id) if telegram_id else None
     )
     new_user.set_password(password)
     db.session.add(new_user)
@@ -176,6 +184,7 @@ def verify_email():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     otp = str(data.get('otp') or '').strip()
+    telegram_id = data.get('telegram_id')
 
     if not email or not otp:
         return jsonify({"message": "Email and OTP are required"}), 400
@@ -189,6 +198,12 @@ def verify_email():
 
     if user.otp_expiry and _utcnow() > user.otp_expiry.replace(tzinfo=timezone.utc):
         return jsonify({"message": "OTP has expired. Please request a new one."}), 400
+
+    if telegram_id:
+        existing = User.query.filter_by(telegram_id=str(telegram_id)).first()
+        if existing and existing.id != user.id:
+            return jsonify({"message": "This Telegram account is already linked to another email."}), 409
+        user.telegram_id = str(telegram_id)
 
     user.is_verified = True
     user.reset_otp = None
@@ -251,11 +266,19 @@ def login():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     password = data.get('password', '')
+    telegram_id = data.get('telegram_id')
 
     user = User.query.filter_by(email=email).first()
 
     if not user or not user.check_password(password):
         return jsonify({"message": "Invalid email or password"}), 401
+
+    if telegram_id:
+        existing = User.query.filter_by(telegram_id=str(telegram_id)).first()
+        if existing and existing.id != user.id:
+            return jsonify({"message": "This Telegram account is already linked to another email."}), 409
+        user.telegram_id = str(telegram_id)
+        db.session.commit()
 
     if not user.is_active:
         return jsonify({"message": "Your account has been suspended. Please contact support."}), 403
@@ -576,6 +599,7 @@ def telegram_login():
     photo_url = data.get('photo_url', '')
     auth_date = data.get('auth_date')
     tg_hash = data.get('hash')
+    create_new = data.get('create_new', False)
     
     if not tg_id or not tg_hash:
         return jsonify({"message": "Invalid Telegram authentication data"}), 400
@@ -583,11 +607,13 @@ def telegram_login():
     # Verify hash using the official Telegram widget authentication algorithm
     check_fields = []
     for k, v in sorted(data.items()):
-        if k != 'hash' and v is not None:
+        if k not in ('hash', 'create_new') and v is not None:
             check_fields.append(f"{k}={str(v)}")
     data_check_string = "\n".join(check_fields)
     
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '8292348801:AAFwdkZinAtvWyUhFft7qZP95r_qre5WTsM')
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not bot_token:
+        return jsonify({"message": "Telegram Bot Token is not configured on the server."}), 500
     
     secret_key = hashlib.sha256(bot_token.encode('utf-8')).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -595,60 +621,76 @@ def telegram_login():
     if calculated_hash != tg_hash:
         return jsonify({"message": "Telegram authentication failed verification"}), 400
         
-    # Prevent replay attacks (check session age — 24 hours max)
+    # Prevent replay attacks (check session age — 5 minutes max)
     try:
         auth_timestamp = int(auth_date)
         current_timestamp = int(datetime.now(timezone.utc).timestamp())
-        if abs(current_timestamp - auth_timestamp) > 86400:
+        if abs(current_timestamp - auth_timestamp) > 300:
             return jsonify({"message": "Telegram authentication session expired"}), 400
     except Exception:
         return jsonify({"message": "Invalid auth_date"}), 400
          
-    # Authenticate or Register user deterministically
-    virtual_email = f"tg_{tg_id}@siiqo.app"
-    tg_secret = os.environ.get('TG_AUTH_SECRET', 'siiqo_secret_2024')
-    virtual_password = f"tg_{tg_id}_{tg_secret}"
-    
-    user = User.query.filter_by(email=virtual_email).first()
+    # Authenticate by telegram_id first
+    user = User.query.filter_by(telegram_id=str(tg_id)).first()
     
     if not user:
-        # Register new user (pre-verified because authenticated via Telegram OAuth)
-        user = User(
-            email=virtual_email,
-            first_name=first_name or 'Telegram',
-            last_name=last_name or 'User',
-            role=UserRole.BUYER,
-            is_verified=True,
-            is_active=True,
-            profile_pic=photo_url or None
-        )
-        user.set_password(virtual_password)
-        db.session.add(user)
-        db.session.flush()
-        user.generate_referral_code()
-        db.session.commit()
-    else:
-        # User exists, ensure they are verified and active
-        if not user.is_verified:
-            user.is_verified = True
-        if not user.is_active:
-            return jsonify({"message": "Your account has been suspended. Please contact support."}), 403
-        
-        # Update details from Telegram if changed
-        updated = False
-        if first_name and user.first_name != first_name:
-            user.first_name = first_name
-            updated = True
-        if last_name and user.last_name != last_name:
-            user.last_name = last_name
-            updated = True
-        if photo_url and user.profile_pic != photo_url:
-            user.profile_pic = photo_url
-            updated = True
-            
-        if updated:
+        # Check legacy virtual email for backward compatibility
+        virtual_email = f"tg_{tg_id}@siiqo.app"
+        user = User.query.filter_by(email=virtual_email).first()
+        if user:
+            user.telegram_id = str(tg_id)
             db.session.commit()
+
+    if not user:
+        if create_new:
+            virtual_email = f"tg_{tg_id}@siiqo.app"
+            tg_secret = os.environ.get('TG_AUTH_SECRET', 'siiqo_secret_2024')
+            virtual_password = f"tg_{tg_id}_{tg_secret}"
+            
+            # Register new user (pre-verified because authenticated via Telegram OAuth)
+            user = User(
+                email=virtual_email,
+                first_name=first_name or 'Telegram',
+                last_name=last_name or 'User',
+                role=UserRole.BUYER,
+                is_verified=True,
+                is_active=True,
+                profile_pic=photo_url or None,
+                telegram_id=str(tg_id)
+            )
+            user.set_password(virtual_password)
+            db.session.add(user)
+            db.session.flush()
+            user.generate_referral_code()
+            db.session.commit()
+        else:
+            return jsonify({
+                "status": "new_user",
+                "message": "No account is currently linked to this Telegram profile.",
+                "telegram_data": data
+            }), 200
+            
+    # User exists, ensure they are verified and active
+    if not user.is_verified:
+        user.is_verified = True
+    if not user.is_active:
+        return jsonify({"message": "Your account has been suspended. Please contact support."}), 403
+    
+    # Update details from Telegram if changed
+    updated = False
+    if first_name and user.first_name != first_name:
+        user.first_name = first_name
+        updated = True
+    if last_name and user.last_name != last_name:
+        user.last_name = last_name
+        updated = True
+    if photo_url and user.profile_pic != photo_url:
+        user.profile_pic = photo_url
+        updated = True
         
+    if updated:
+        db.session.commit()
+    
     tokens = _make_tokens(user)
     return jsonify({
         "message": "Login successful",
@@ -658,3 +700,191 @@ def telegram_login():
         "access_token": tokens["access_token"],
     }), 200
 
+
+@auth_bp.route('/link-telegram', methods=['POST'])
+@jwt_required()
+def link_telegram():
+    import hashlib
+    import hmac
+
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    data = request.get_json() or {}
+    tg_id = data.get('id')
+    first_name = data.get('first_name', '')
+    last_name = data.get('last_name', '')
+    photo_url = data.get('photo_url', '')
+    tg_hash = data.get('hash')
+
+    if not tg_id or not tg_hash:
+        return jsonify({"message": "Invalid Telegram authentication data"}), 400
+
+    check_fields = []
+    for k, v in sorted(data.items()):
+        if k != 'hash' and v is not None:
+            check_fields.append(f"{k}={str(v)}")
+    data_check_string = "\n".join(check_fields)
+
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not bot_token:
+        return jsonify({"message": "Telegram Bot Token is not configured on the server."}), 500
+    secret_key = hashlib.sha256(bot_token.encode('utf-8')).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
+
+    if calculated_hash != tg_hash:
+        return jsonify({"message": "Telegram authentication failed verification"}), 400
+
+    existing = User.query.filter_by(telegram_id=str(tg_id)).first()
+    if existing and existing.id != user.id:
+        return jsonify({"message": "This Telegram profile is already linked to another Siiqo account."}), 409
+
+    user.telegram_id = str(tg_id)
+    if first_name and not user.first_name:
+        user.first_name = first_name
+    if last_name and not user.last_name:
+        user.last_name = last_name
+    if photo_url and not user.profile_pic:
+        user.profile_pic = photo_url
+    db.session.commit()
+
+    return jsonify({
+        "status": "success",
+        "message": "Telegram profile successfully connected to your Siiqo account.",
+        "user": _user_payload(user)
+    }), 200
+
+
+@auth_bp.route('/send-link-otp', methods=['POST'])
+@limiter.limit("3 per minute")
+def send_link_otp():
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    telegram_id = data.get('telegram_id')
+
+    if not email or not telegram_id:
+        return jsonify({"message": "Email and Telegram ID are required"}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({"message": "No account found with this email address."}), 404
+
+    existing = User.query.filter_by(telegram_id=str(telegram_id)).first()
+    if existing and existing.id != user.id:
+        return jsonify({"message": "This Telegram account is already linked to another email."}), 409
+
+    otp = str(random.randint(100000, 999999))
+    user.reset_otp = otp
+    user.otp_expiry = _utcnow() + timedelta(minutes=15)
+    db.session.commit()
+
+    try:
+        send_siiqo_email(
+            to_email=user.email,
+            subject="Siiqo Account Link Verification Code",
+            template_name="verify_email_otp",
+            first_name=user.first_name or "there",
+            otp=otp,
+        )
+    except Exception as e:
+        logging.warning(f"[WARN] Account link email failed: {e}")
+        return jsonify({"message": "Failed to send verification email. Please try again."}), 500
+
+    return jsonify({"message": "Verification code sent to your email address."}), 200
+
+
+@auth_bp.route('/verify-link-otp', methods=['POST'])
+@limiter.limit("5 per minute")
+def verify_link_otp():
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    otp = str(data.get('otp') or '').strip()
+    telegram_id = data.get('telegram_id')
+
+    if not email or not otp or not telegram_id:
+        return jsonify({"message": "Email, OTP, and Telegram ID are required"}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    if not user.reset_otp or user.reset_otp.strip() != otp:
+        return jsonify({"message": "Invalid OTP. Please check and try again."}), 400
+
+    if user.otp_expiry and _utcnow() > user.otp_expiry.replace(tzinfo=timezone.utc):
+        return jsonify({"message": "OTP has expired. Please request a new one."}), 400
+
+    existing = User.query.filter_by(telegram_id=str(telegram_id)).first()
+    if existing and existing.id != user.id:
+        return jsonify({"message": "This Telegram account is already linked to another email."}), 409
+
+    user.telegram_id = str(telegram_id)
+    user.is_verified = True
+    user.reset_otp = None
+    user.otp_expiry = None
+    db.session.commit()
+
+    tokens = _make_tokens(user)
+    return jsonify({
+        "message": "Account successfully linked to Telegram.",
+        "status": "success",
+        "user": _user_payload(user),
+        **tokens,
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# Unlink Telegram
+# ---------------------------------------------------------------------------
+
+@auth_bp.route('/unlink-telegram', methods=['POST'])
+@jwt_required()
+def unlink_telegram():
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    user.telegram_id = None
+    db.session.commit()
+
+    return jsonify({
+        "status": "success",
+        "message": "Telegram has been disconnected from your account.",
+        "user": _user_payload(user),
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# Update Telegram Preferences
+# ---------------------------------------------------------------------------
+
+@auth_bp.route('/telegram-prefs', methods=['PATCH'])
+@jwt_required()
+def telegram_prefs():
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    data = request.get_json() or {}
+    
+    # We expect JSON like: { "orders": true, "chats": false, "payouts": true }
+    current_prefs = user.telegram_notification_prefs or {}
+    
+    # Update dict with provided keys
+    for k in ['orders', 'chats', 'payouts']:
+        if k in data:
+            current_prefs[k] = bool(data[k])
+            
+    # Re-assign to flag SQLAlchemy that JSON has been modified
+    user.telegram_notification_prefs = current_prefs
+    db.session.commit()
+    
+    return jsonify({
+        "status": "success",
+        "message": "Telegram notification preferences updated.",
+        "user": _user_payload(user),
+    }), 200
