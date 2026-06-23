@@ -775,6 +775,56 @@ def upload_profile_pic_alias():
     return _upload()
 
 
+@bridge_bp.route('/buyer-orders/upload-proof/<int:order_id>', methods=['POST'])
+@jwt_required()
+def upload_payment_proof(order_id):
+    """
+    Upload a payment proof image for an order.
+    Used by the frontend when buyers need to submit manual payment evidence.
+    Stores the image URL on the order's escrow transaction notes field.
+    """
+    user_id = get_jwt_identity()
+    from app.models.order import Order
+    from app.models.escrow import EscrowTransaction
+
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+    if order.buyer_id != int(user_id):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    proof_file = request.files.get('proof') or request.files.get('file') or request.files.get('image')
+    if not proof_file:
+        return jsonify({"message": "No file uploaded. Use field name 'proof', 'file', or 'image'."}), 400
+
+    try:
+        proof_url = save_uploaded_file(proof_file, subfolder='payment_proofs')
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+
+    # Attach to escrow transaction as a note
+    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+    if escrow:
+        existing = escrow.dispute_reason or ''
+        escrow.dispute_reason = f"[PAYMENT_PROOF: {proof_url}] {existing}".strip()
+
+    # Also add a notification for the vendor
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title="Payment Proof Submitted",
+        message=f"Buyer submitted payment proof for Order #{order_id}.",
+        type="ORDER",
+        order_id=order_id,
+    ))
+    db.session.commit()
+
+    return jsonify({
+        "status": "success",
+        "message": "Payment proof uploaded successfully.",
+        "proof_url": proof_url,
+    }), 200
+
+
 # ===========================================================================
 # PARTNER LOGIN  (PartnerAuthContext calls /auth/partner/login)
 # ===========================================================================

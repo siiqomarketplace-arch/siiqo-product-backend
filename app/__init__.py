@@ -51,10 +51,13 @@ def create_app(config_name: str | None = None) -> Flask:
 
         # ── Database Schema Auto-Creation & alters for telemetry/partners ─────
         try:
-            # 1. Run create_all() to auto-generate partner tables
+            # db.create_all() only creates tables that don't exist yet — it never
+            # drops or alters existing columns, so it is safe to run alongside
+            # Alembic migrations. It handles new partner tables added outside
+            # the migration cycle.
             db.create_all()
 
-            # 2. Run column additions for telemetry coordinates (if not already present)
+            # Run column additions for telemetry coordinates (if not already present)
             from sqlalchemy import text as _text
             for col_def in [
                 "ALTER TABLE logistics_assignments ADD COLUMN current_latitude NUMERIC(9, 6)",
