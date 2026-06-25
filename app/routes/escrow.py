@@ -74,6 +74,106 @@ def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, desc
 
 from app.services.escrow import get_escrow_provider
 
+
+def _deliver_digital_products(order, escrow):
+    """
+    For orders containing digital products:
+    - Immediately mark escrow as RELEASED (no delivery wait needed)
+    - Credit vendor ledger
+    - Email buyer the download link(s)
+    - Mark order COMPLETED
+    Returns True if any digital items were found and handled.
+    """
+    from app.models.product import Product as Prod
+    from app.utils.email import send_siiqo_email
+    from app.models.user import User
+
+    digital_items = []
+    for item in (order.items or []):
+        p = db.session.get(Prod, item.product_id) if item.product_id else item.product
+        if p and p.product_type == 'digital' and p.file_url:
+            digital_items.append((p, item))
+
+    if not digital_items:
+        return False
+
+    # Build download list for email
+    download_lines = "\n".join(
+        f"• {p.name}: {p.file_url}" for p, _ in digital_items
+    )
+
+    # Release escrow immediately — no physical delivery required
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    escrow.status = EscrowStatus.RELEASED
+    escrow.released_at = _utcnow()
+    order.status = 'COMPLETED'
+
+    _credit_vendor_ledger(
+        vendor_id=order.vendor_id,
+        amount=net_amount,
+        reference_id=escrow.transaction_number,
+        description=f"Auto-released payout for digital Order #{order.id}",
+    )
+
+    from app.models.finance import Receipt
+    if not Receipt.query.filter_by(order_id=order.id).first():
+        db.session.add(Receipt(order_id=order.id))
+
+    # Notify buyer with download link(s)
+    buyer = db.session.get(User, order.buyer_id)
+    download_msg = f"Your download link(s) for Order #{order.id} are ready."
+    db.session.add(Notification(
+        user_id=order.buyer_id,
+        title="Your Digital Download is Ready! 🎉",
+        message=download_msg,
+        type="ORDER",
+        order_id=order.id,
+    ))
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title="Digital Order Complete",
+        message=f"Order #{order.id} completed automatically. ₦{net_amount:,.2f} credited.",
+        type="ESCROW",
+        order_id=order.id,
+    ))
+
+    if buyer and buyer.email:
+        try:
+            send_siiqo_email(
+                to_email=buyer.email,
+                subject=f"Your Digital Download – Order #{order.id} | Siiqo",
+                template_name="system_notice",
+                first_name=buyer.first_name or "there",
+                notice_text=(
+                    f"Great news! Your payment for Order #{order.id} is confirmed.\n\n"
+                    f"Here are your download link(s):\n\n{download_lines}\n\n"
+                    "These links are yours to keep. If you have any issues accessing your files, "
+                    "please contact the seller via the Siiqo chat."
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL] digital download email failed Order #{order.id}: {e}")
+
+    # Notify vendor
+    vendor = db.session.get(User, order.vendor_id)
+    if vendor and vendor.email:
+        try:
+            send_siiqo_email(
+                to_email=vendor.email,
+                subject=f"Digital Sale Complete – Order #{order.id} | Siiqo",
+                template_name="system_notice",
+                first_name=vendor.first_name or "Vendor",
+                notice_text=(
+                    f"Your digital product was purchased and delivered automatically.\n"
+                    f"Order #{order.id} — ₦{net_amount:,.2f} credited to your ledger."
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL] vendor digital sale email failed: {e}")
+
+    logging.info(f"[DIGITAL] Auto-delivered and released Order #{order.id}")
+    return True
+
 # ---------------------------------------------------------------------------
 # POST /escrow/initiate
 # ---------------------------------------------------------------------------
@@ -230,44 +330,54 @@ def payscrow_webhook():
                         if link and link.link_type == 'INVOICE':
                             link.status = 'PAID'
 
-                    from app.models.escrow import LogisticsAssignment
-                    assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
-                    if assignment and assignment.status == 'PENDING':
-                        assignment.status = 'ASSIGNED'
-                        assignment.assigned_at = _utcnow()
+                    # ── Digital product: auto-deliver and release immediately ──
+                    # Commit what we have so far before calling _deliver_digital_products
+                    db.session.flush()
+                    is_digital_order = _deliver_digital_products(order, escrow)
+
+                    if not is_digital_order:
+                        # Physical/service: normal logistics flow
+                        from app.models.escrow import LogisticsAssignment
+                        assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
+                        if assignment and assignment.status == 'PENDING':
+                            assignment.status = 'ASSIGNED'
+                            assignment.assigned_at = _utcnow()
+                            db.session.add(Notification(
+                                user_id=assignment.partner_id,
+                                title="New Delivery Assignment",
+                                message=(
+                                    f"You have been assigned a new delivery for Order #{order.id}. "
+                                    f"Delivery fee: ₦{assignment.delivery_fee:,.2f}."
+                                ),
+                                type="DELIVERY",
+                                order_id=order.id,
+                            ))
+
                         db.session.add(Notification(
-                            user_id=assignment.partner_id,
-                            title="New Delivery Assignment",
-                            message=(
-                                f"You have been assigned a new delivery for Order #{order.id}. "
-                                f"Delivery fee: ₦{assignment.delivery_fee:,.2f}."
-                            ),
-                            type="DELIVERY",
+                            user_id=order.buyer_id,
+                            title="Payment Confirmed",
+                            message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
+                            type="ORDER",
+                            order_id=order.id,
+                        ))
+                        db.session.add(Notification(
+                            user_id=order.vendor_id,
+                            title="Payment Received in Escrow",
+                            message=f"Payment for Order #{order.id} is secured. Please ship the order.",
+                            type="ESCROW",
                             order_id=order.id,
                         ))
 
-                    processed_orders.append((escrow, order))
-                    db.session.add(Notification(
-                        user_id=order.buyer_id,
-                        title="Payment Confirmed",
-                        message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
-                        type="ORDER",
-                        order_id=order.id,
-                    ))
-                    db.session.add(Notification(
-                        user_id=order.vendor_id,
-                        title="Payment Received in Escrow",
-                        message=f"Payment for Order #{order.id} is secured. Please ship the order.",
-                        type="ESCROW",
-                        order_id=order.id,
-                    ))
+                    processed_orders.append((escrow, order, is_digital_order))
 
         db.session.commit()
 
         from app.utils.email import send_siiqo_email
         from app.models.user import User
 
-        for escrow, order in processed_orders:
+        for escrow, order, is_digital_order in processed_orders:
+            if is_digital_order:
+                continue  # digital orders already emailed in _deliver_digital_products
             buyer = db.session.get(User, order.buyer_id)
             if buyer:
                 try:
