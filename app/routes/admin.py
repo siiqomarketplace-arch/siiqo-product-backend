@@ -434,7 +434,14 @@ def handle_categories():
     if request.method == 'GET':
         cats = Category.query.limit(500).all()
         return jsonify({
-            "categories": [{"id": c.id, "name": c.name, "slug": c.slug} for c in cats],
+            "categories": [{
+                "id": c.id,
+                "name": c.name,
+                "slug": c.slug,
+                "icon": c.icon,
+                "attribute_schema": c.attribute_schema or [],
+                "product_type_hint": c.product_type_hint or [],
+            } for c in cats],
             "count": len(cats),
         }), 200
 
@@ -452,7 +459,13 @@ def handle_categories():
     if Category.query.filter_by(slug=slug).first():
         return jsonify({"message": "Category already exists"}), 409
 
-    cat = Category(name=name, slug=slug)
+    cat = Category(
+        name=name,
+        slug=slug,
+        icon=data.get('icon'),
+        attribute_schema=data.get('attribute_schema'),
+        product_type_hint=data.get('product_type_hint'),
+    )
     db.session.add(cat)
     db.session.commit()
     return jsonify({"message": f"Category '{name}' created.", "id": cat.id, "slug": cat.slug}), 201
@@ -491,6 +504,13 @@ def manage_category(cat_id):
         cat.name = data['name']
     if 'slug' in data:
         cat.slug = data['slug']
+    # New enrichment fields — safe to update independently
+    if 'icon' in data:
+        cat.icon = data['icon']
+    if 'attribute_schema' in data:
+        cat.attribute_schema = data['attribute_schema']
+    if 'product_type_hint' in data:
+        cat.product_type_hint = data['product_type_hint']
     db.session.commit()
     return jsonify({"message": "Category updated.", "id": cat.id}), 200
 

@@ -7,6 +7,19 @@ class Category(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
     slug = db.Column(db.String(100), unique=True, nullable=False)
+
+    # ── NEW: attribute schema for category-specific listing fields ──────────
+    # JSON array of field descriptors. NULL = no extra fields (backward compat).
+    # Example: [{"key":"size","label":"Size","type":"multiselect","options":["XS","S","M","L","XL"]}]
+    attribute_schema = db.Column(db.JSON, nullable=True)
+
+    # ── NEW: hint for which product types this category applies to ──────────
+    # Example: ["physical"] or ["digital"] or ["physical","service"]
+    # NULL means it applies to all types (backward compat).
+    product_type_hint = db.Column(db.JSON, nullable=True)
+
+    # ── NEW: icon name for UI display (e.g. "Shirt", "Cpu", "Home") ─────────
+    icon = db.Column(db.String(50), nullable=True)
     
     products = db.relationship('Product', back_populates='category')
 
@@ -59,6 +72,11 @@ class Product(db.Model):
     weight           = db.Column(db.Numeric(8, 2), nullable=True)  # kg
     seo_title        = db.Column(db.String(255), nullable=True)
     seo_description  = db.Column(db.Text, nullable=True)
+
+    # ── Category-specific attributes (additive, non-breaking) ───────────────
+    # Stored as JSON. Existing products have NULL here — renders as nothing.
+    # Example: {"color": "Blue", "size": "XL", "material": "Cotton"}
+    attributes = db.Column(db.JSON, nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

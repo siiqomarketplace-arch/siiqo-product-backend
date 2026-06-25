@@ -185,11 +185,25 @@ def create_app(config_name: str | None = None) -> Flask:
 
     # -----------------------------------------------------------------------
     # Background scheduler — escrow auto-release and delivery reminders
-    # Only starts in the main process to avoid duplicate jobs under gunicorn.
-    # Set DISABLE_SCHEDULER=true in .env to turn off (e.g. when running
-    # Alembic migrations or one-off management commands).
+    # Only starts in worker 1 (the first gunicorn worker) to avoid duplicate
+    # jobs firing across all 4 workers.
+    # Gunicorn sets the env var WORKER_ID via --worker-class; we detect by
+    # checking os.getpid() vs the parent. The reliable cross-platform approach
+    # is to use a file-based lock so only ONE process actually starts the
+    # scheduler regardless of how many workers gunicorn spawns.
+    # Set DISABLE_SCHEDULER=true in .env to turn off entirely.
     # -----------------------------------------------------------------------
+    _scheduler_lock_acquired = False
     if not app.config.get('TESTING') and not os.environ.get('DISABLE_SCHEDULER'):
+        import fcntl, tempfile
+        try:
+            _lock_file = open(os.path.join(tempfile.gettempdir(), 'siiqo_scheduler.lock'), 'w')
+            fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _scheduler_lock_acquired = True
+        except (IOError, OSError):
+            pass  # Another worker already holds the lock — skip scheduler
+
+    if _scheduler_lock_acquired:
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
             from apscheduler.triggers.interval import IntervalTrigger

@@ -540,6 +540,17 @@ def add_product():
         seo_description=data.get('seo_description') or data.get('seoDescription'),
     )
 
+    # ── Category-specific attributes (new, additive) ──────────────────────
+    if data.get('attributes'):
+        import json as _json
+        attrs = data['attributes']
+        if isinstance(attrs, str):
+            try:
+                attrs = _json.loads(attrs)
+            except Exception:
+                attrs = None
+        new_product.attributes = attrs
+
     # Handle multiple image files (frontend appends each as 'images')
     # Also accept legacy single-file keys 'image' and 'images-file'
     saved_images = []
@@ -752,6 +763,17 @@ def edit_product(product_id):
         product.seo_description = data['seo_description']
     elif 'seoDescription' in data:
         product.seo_description = data['seoDescription']
+
+    # ── Category-specific attributes (new, additive, non-breaking) ──────────
+    if 'attributes' in data:
+        import json as _json
+        attrs = data['attributes']
+        if isinstance(attrs, str):
+            try:
+                attrs = _json.loads(attrs)
+            except Exception:
+                attrs = None
+        product.attributes = attrs
 
     db.session.commit()
     

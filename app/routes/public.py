@@ -122,6 +122,8 @@ def get_products():
             "product_type": p.product_type or "physical",
             "file_url": p.file_url,
             "booking_link": p.booking_link,
+            # Category-specific attributes — null for old listings, safe to show
+            "attributes": p.attributes or {},
         }
 
     products = [_product_dict(p, p.id in sponsored_ids) for p in paginated.items]
@@ -182,6 +184,8 @@ def get_product_details(product_id):
         "seo_description": p.seo_description,
         "created_at": p.created_at.isoformat() + "Z" if p.created_at else None,
         "updated_at": p.updated_at.isoformat() + "Z" if p.updated_at else None,
+        # Category-specific attributes — null for old listings, safe to show
+        "attributes": p.attributes or {},
         "storefront": {
             "id": p.storefront.id,
             "vendor_id": p.storefront.vendor_id,  # Added for chat functionality
@@ -359,18 +363,22 @@ def get_categories():
             "id": c.id,
             "name": c.name,
             "slug": c.slug,
+            # New fields — null for old categories, schema for enriched ones
+            "icon": c.icon,
+            "attribute_schema": c.attribute_schema or [],
+            "product_type_hint": c.product_type_hint or [],
         } for c in cats]), 200
 
-    # Seed defaults if DB is empty
+    # Seed defaults if DB is empty — now with icons included
     return jsonify([
-        {"id": 1, "name": "Electronics", "slug": "electronics", "icon": "laptop"},
-        {"id": 2, "name": "Fashion", "slug": "fashion", "icon": "shirt"},
-        {"id": 3, "name": "Home & Furniture", "slug": "home-furniture", "icon": "sofa"},
-        {"id": 4, "name": "Beauty", "slug": "beauty", "icon": "sparkles"},
-        {"id": 5, "name": "Food & Drinks", "slug": "food-drinks", "icon": "utensils"},
-        {"id": 6, "name": "Services", "slug": "services", "icon": "briefcase"},
-        {"id": 7, "name": "Health", "slug": "health", "icon": "heart"},
-        {"id": 8, "name": "Sports", "slug": "sports", "icon": "dumbbell"},
+        {"id": 1, "name": "Electronics", "slug": "electronics", "icon": "Cpu", "attribute_schema": [], "product_type_hint": ["physical"]},
+        {"id": 2, "name": "Fashion", "slug": "fashion", "icon": "Shirt", "attribute_schema": [], "product_type_hint": ["physical"]},
+        {"id": 3, "name": "Home & Furniture", "slug": "home-furniture", "icon": "Home", "attribute_schema": [], "product_type_hint": ["physical"]},
+        {"id": 4, "name": "Beauty", "slug": "beauty", "icon": "Sparkles", "attribute_schema": [], "product_type_hint": ["physical"]},
+        {"id": 5, "name": "Food & Drinks", "slug": "food-drinks", "icon": "UtensilsCrossed", "attribute_schema": [], "product_type_hint": ["physical"]},
+        {"id": 6, "name": "Services", "slug": "services", "icon": "Briefcase", "attribute_schema": [], "product_type_hint": ["service"]},
+        {"id": 7, "name": "Health", "slug": "health", "icon": "Heart", "attribute_schema": [], "product_type_hint": ["physical"]},
+        {"id": 8, "name": "Sports", "slug": "sports", "icon": "Dumbbell", "attribute_schema": [], "product_type_hint": ["physical"]},
     ]), 200
 
 
@@ -454,4 +462,87 @@ def get_vendor_reviews(vendor_id):
             "buyer_name": r.buyer.full_name if r.buyer else "Anonymous",
             "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in reviews],
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /marketplace/vendor/<vendor_id>/trust-breakdown  — public trust detail
+# ---------------------------------------------------------------------------
+
+@public_bp.route('/vendor/<int:vendor_id>/trust-breakdown', methods=['GET'])
+def get_vendor_trust_breakdown(vendor_id):
+    """
+    Public endpoint — returns a vendor's trust score breakdown.
+    Only non-private information is included (no financial or personal data).
+    """
+    vendor = User.query.get(vendor_id)
+    if not vendor:
+        return jsonify({"message": "Vendor not found"}), 404
+
+    # Use the same computed property as product listings
+    total_score = vendor.trust_score_or_default
+    tier = vendor.trust_tier_or_default
+
+    # Attempt to get the detailed profile (may not exist for all vendors)
+    profile = None
+    try:
+        from app.models.trust import TrustProfile
+        profile = TrustProfile.query.filter_by(vendor_id=vendor_id).first()
+    except Exception:
+        pass
+
+    if profile:
+        pillars = [
+            {
+                "label": "Completion",
+                "score": int(getattr(profile, 'completion_score', 0) or 0),
+                "max": 200,
+            },
+            {
+                "label": "Satisfaction",
+                "score": int(getattr(profile, 'satisfaction_score', 0) or 0),
+                "max": 200,
+            },
+            {
+                "label": "Responsiveness",
+                "score": int(getattr(profile, 'responsiveness_score', 0) or 0),
+                "max": 200,
+            },
+            {
+                "label": "Compliance",
+                "score": int(getattr(profile, 'compliance_score', 0) or 0),
+                "max": 200,
+            },
+            {
+                "label": "Community",
+                "score": int(getattr(profile, 'community_score', 0) or 0),
+                "max": 200,
+            },
+        ]
+    else:
+        # Distribute total score proportionally across 5 pillars (max 200 each)
+        base = total_score // 5
+        remainder = total_score - (base * 5)
+        pillars = [
+            {"label": "Completion", "score": base, "max": 200},
+            {"label": "Satisfaction", "score": base, "max": 200},
+            {"label": "Responsiveness", "score": base, "max": 200},
+            {"label": "Compliance", "score": base + remainder, "max": 200},
+            {"label": "Community", "score": base, "max": 200},
+        ]
+
+    storefront = vendor.storefront if hasattr(vendor, 'storefront') else None
+
+    return jsonify({
+        "vendor_id": vendor_id,
+        "tier": tier,
+        "total_score": total_score,
+        "pillars": pillars,
+        "verified": {
+            "email": bool(vendor.is_verified),
+            "phone": bool(vendor.phone),
+            "bank_account": bool(getattr(vendor, 'bank_account', None) or getattr(vendor, 'account_number', None)),
+            "cac_registered": bool(getattr(vendor, 'cac_number', None)),
+            "id_verified": bool(vendor.nin),
+        },
     }), 200
