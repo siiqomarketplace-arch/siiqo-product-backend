@@ -489,6 +489,9 @@ def buyer_order_history():
             "price": float(item.price_at_purchase),
             "unit_price": float(item.price_at_purchase),
             "image": (item.product.images[0] if item.product and item.product.images else None),
+            "product_type": (item.product.product_type if item.product else "physical") or "physical",
+            "file_url": (item.product.file_url if item.product else None),
+            "booking_link": (item.product.booking_link if item.product else None),
         } for item in (o.items or [])]
 
         result.append({
@@ -539,6 +542,9 @@ def get_buyer_order_detail(order_id):
         "quantity": item.quantity,
         "unit_price": float(item.price_at_purchase),
         "image": (item.product.images[0] if item.product and item.product.images else None),
+        "product_type": (item.product.product_type if item.product else "physical") or "physical",
+        "file_url": (item.product.file_url if item.product else None),
+        "booking_link": (item.product.booking_link if item.product else None),
     } for item in (order.items or [])]
 
     vendor = db.session.get(User, order.vendor_id)

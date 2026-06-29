@@ -1,5 +1,6 @@
 import os
 from flask import Flask, jsonify
+from werkzeug.middleware.proxy_fix import ProxyFix
 from app.config import config
 from app.extensions import db, migrate, jwt, cors, limiter
 
@@ -9,6 +10,8 @@ def create_app(config_name: str | None = None) -> Flask:
         config_name = os.environ.get('FLASK_ENV', 'default')
 
     app = Flask(__name__)
+    # Trust reverse proxy headers (Cloudflare & Elastic Beanstalk ALB/Nginx)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
 
