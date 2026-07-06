@@ -66,6 +66,9 @@ def get_cart():
                 ) if sf else False,
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
+                "product_type": (item.product.product_type if item.product else 'physical') or 'physical',
+                "file_url": item.product.file_url if item.product else None,
+                "booking_link": item.product.booking_link if item.product else None,
                 # Negotiation fields
                 "is_negotiable": item.product.is_negotiable,
                 "negotiated_price": str(item.negotiated_price) if item.negotiated_price else None,
@@ -332,10 +335,15 @@ def checkout():
         fee_percent = 12.00
         fee_amount = total * (fee_percent / 100)
 
-        # Match logistics selection for this vendor
+        # Match logistics selection for this vendor if there are physical items
+        has_physical_items = any(
+            ((item.product.product_type if item.product else 'physical') or 'physical') == 'physical'
+            for item in items
+        )
+
         logistics_fee = 0.0
         logistics_provider_id = None
-        if logistics_selections:
+        if has_physical_items and logistics_selections:
             for sel in logistics_selections:
                 sel_vid = sel.get('vendorId')
                 if sel_vid is not None and int(sel_vid) == int(vid):
@@ -353,10 +361,10 @@ def checkout():
             payment_method=payment_method,
             logistics_provider_id=logistics_provider_id,
             logistics_fee=logistics_fee,
-            delivery_address=data.get('delivery_address'),
-            delivery_city=data.get('delivery_city'),
-            delivery_state=data.get('delivery_state'),
-            delivery_phone=data.get('delivery_phone'),
+            delivery_address=data.get('delivery_address') if has_physical_items else 'Digital Delivery',
+            delivery_city=data.get('delivery_city') if has_physical_items else None,
+            delivery_state=data.get('delivery_state') if has_physical_items else None,
+            delivery_phone=data.get('delivery_phone') if has_physical_items else None,
             delivery_name=data.get('customer', {}).get('name') if data.get('customer') else None,
         )
         db.session.add(new_order)
@@ -383,12 +391,14 @@ def checkout():
 
         for item in items:
             product = db.session.query(Product).with_for_update().get(item.product.id)
-            if product.stock_quantity < item.quantity:
-                db.session.rollback()
-                return jsonify({"message": f"Insufficient stock for {product.name}"}), 400
-            
-            # Decrement inventory
-            product.stock_quantity -= item.quantity
+            p_type = (product.product_type or 'physical')
+            if p_type == 'physical':
+                if product.stock_quantity < item.quantity:
+                    db.session.rollback()
+                    return jsonify({"message": f"Insufficient stock for {product.name}"}), 400
+                
+                # Decrement inventory
+                product.stock_quantity -= item.quantity
 
             effective_price = item.negotiated_price if item.negotiated_price else product.price
             db.session.add(OrderItem(

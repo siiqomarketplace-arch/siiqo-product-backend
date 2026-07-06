@@ -108,6 +108,11 @@ def _deliver_digital_products(order, escrow):
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
 
+    # If paid via Paystack, execute direct payout transfer
+    is_paystack = (order.payment_method or '').upper() == 'PAYSTACK' or (escrow.payscrow_transaction_id and not escrow.payscrow_transaction_id.startswith('ESC-'))
+    if is_paystack:
+        _paystack_payout_vendor(order, escrow)
+
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
         amount=net_amount,
@@ -174,6 +179,110 @@ def _deliver_digital_products(order, escrow):
     logging.info(f"[DIGITAL] Auto-delivered and released Order #{order.id}")
     return True
 
+
+def _deliver_service_products(order, escrow):
+    """
+    For orders containing service products:
+    - Immediately mark escrow as RELEASED (no delivery wait needed)
+    - Credit vendor ledger
+    - Email buyer the booking link(s)
+    - Mark order COMPLETED
+    Returns True if any service items were found and handled.
+    """
+    from app.models.product import Product as Prod
+    from app.utils.email import send_siiqo_email
+    from app.models.user import User
+
+    service_items = []
+    for item in (order.items or []):
+        p = db.session.get(Prod, item.product_id) if item.product_id else item.product
+        if p and p.product_type == 'service' and p.booking_link:
+            service_items.append((p, item))
+
+    if not service_items:
+        return False
+
+    # Build booking list for email
+    booking_lines = "\n".join(
+        f"• {p.name}: {p.booking_link}" for p, _ in service_items
+    )
+
+    # Release escrow immediately
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    escrow.status = EscrowStatus.RELEASED
+    escrow.released_at = _utcnow()
+    order.status = 'COMPLETED'
+
+    # If paid via Paystack, execute direct payout transfer
+    is_paystack = (order.payment_method or '').upper() == 'PAYSTACK' or (escrow.payscrow_transaction_id and not escrow.payscrow_transaction_id.startswith('ESC-'))
+    if is_paystack:
+        _paystack_payout_vendor(order, escrow)
+
+    _credit_vendor_ledger(
+        vendor_id=order.vendor_id,
+        amount=net_amount,
+        reference_id=escrow.transaction_number,
+        description=f"Auto-released payout for service Order #{order.id}",
+    )
+
+    from app.models.finance import Receipt
+    if not Receipt.query.filter_by(order_id=order.id).first():
+        db.session.add(Receipt(order_id=order.id))
+
+    # Notify buyer with booking link(s)
+    buyer = db.session.get(User, order.buyer_id)
+    booking_msg = f"Your booking link(s) for Order #{order.id} are ready."
+    db.session.add(Notification(
+        user_id=order.buyer_id,
+        title="Your Service Booking Link is Ready! 📅",
+        message=booking_msg,
+        type="ORDER",
+        order_id=order.id,
+    ))
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title="Service Order Complete",
+        message=f"Order #{order.id} completed automatically. ₦{net_amount:,.2f} credited.",
+        type="ESCROW",
+        order_id=order.id,
+    ))
+
+    if buyer and buyer.email:
+        try:
+            send_siiqo_email(
+                to_email=buyer.email,
+                subject=f"Book Your Service – Order #{order.id} | Siiqo",
+                template_name="system_notice",
+                first_name=buyer.first_name or "there",
+                notice_text=(
+                    f"Great news! Your payment for Order #{order.id} is confirmed.\n\n"
+                    f"Please use the link(s) below to book your appointment:\n\n{booking_lines}\n\n"
+                    "If you have any issues booking the service, please message the vendor in Siiqo chat."
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL] service booking email failed Order #{order.id}: {e}")
+
+    # Notify vendor
+    vendor = db.session.get(User, order.vendor_id)
+    if vendor and vendor.email:
+        try:
+            send_siiqo_email(
+                to_email=vendor.email,
+                subject=f"Service Booking Sale – Order #{order.id} | Siiqo",
+                template_name="system_notice",
+                first_name=vendor.first_name or "Vendor",
+                notice_text=(
+                    f"Your service product was purchased and booking links delivered automatically.\n"
+                    f"Order #{order.id} — ₦{net_amount:,.2f} credited to your ledger."
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL] vendor service sale email failed: {e}")
+
+    logging.info(f"[SERVICE] Auto-delivered and released Order #{order.id}")
+    return True
+
 # ---------------------------------------------------------------------------
 # POST /escrow/initiate
 # ---------------------------------------------------------------------------
@@ -198,23 +307,26 @@ def initiate_escrow():
         if order.buyer_id != int(user_id):
             return jsonify({"message": "Unauthorized"}), 403
 
-    # Validate that all vendors have bank accounts for Payscrow split payouts
+    # Validate bank accounts ONLY for Payscrow (physical orders)
+    # Paystack handles digital/service orders and uses its own recipient API
     from app.models.withdrawal import VendorBankAccount
-    for order in orders:
-        bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
-        if not bank_acc:
-            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
-        if not bank_acc:
-            sf = order.vendor.storefront if order.vendor else None
-            if not (sf and sf.bank_code and sf.account_number):
-                v_name = order.vendor.full_name if order.vendor else f"ID {order.vendor_id}"
-                return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
+    provider_check = get_escrow_provider(orders)
+    if isinstance(provider_check, type) or provider_check.__class__.__name__ == 'PayscrowProvider':
+        for order in orders:
+            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
+            if not bank_acc:
+                bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
+            if not bank_acc:
+                sf = order.vendor.storefront if order.vendor else None
+                if not (sf and sf.bank_code and sf.account_number):
+                    v_name = order.vendor.full_name if order.vendor else f"ID {order.vendor_id}"
+                    return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
 
     escrow_txns = EscrowTransaction.query.filter(EscrowTransaction.order_id.in_([o.id for o in orders])).all()
     existing_txn_number = next((e.transaction_number for e in escrow_txns if e.payment_link), None)
 
     # Delegate logic to Escrow Service Provider (Unified Payment)
-    provider = get_escrow_provider()
+    provider = get_escrow_provider(orders)
     result = provider.initiate_transaction(orders, existing_txn_number)
     
     if not result.get("success"):
@@ -330,13 +442,16 @@ def payscrow_webhook():
                         if link and link.link_type == 'INVOICE':
                             link.status = 'PAID'
 
-                    # ── Digital product: auto-deliver and release immediately ──
-                    # Commit what we have so far before calling _deliver_digital_products
+                    # ── Digital/Service product: auto-deliver and release immediately ──
+                    # Commit what we have so far before calling delivery helpers
                     db.session.flush()
                     is_digital_order = _deliver_digital_products(order, escrow)
-
+                    is_service_order = False
                     if not is_digital_order:
-                        # Physical/service: normal logistics flow
+                        is_service_order = _deliver_service_products(order, escrow)
+
+                    if not is_digital_order and not is_service_order:
+                        # Physical: normal logistics flow
                         from app.models.escrow import LogisticsAssignment
                         assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
                         if assignment and assignment.status == 'PENDING':
@@ -368,7 +483,7 @@ def payscrow_webhook():
                             order_id=order.id,
                         ))
 
-                    processed_orders.append((escrow, order, is_digital_order))
+                    processed_orders.append((escrow, order, is_digital_order or is_service_order))
 
         db.session.commit()
 
@@ -408,6 +523,45 @@ def payscrow_webhook():
                     logging.warning(f"[EMAIL] vendor email failed Order #{order.id}: {e}")
 
     return jsonify({"received": True}), 200
+
+
+def _paystack_payout_vendor(order, escrow):
+    """
+    Push vendor's net share via Paystack Transfers API.
+    Used for instant payouts of digital/service orders or upon buyer delivery confirmation.
+    """
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    
+    bank_acc = VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id, is_default=True
+    ).first()
+    if not bank_acc:
+        bank_acc = VendorBankAccount.query.filter_by(
+            vendor_id=order.vendor_id
+        ).first()
+
+    if bank_acc and bank_acc.recipient_code:
+        from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+        import uuid
+        transfer_result = paystack_transfer_to_vendor(
+            recipient_code=bank_acc.recipient_code,
+            amount_ngn=net_amount,
+            reference=f"PAYOUT-{order.id}-{uuid.uuid4().hex[:6].upper()}",
+            reason=f"Siiqo payout for Order #{order.id}",
+        )
+        if not transfer_result.get("success"):
+            logging.error(
+                f"[PAYSTACK TRANSFER] Failed for Order #{order.id}: "
+                f"{transfer_result.get('error_message')}"
+            )
+            return False
+        return True
+    else:
+        logging.warning(
+            f"[RELEASE] Vendor {order.vendor_id} has no recipient_code. "
+            "Crediting ledger only — no Paystack transfer."
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -509,43 +663,13 @@ def release_escrow():
         }), 400
 
     # ── Provider-specific fund release ───────────────────────────────────────
-    provider = _active_provider()
+    is_paystack_order = (
+        (order.payment_method or '').upper() == 'PAYSTACK' or 
+        (escrow.transaction_number and escrow.transaction_number.startswith('ORD-'))
+    )
 
-    if provider == "paystack":
-        # Siiqo holds the full payment in its Paystack balance.
-        # Push vendor's net share via Paystack Transfers API.
-        net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
-
-        bank_acc = VendorBankAccount.query.filter_by(
-            vendor_id=order.vendor_id, is_default=True
-        ).first()
-        if not bank_acc:
-            bank_acc = VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id
-            ).first()
-
-        if bank_acc and bank_acc.recipient_code:
-            from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-            transfer_result = paystack_transfer_to_vendor(
-                recipient_code=bank_acc.recipient_code,
-                amount_ngn=net_amount,
-                reference=f"PAYOUT-{order.id}-{uuid.uuid4().hex[:6].upper()}",
-                reason=f"Siiqo payout for Order #{order.id}",
-            )
-            if not transfer_result.get("success"):
-                # Log but don't block — ledger credit still happens so vendor
-                # can manually request withdrawal if the transfer errors.
-                logging.error(
-                    f"[PAYSTACK TRANSFER] Failed for Order #{order.id}: "
-                    f"{transfer_result.get('error_message')}"
-                )
-        else:
-            # Vendor hasn't added a bank account yet — credit ledger only.
-            # They can withdraw manually once bank details are added.
-            logging.warning(
-                f"[RELEASE] Vendor {order.vendor_id} has no recipient_code. "
-                "Crediting ledger only — no Paystack transfer."
-            )
+    if is_paystack_order:
+        _paystack_payout_vendor(order, escrow)
     else:
         # ── Legacy Payscrow applycode (Payment Links) ─────────────────────
         if not escrow.payscrow_transaction_id:

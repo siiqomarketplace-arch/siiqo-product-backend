@@ -3,18 +3,31 @@ from app.services.escrow.payscrow import PayscrowProvider
 from app.services.escrow.paystack_provider import PaystackProvider
 
 
-def get_escrow_provider():
+def get_escrow_provider(orders=None):
     """
-    Returns the active escrow provider based on ACTIVE_ESCROW_PROVIDER env var.
-
-    Values:
-        paystack  — marketplace checkout + subscriptions (default going forward)
-        payscrow  — Payment Links / Siiqo Direct only (kept for /pay/[slug] flow)
-
-    Set ACTIVE_ESCROW_PROVIDER=paystack on Elastic Beanstalk to activate.
-    The .env local file still defaults to payscrow so existing local tests
-    aren't disrupted until keys are added.
+    Returns the active escrow provider based on orders or global configuration.
+    - If orders contains physical goods, returns PayscrowProvider.
+    - If orders contains only digital or service goods, returns PaystackProvider.
     """
+    if orders:
+        if not isinstance(orders, list):
+            orders = [orders]
+        
+        has_physical = False
+        for order in orders:
+            for item in order.items:
+                product_type = (item.product.product_type if item.product else 'physical') or 'physical'
+                if product_type == 'physical':
+                    has_physical = True
+                    break
+            if has_physical:
+                break
+        
+        if has_physical:
+            return PayscrowProvider()
+        else:
+            return PaystackProvider()
+
     provider_name = os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
 
     if provider_name == "paystack":

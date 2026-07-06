@@ -1129,44 +1129,54 @@ def paystack_webhook():
                     escrow.payscrow_transaction_id = reference
                     order.status = 'PAID'
 
-                    # Activate logistics assignment if pending
-                    from app.models.escrow import LogisticsAssignment
-                    assignment = LogisticsAssignment.query.filter_by(
-                        order_id=order.id
-                    ).first()
-                    if assignment and assignment.status == 'PENDING':
-                        assignment.status = 'ASSIGNED'
-                        assignment.assigned_at = _utcnow()
+                    # Flush so updates are visible to delivery helpers
+                    db.session.flush()
+
+                    from app.routes.escrow import _deliver_digital_products, _deliver_service_products
+                    is_digital = _deliver_digital_products(order, escrow)
+                    is_service = False
+                    if not is_digital:
+                        is_service = _deliver_service_products(order, escrow)
+
+                    if not is_digital and not is_service:
+                        # Physical goods: Activate logistics assignment if pending
+                        from app.models.escrow import LogisticsAssignment
+                        assignment = LogisticsAssignment.query.filter_by(
+                            order_id=order.id
+                        ).first()
+                        if assignment and assignment.status == 'PENDING':
+                            assignment.status = 'ASSIGNED'
+                            assignment.assigned_at = _utcnow()
+                            db.session.add(Notification(
+                                user_id=assignment.partner_id,
+                                title="New Delivery Assignment",
+                                message=(
+                                    f"New delivery for Order #{order.id}. "
+                                    f"Fee: ₦{assignment.delivery_fee:,.2f}."
+                                ),
+                                type="DELIVERY",
+                                order_id=order.id,
+                            ))
+
                         db.session.add(Notification(
-                            user_id=assignment.partner_id,
-                            title="New Delivery Assignment",
+                            user_id=order.buyer_id,
+                            title="Payment Confirmed",
                             message=(
-                                f"New delivery for Order #{order.id}. "
-                                f"Fee: ₦{assignment.delivery_fee:,.2f}."
+                                f"Your payment for Order #{order.id} is confirmed. "
+                                "Funds held by Siiqo until you confirm delivery."
                             ),
-                            type="DELIVERY",
+                            type="ORDER",
                             order_id=order.id,
                         ))
-
-                    db.session.add(Notification(
-                        user_id=order.buyer_id,
-                        title="Payment Confirmed",
-                        message=(
-                            f"Your payment for Order #{order.id} is confirmed. "
-                            "Funds held by Siiqo until you confirm delivery."
-                        ),
-                        type="ORDER",
-                        order_id=order.id,
-                    ))
-                    db.session.add(Notification(
-                        user_id=order.vendor_id,
-                        title="New Paid Order",
-                        message=(
-                            f"Order #{order.id} has been paid. Please ship the order."
-                        ),
-                        type="ESCROW",
-                        order_id=order.id,
-                    ))
+                        db.session.add(Notification(
+                            user_id=order.vendor_id,
+                            title="New Paid Order",
+                            message=(
+                                f"Order #{order.id} has been paid. Please ship the order."
+                            ),
+                            type="ESCROW",
+                            order_id=order.id,
+                        ))
                     processed_orders.append(order)
 
             db.session.commit()
