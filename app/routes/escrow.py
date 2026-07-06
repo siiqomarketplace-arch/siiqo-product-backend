@@ -91,7 +91,7 @@ def _deliver_digital_products(order, escrow):
     digital_items = []
     for item in (order.items or []):
         p = db.session.get(Prod, item.product_id) if item.product_id else item.product
-        if p and p.product_type == 'digital' and p.file_url:
+        if p and p.product_type == 'digital':
             digital_items.append((p, item))
 
     if not digital_items:
@@ -99,8 +99,8 @@ def _deliver_digital_products(order, escrow):
 
     # Build download list for email
     download_lines = "\n".join(
-        f"• {p.name}: {p.file_url}" for p, _ in digital_items
-    )
+        f"• {p.name}: {p.file_url}" for p, _ in digital_items if p.file_url
+    ) or "The vendor will share your download link shortly via Siiqo chat."
 
     # Release escrow immediately — no physical delivery required
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
@@ -196,7 +196,7 @@ def _deliver_service_products(order, escrow):
     service_items = []
     for item in (order.items or []):
         p = db.session.get(Prod, item.product_id) if item.product_id else item.product
-        if p and p.product_type == 'service' and p.booking_link:
+        if p and p.product_type == 'service':
             service_items.append((p, item))
 
     if not service_items:
@@ -204,8 +204,8 @@ def _deliver_service_products(order, escrow):
 
     # Build booking list for email
     booking_lines = "\n".join(
-        f"• {p.name}: {p.booking_link}" for p, _ in service_items
-    )
+        f"• {p.name}: {p.booking_link}" for p, _ in service_items if p.booking_link
+    ) or "The vendor will reach out to you via Siiqo chat to schedule your service."
 
     # Release escrow immediately
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)

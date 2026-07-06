@@ -518,6 +518,13 @@ def add_product():
         if cat:
             category_id = cat.id
 
+    # Validate type-specific required fields
+    p_type = data.get('product_type', 'physical')
+    if p_type == 'digital' and not data.get('file_url', '').strip():
+        return jsonify({"message": "A Download Link (file_url) is required for digital products."}), 400
+    if p_type == 'service' and not data.get('booking_link', '').strip():
+        return jsonify({"message": "A Booking Link (booking_link) is required for service products."}), 400
+
     new_product = Product(
         storefront_id=sf.id,
         name=name,
@@ -745,9 +752,17 @@ def edit_product(product_id):
     if 'product_type' in data:
         product.product_type = data['product_type']
     if 'file_url' in data:
-        product.file_url = data['file_url']
+        product.file_url = data['file_url'] or None
     if 'booking_link' in data:
-        product.booking_link = data['booking_link']
+        product.booking_link = data['booking_link'] or None
+
+    # Validate type-specific required fields after applying updates
+    effective_type = product.product_type or 'physical'
+    if effective_type == 'digital' and not product.file_url:
+        return jsonify({"message": "A Download Link (file_url) is required for digital products."}), 400
+    if effective_type == 'service' and not product.booking_link:
+        return jsonify({"message": "A Booking Link (booking_link) is required for service products."}), 400
+
     if 'sku' in data:
         product.sku = data['sku']
     if 'weight' in data:
