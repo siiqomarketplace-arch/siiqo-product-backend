@@ -61,6 +61,52 @@ def _debit_ledger(vendor_id: int, amount: Decimal, description: str, reference_i
 # BANK ACCOUNT MANAGEMENT
 # ---------------------------------------------------------------------------
 
+_PAYSTACK_BANKS_CACHE: dict = {}  # simple in-memory cache to avoid hammering Paystack
+
+
+@withdrawal_bp.route('/banks', methods=['GET'])
+def get_banks():
+    """
+    Return the list of Nigerian banks from Paystack.
+    Cached in memory for 1 hour to reduce API calls.
+    Works on both test and live Paystack keys.
+    """
+    import time
+
+    now = time.time()
+    cached = _PAYSTACK_BANKS_CACHE.get('data')
+    cached_at = _PAYSTACK_BANKS_CACHE.get('ts', 0)
+
+    if cached and (now - cached_at) < 3600:  # 1-hour cache
+        return jsonify({'status': 'success', 'banks': cached}), 200
+
+    try:
+        resp = requests.get(
+            f'{PAYSTACK_BASE_URL}/bank',
+            headers={
+                'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
+                'Content-Type': 'application/json',
+            },
+            params={'currency': 'NGN', 'perPage': 200},
+            timeout=10,
+        )
+        resp_data = resp.json()
+        if resp_data.get('status') and resp_data.get('data'):
+            banks = [
+                {'name': b['name'], 'code': b['code']}
+                for b in resp_data['data']
+                if b.get('active') and b.get('is_deleted') is False
+            ]
+            _PAYSTACK_BANKS_CACHE['data'] = banks
+            _PAYSTACK_BANKS_CACHE['ts'] = now
+            return jsonify({'status': 'success', 'banks': banks}), 200
+        else:
+            return jsonify({'status': 'error', 'banks': [], 'message': 'Could not load bank list'}), 200
+    except Exception as e:
+        logging.warning(f'[BANKS] Failed to fetch bank list from Paystack: {e}')
+        return jsonify({'status': 'error', 'banks': [], 'message': str(e)}), 200
+
+
 @withdrawal_bp.route('/bank-accounts', methods=['GET'])
 @jwt_required()
 def get_bank_accounts():
@@ -87,26 +133,34 @@ def add_bank_account():
         return jsonify({'message': 'bank_code and account_number required'}), 400
     
     # Verify account with Paystack
+    is_test_mode = PAYSTACK_SECRET_KEY.startswith('sk_test_')
     try:
         headers = {
             'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
             'Content-Type': 'application/json'
         }
-        
-        # 1. Resolve account name
-        resolve_url = f'{PAYSTACK_BASE_URL}/bank/resolve'
-        resolve_params = {
-            'account_number': account_number,
-            'bank_code': bank_code
-        }
-        resolve_response = requests.get(resolve_url, headers=headers, params=resolve_params, timeout=10)
-        resolve_data = resolve_response.json()
-        
-        if not resolve_data.get('status'):
-            return jsonify({'message': 'Could not verify account. Please check details.'}), 400
-        
-        account_name = resolve_data['data']['account_name']
+
         bank_name = data.get('bank_name', 'Bank')
+
+        if is_test_mode:
+            # Paystack /bank/resolve only works with LIVE keys and real accounts.
+            # In test mode we skip resolution and use the submitted bank name as the account name.
+            logging.info(f'[BANK ACCOUNT] Test mode: skipping account name resolution for {account_number}')
+            account_name = bank_name  # placeholder — replaced with real name once live key is used
+        else:
+            # 1. Resolve account name (live mode only)
+            resolve_url = f'{PAYSTACK_BASE_URL}/bank/resolve'
+            resolve_params = {
+                'account_number': account_number,
+                'bank_code': bank_code
+            }
+            resolve_response = requests.get(resolve_url, headers=headers, params=resolve_params, timeout=10)
+            resolve_data = resolve_response.json()
+
+            if not resolve_data.get('status'):
+                return jsonify({'message': 'Could not verify account. Please check your account number and bank.'}), 400
+
+            account_name = resolve_data['data']['account_name']
         
         # 2. Create transfer recipient
         recipient_url = f'{PAYSTACK_BASE_URL}/transferrecipient'
