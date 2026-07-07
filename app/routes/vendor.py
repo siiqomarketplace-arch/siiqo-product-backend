@@ -3,6 +3,7 @@ vendor.py — Vendor-facing routes
 Handles: onboarding, storefront settings, products, orders, finance, CRM, marketing
 """
 import json
+import logging
 import re
 import uuid as _uuid
 
@@ -287,6 +288,23 @@ def onboard_vendor():
 
     db.session.add(storefront)
     db.session.commit()
+
+    # ── Paystack subaccount (for Split Payments on digital/service checkouts) ──
+    # If bank details were supplied at onboarding, register the vendor as a
+    # Paystack subaccount immediately so future checkouts can split the payment.
+    if storefront.bank_code and storefront.account_number:
+        try:
+            from app.services.escrow.paystack_provider import create_paystack_subaccount
+            sub_result = create_paystack_subaccount(
+                business_name=storefront.store_name,
+                bank_code=storefront.bank_code,
+                account_number=storefront.account_number,
+            )
+            if sub_result.get("success"):
+                storefront.paystack_subaccount_code = sub_result["subaccount_code"]
+                db.session.commit()
+        except Exception as _sub_exc:
+            logging.warning(f"[ONBOARDING] Paystack subaccount creation failed for vendor {user.id}: {_sub_exc}")
 
     try:
         send_siiqo_email(

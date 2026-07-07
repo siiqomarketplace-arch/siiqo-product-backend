@@ -151,6 +151,41 @@ def add_bank_account():
         )
         
         db.session.add(bank_account)
+        db.session.flush()  # Get bank_account.id without committing yet
+
+        # ── Create Paystack subaccount for Split Payments ──────────────────
+        # Register the vendor's bank account as a Paystack subaccount so
+        # digital/service checkouts can split the payment natively.
+        try:
+            from app.services.escrow.paystack_provider import create_paystack_subaccount
+            from app.models.user import Storefront
+            storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
+            business_name = (storefront.store_name if storefront else account_name)
+            sub_result = create_paystack_subaccount(
+                business_name=business_name,
+                bank_code=bank_code,
+                account_number=account_number,
+            )
+            if sub_result.get("success"):
+                subaccount_code = sub_result["subaccount_code"]
+                bank_account.paystack_subaccount_code = subaccount_code
+                # Also update the storefront so checkout can find it via either lookup
+                if storefront:
+                    storefront.paystack_subaccount_code = subaccount_code
+                logging.info(
+                    f"[BANK ACCOUNT] Paystack subaccount {subaccount_code} "
+                    f"saved for vendor {vendor_id}"
+                )
+            else:
+                logging.warning(
+                    f"[BANK ACCOUNT] Paystack subaccount creation failed for vendor {vendor_id}: "
+                    f"{sub_result.get('error_message')}"
+                )
+        except Exception as _sub_exc:
+            logging.warning(
+                f"[BANK ACCOUNT] Paystack subaccount error for vendor {vendor_id}: {_sub_exc}"
+            )
+
         db.session.commit()
         
         return jsonify({
@@ -164,6 +199,7 @@ def add_bank_account():
     except Exception as e:
         db.session.rollback()
         return jsonify({'message': f'Error: {str(e)}'}), 500
+
 
 
 @withdrawal_bp.route('/bank-accounts/<int:account_id>/set-default', methods=['PATCH'])

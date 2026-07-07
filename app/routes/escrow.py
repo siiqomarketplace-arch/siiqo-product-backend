@@ -108,10 +108,44 @@ def _deliver_digital_products(order, escrow):
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
 
-    # If paid via Paystack, execute direct payout transfer
-    is_paystack = (order.payment_method or '').upper() == 'PAYSTACK' or (escrow.payscrow_transaction_id and not escrow.payscrow_transaction_id.startswith('ESC-'))
+    # If paid via Paystack, handle vendor payout:
+    # - If vendor has a subaccount_code → Paystack Split Payment already settled
+    #   them directly at checkout. No manual transfer needed.
+    # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
+    is_paystack = (
+        (order.payment_method or '').upper() == 'PAYSTACK'
+        or (
+            escrow.payscrow_transaction_id
+            and not escrow.payscrow_transaction_id.startswith('ESC-')
+        )
+    )
     if is_paystack:
-        _paystack_payout_vendor(order, escrow)
+        # Check if vendor was registered with a subaccount (split payment used)
+        vendor_used_split = False
+        try:
+            bank_acc = VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id, is_default=True
+            ).first() or VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id
+            ).first()
+            if bank_acc and bank_acc.paystack_subaccount_code:
+                vendor_used_split = True
+            else:
+                from app.models.user import Storefront
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.paystack_subaccount_code:
+                    vendor_used_split = True
+        except Exception:
+            pass
+
+        if vendor_used_split:
+            logging.info(
+                f"[DIGITAL] Order #{order.id} — vendor has subaccount, "
+                "Paystack split already settled vendor. Skipping manual transfer."
+            )
+        else:
+            # Legacy fallback: no subaccount, use manual transfer
+            _paystack_payout_vendor(order, escrow)
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -213,10 +247,42 @@ def _deliver_service_products(order, escrow):
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
 
-    # If paid via Paystack, execute direct payout transfer
-    is_paystack = (order.payment_method or '').upper() == 'PAYSTACK' or (escrow.payscrow_transaction_id and not escrow.payscrow_transaction_id.startswith('ESC-'))
+    # If paid via Paystack, handle vendor payout:
+    # - If vendor has a subaccount_code → Paystack Split Payment already settled
+    #   them directly at checkout. No manual transfer needed.
+    # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
+    is_paystack = (
+        (order.payment_method or '').upper() == 'PAYSTACK'
+        or (
+            escrow.payscrow_transaction_id
+            and not escrow.payscrow_transaction_id.startswith('ESC-')
+        )
+    )
     if is_paystack:
-        _paystack_payout_vendor(order, escrow)
+        vendor_used_split = False
+        try:
+            bank_acc = VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id, is_default=True
+            ).first() or VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id
+            ).first()
+            if bank_acc and bank_acc.paystack_subaccount_code:
+                vendor_used_split = True
+            else:
+                from app.models.user import Storefront
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.paystack_subaccount_code:
+                    vendor_used_split = True
+        except Exception:
+            pass
+
+        if vendor_used_split:
+            logging.info(
+                f"[SERVICE] Order #{order.id} — vendor has subaccount, "
+                "Paystack split already settled vendor. Skipping manual transfer."
+            )
+        else:
+            _paystack_payout_vendor(order, escrow)
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -491,8 +557,10 @@ def payscrow_webhook():
         from app.models.user import User
 
         for escrow, order, is_digital_order in processed_orders:
-            if is_digital_order:
-                continue  # digital orders already emailed in _deliver_digital_products
+            is_digital_or_service = all(
+                (item.product.product_type if item.product else 'physical') in ('digital', 'service')
+                for item in order.items
+            )
             buyer = db.session.get(User, order.buyer_id)
             if buyer:
                 try:
@@ -503,6 +571,7 @@ def payscrow_webhook():
                         first_name=buyer.first_name or "there",
                         order_id=order.id,
                         payment_method="ESCROW",
+                        is_digital_or_service=is_digital_or_service,
                     )
                 except Exception as e:
                     logging.warning(f"[EMAIL] buyer confirm email failed Order #{order.id}: {e}")
@@ -518,6 +587,7 @@ def payscrow_webhook():
                         order_id=order.id,
                         total_amount=f"₦{float(order.total_amount):,.2f}",
                         payment_method="ESCROW",
+                        is_digital_or_service=is_digital_or_service,
                     )
                 except Exception as e:
                     logging.warning(f"[EMAIL] vendor email failed Order #{order.id}: {e}")

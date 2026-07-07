@@ -76,6 +76,10 @@ class EscrowTransaction(db.Model):
             "paid_at": self.paid_at.isoformat() if self.paid_at else None,
             "released_at": self.released_at.isoformat() if self.released_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "is_digital_or_service": all(
+                (item.product.product_type if item.product else 'physical') in ('digital', 'service')
+                for item in self.order.items
+            ) if self.order else False,
         }
 
 

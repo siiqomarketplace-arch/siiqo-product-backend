@@ -24,8 +24,11 @@ class VendorBankAccount(db.Model):
     account_number = db.Column(db.String(20), nullable=False)
     account_name = db.Column(db.String(255), nullable=False)
     
-    # Paystack recipient code (for transfers)
+    # Paystack recipient code (for manual transfers)
     recipient_code = db.Column(db.String(100), nullable=True, unique=True)
+
+    # Paystack subaccount code (for split payments at checkout)
+    paystack_subaccount_code = db.Column(db.String(100), nullable=True)
     
     # Verification
     is_verified = db.Column(db.Boolean, default=False)
@@ -51,6 +54,7 @@ class VendorBankAccount(db.Model):
             'account_name': self.account_name,
             'is_verified': self.is_verified,
             'is_default': self.is_default,
+            'paystack_subaccount_code': self.paystack_subaccount_code,
             'verified_at': self.verified_at.isoformat() if self.verified_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }

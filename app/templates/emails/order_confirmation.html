@@ -65,6 +65,11 @@
                 <span class="badge transfer">🏦 Bank Transfer</span>
                 <p style="margin: 0; font-weight: 600; color: #c2410c;">Your order is awaiting your <strong>bank transfer to Siiqo Escrow</strong>. Please make the transfer and upload your receipt from your order dashboard to proceed.</p>
             </div>
+            {% elif is_digital_or_service %}
+            <div class="highlight-box pod" style="background-color: #f0fdf4; border: 2px dashed #86efac;">
+                <span class="badge pod" style="background: #dcfce7; color: #15803d;">⚡ Direct Payment</span>
+                <p style="margin: 0; font-weight: 600; color: #15803d;">Your payment is confirmed. Since this order contains digital or service items, the funds have been released directly to the vendor and your download/booking links have been delivered.</p>
+            </div>
             {% else %}
             <div class="highlight-box escrow">
                 <span class="badge escrow">🔒 Escrow Payment</span>

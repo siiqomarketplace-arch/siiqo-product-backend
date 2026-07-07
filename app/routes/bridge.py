@@ -1184,6 +1184,10 @@ def paystack_webhook():
             # Send emails (non-blocking)
             from app.utils.email import send_siiqo_email
             for order in processed_orders:
+                is_digital_or_service = all(
+                    (item.product.product_type if item.product else 'physical') in ('digital', 'service')
+                    for item in order.items
+                )
                 buyer = db.session.get(User, order.buyer_id)
                 if buyer and buyer.email:
                     try:
@@ -1194,6 +1198,7 @@ def paystack_webhook():
                             first_name=buyer.first_name or "there",
                             order_id=order.id,
                             payment_method="PAYSTACK",
+                            is_digital_or_service=is_digital_or_service,
                         )
                     except Exception as e:
                         logging.warning(f"[EMAIL] buyer order confirm failed #{order.id}: {e}")
@@ -1208,6 +1213,7 @@ def paystack_webhook():
                             order_id=order.id,
                             total_amount=f"₦{float(order.total_amount):,.2f}",
                             payment_method="PAYSTACK",
+                            is_digital_or_service=is_digital_or_service,
                         )
                     except Exception as e:
                         logging.warning(f"[EMAIL] vendor order email failed #{order.id}: {e}")

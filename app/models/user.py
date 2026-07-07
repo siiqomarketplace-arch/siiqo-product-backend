@@ -139,6 +139,8 @@ class Storefront(db.Model):
     bank_code = db.Column(db.String(20), nullable=True)
     account_number = db.Column(db.String(50), nullable=True)
     account_name = db.Column(db.String(100), nullable=True)
+    # Paystack subaccount code (for split payments at checkout)
+    paystack_subaccount_code = db.Column(db.String(100), nullable=True)
 
     # Logistics Settings
     logistics_settings = db.Column(db.JSON, nullable=True, default=list)
