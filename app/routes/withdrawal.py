@@ -61,51 +61,6 @@ def _debit_ledger(vendor_id: int, amount: Decimal, description: str, reference_i
 # BANK ACCOUNT MANAGEMENT
 # ---------------------------------------------------------------------------
 
-_PAYSTACK_BANKS_CACHE: dict = {}  # simple in-memory cache to avoid hammering Paystack
-
-
-@withdrawal_bp.route('/banks', methods=['GET'])
-def get_banks():
-    """
-    Return the list of Nigerian banks from Paystack.
-    Cached in memory for 1 hour to reduce API calls.
-    Works on both test and live Paystack keys.
-    """
-    import time
-
-    now = time.time()
-    cached = _PAYSTACK_BANKS_CACHE.get('data')
-    cached_at = _PAYSTACK_BANKS_CACHE.get('ts', 0)
-
-    if cached and (now - cached_at) < 3600:  # 1-hour cache
-        return jsonify({'status': 'success', 'banks': cached}), 200
-
-    try:
-        resp = requests.get(
-            f'{PAYSTACK_BASE_URL}/bank',
-            headers={
-                'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
-                'Content-Type': 'application/json',
-            },
-            params={'currency': 'NGN', 'perPage': 200},
-            timeout=10,
-        )
-        resp_data = resp.json()
-        if resp_data.get('status') and resp_data.get('data'):
-            banks = [
-                {'name': b['name'], 'code': b['code']}
-                for b in resp_data['data']
-                if b.get('active') and b.get('is_deleted') is False
-            ]
-            _PAYSTACK_BANKS_CACHE['data'] = banks
-            _PAYSTACK_BANKS_CACHE['ts'] = now
-            return jsonify({'status': 'success', 'banks': banks}), 200
-        else:
-            return jsonify({'status': 'error', 'banks': [], 'message': 'Could not load bank list'}), 200
-    except Exception as e:
-        logging.warning(f'[BANKS] Failed to fetch bank list from Paystack: {e}')
-        return jsonify({'status': 'error', 'banks': [], 'message': str(e)}), 200
-
 
 @withdrawal_bp.route('/bank-accounts', methods=['GET'])
 @jwt_required()
@@ -627,25 +582,30 @@ def get_banks():
         response = requests.get(
             f'{PAYSTACK_BASE_URL}/bank',
             headers=headers,
-            params={'country': 'nigeria'},
+            params={'country': 'nigeria', 'perPage': 200},
             timeout=10
         )
         
         data = response.json()
         
-        if data.get('status'):
-            banks = data['data']
-            # Sort by name
+        if data.get('status') and data.get('data'):
+            banks = [
+                {'name': b['name'], 'code': b['code']}
+                for b in data['data']
+            ]
+            # Sort alphabetically
             banks.sort(key=lambda x: x['name'])
             return jsonify({
                 'status': 'success',
                 'banks': banks
             }), 200
         else:
-            return jsonify({'message': 'Could not fetch banks'}), 500
+            logging.warning(f'[BANKS] Paystack returned no data: {data}')
+            return jsonify({'status': 'success', 'banks': []}), 200
             
     except Exception as e:
-        return jsonify({'message': f'Error: {str(e)}'}), 500
+        logging.warning(f'[BANKS] Error fetching bank list: {e}')
+        return jsonify({'status': 'success', 'banks': []}), 200
 
 
 @withdrawal_bp.route('/banks/resolve', methods=['GET'])
