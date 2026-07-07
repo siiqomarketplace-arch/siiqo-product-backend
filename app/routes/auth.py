@@ -898,21 +898,30 @@ def telegram_prefs():
 def migrate_trigger():
     """
     Temporary route to execute Flask-Migrate database migrations programmatically.
-    Can be run via the browser when EC2 SSH is unavailable.
+    Runs asynchronously in a background thread to prevent 504 Gateway Timeouts.
     """
-    from flask_migrate import upgrade
-    try:
-        logging.info("[MIGRATE TRIGGER] Initiating programmatic flask db upgrade...")
-        upgrade()
-        logging.info("[MIGRATE TRIGGER] Upgrade completed successfully!")
-        return jsonify({
-            "status": "success",
-            "message": "Database migrations completed successfully!"
-        }), 200
-    except Exception as e:
-        logging.error(f"[MIGRATE TRIGGER] Migration failed: {e}")
-        return jsonify({
-            "status": "error",
-            "message": f"Migration failed: {str(e)}"
-        }), 500
+    import threading
+    from flask import current_app
+
+    def run_migration(app_context):
+        with app_context:
+            from flask_migrate import upgrade
+            try:
+                logging.info("[MIGRATE TRIGGER] Async database migration upgrade started...")
+                upgrade()
+                logging.info("[MIGRATE TRIGGER] Async database migration upgrade completed successfully!")
+            except Exception as e:
+                logging.error(f"[MIGRATE TRIGGER] Async migration failed: {str(e)}")
+
+    # Get the real Flask app object context
+    ctx = current_app._get_current_object().app_context()
+    thread = threading.Thread(target=run_migration, args=(ctx,))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "status": "processing",
+        "message": "Database migration triggered in the background. Please wait 30-60 seconds and then try logging in again."
+    }), 200
+
 
