@@ -888,3 +888,31 @@ def telegram_prefs():
         "message": "Telegram notification preferences updated.",
         "user": _user_payload(user),
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Temporary DB Migration Trigger
+# ---------------------------------------------------------------------------
+
+@auth_bp.route('/migrate-trigger', methods=['GET'])
+def migrate_trigger():
+    """
+    Temporary route to execute Flask-Migrate database migrations programmatically.
+    Can be run via the browser when EC2 SSH is unavailable.
+    """
+    from flask_migrate import upgrade
+    try:
+        logging.info("[MIGRATE TRIGGER] Initiating programmatic flask db upgrade...")
+        upgrade()
+        logging.info("[MIGRATE TRIGGER] Upgrade completed successfully!")
+        return jsonify({
+            "status": "success",
+            "message": "Database migrations completed successfully!"
+        }), 200
+    except Exception as e:
+        logging.error(f"[MIGRATE TRIGGER] Migration failed: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Migration failed: {str(e)}"
+        }), 500
+
