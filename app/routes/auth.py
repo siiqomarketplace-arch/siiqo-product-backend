@@ -891,90 +891,96 @@ def telegram_prefs():
 
 
 # ---------------------------------------------------------------------------
-# Temporary DB Migration Trigger
+# Temporary DB Migration Trigger — Raw SQL (bypasses Alembic lock contention)
 # ---------------------------------------------------------------------------
 
 @auth_bp.route('/migrate-trigger', methods=['GET'])
 def migrate_trigger():
     """
-    Temporary route to execute Flask-Migrate database migrations programmatically.
-    Runs asynchronously in a background thread to prevent 504 Gateway Timeouts.
+    Runs raw ALTER TABLE SQL directly to add the missing columns.
+    Uses IF NOT EXISTS so it is safe to run multiple times.
+    Bypasses Alembic flask_migrate upgrade() which gets blocked by table
+    locks on a live busy server.
     """
-    import threading
     import json
-    import os
+    import threading
     from flask import current_app
+    from app.extensions import db
 
     status_file = "/tmp/siiqo_migration_status.json"
 
-    # Set initial state
     try:
         with open(status_file, "w") as f:
-            json.dump({"status": "processing", "message": "Migration started..."}, f)
+            json.dump({"status": "processing", "message": "Raw SQL migration started..."}, f)
     except Exception:
         pass
 
-    def run_migration(app_context):
-        with app_context:
-            from flask_migrate import upgrade
+    def run_raw_migration(app_ctx):
+        with app_ctx:
+            results = []
+            errors = []
+            statements = [
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100);",
+                "ALTER TABLE vendor_bank_accounts ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100);",
+            ]
             try:
-                logging.info("[MIGRATE TRIGGER] Async database migration upgrade started...")
-                upgrade()
-                logging.info("[MIGRATE TRIGGER] Async database migration upgrade completed successfully!")
-                
-                with open(status_file, "w") as f_out:
-                    json.dump({
-                        "status": "success",
-                        "message": "Database migrations completed successfully!"
-                    }, f_out)
+                with db.engine.connect() as conn:
+                    for sql in statements:
+                        try:
+                            conn.execute(db.text(sql))
+                            conn.commit()
+                            results.append(f"OK: {sql.split('ADD COLUMN')[1].strip()}")
+                            logging.info(f"[MIGRATE TRIGGER] Executed: {sql}")
+                        except Exception as stmt_err:
+                            err = str(stmt_err)
+                            errors.append(f"ERR: {err}")
+                            logging.error(f"[MIGRATE TRIGGER] Statement failed: {err}")
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                if errors:
+                    final = {"status": "partial", "results": results, "errors": errors}
+                else:
+                    final = {"status": "success", "message": "Both columns added successfully!", "results": results}
+                logging.info(f"[MIGRATE TRIGGER] Completed: {final}")
             except Exception as e:
-                err_msg = str(e)
-                logging.error(f"[MIGRATE TRIGGER] Async migration failed: {err_msg}")
-                try:
-                    with open(status_file, "w") as f_out:
-                        json.dump({
-                            "status": "error",
-                            "message": f"Migration failed: {err_msg}"
-                        }, f_out)
-                except Exception:
-                    pass
+                final = {"status": "error", "message": f"Connection failed: {str(e)}"}
+                logging.error(f"[MIGRATE TRIGGER] Fatal error: {e}")
 
-    # Get the real Flask app object context
+            try:
+                with open(status_file, "w") as f_out:
+                    json.dump(final, f_out)
+            except Exception:
+                pass
+
     ctx = current_app._get_current_object().app_context()
-    thread = threading.Thread(target=run_migration, args=(ctx,))
+    thread = threading.Thread(target=run_raw_migration, args=(ctx,))
     thread.daemon = True
     thread.start()
 
     return jsonify({
         "status": "processing",
-        "message": "Database migration triggered in the background. Please wait 15-30 seconds and check status at /api/auth/migrate-status"
+        "message": "Raw SQL migration triggered. Check /api/auth/migrate-status in 15 seconds."
     }), 200
 
 
 @auth_bp.route('/migrate-status', methods=['GET'])
 def migrate_status():
-    """
-    Check the status of the background database migration.
-    """
+    """Check the result of the background migration."""
     import json
     import os
     status_file = "/tmp/siiqo_migration_status.json"
-    
+
     if not os.path.exists(status_file):
-        return jsonify({
-            "status": "idle",
-            "message": "No migration has been triggered yet."
-        }), 200
+        return jsonify({"status": "idle", "message": "No migration triggered yet."}), 200
 
     try:
         with open(status_file, "r") as f:
             data = json.load(f)
         return jsonify(data), 200
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": f"Could not read status file: {str(e)}"
-        }), 500
+        return jsonify({"status": "error", "message": f"Could not read status: {str(e)}"}), 500
 
 
 
