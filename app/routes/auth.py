@@ -901,7 +901,18 @@ def migrate_trigger():
     Runs asynchronously in a background thread to prevent 504 Gateway Timeouts.
     """
     import threading
+    import json
+    import os
     from flask import current_app
+
+    status_file = "/tmp/siiqo_migration_status.json"
+
+    # Set initial state
+    try:
+        with open(status_file, "w") as f:
+            json.dump({"status": "processing", "message": "Migration started..."}, f)
+    except Exception:
+        pass
 
     def run_migration(app_context):
         with app_context:
@@ -910,8 +921,23 @@ def migrate_trigger():
                 logging.info("[MIGRATE TRIGGER] Async database migration upgrade started...")
                 upgrade()
                 logging.info("[MIGRATE TRIGGER] Async database migration upgrade completed successfully!")
+                
+                with open(status_file, "w") as f_out:
+                    json.dump({
+                        "status": "success",
+                        "message": "Database migrations completed successfully!"
+                    }, f_out)
             except Exception as e:
-                logging.error(f"[MIGRATE TRIGGER] Async migration failed: {str(e)}")
+                err_msg = str(e)
+                logging.error(f"[MIGRATE TRIGGER] Async migration failed: {err_msg}")
+                try:
+                    with open(status_file, "w") as f_out:
+                        json.dump({
+                            "status": "error",
+                            "message": f"Migration failed: {err_msg}"
+                        }, f_out)
+                except Exception:
+                    pass
 
     # Get the real Flask app object context
     ctx = current_app._get_current_object().app_context()
@@ -921,7 +947,34 @@ def migrate_trigger():
 
     return jsonify({
         "status": "processing",
-        "message": "Database migration triggered in the background. Please wait 30-60 seconds and then try logging in again."
+        "message": "Database migration triggered in the background. Please wait 15-30 seconds and check status at /api/auth/migrate-status"
     }), 200
+
+
+@auth_bp.route('/migrate-status', methods=['GET'])
+def migrate_status():
+    """
+    Check the status of the background database migration.
+    """
+    import json
+    import os
+    status_file = "/tmp/siiqo_migration_status.json"
+    
+    if not os.path.exists(status_file):
+        return jsonify({
+            "status": "idle",
+            "message": "No migration has been triggered yet."
+        }), 200
+
+    try:
+        with open(status_file, "r") as f:
+            data = json.load(f)
+        return jsonify(data), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Could not read status file: {str(e)}"
+        }), 500
+
 
 
