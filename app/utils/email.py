@@ -3,18 +3,20 @@ import smtplib
 import ssl
 import threading
 import logging
-from email.message import EmailMessage
+from email.header import Header
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import render_template, current_app, request
 
 logger = logging.getLogger(__name__)
 
 def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail_sender, to_email, subject, html_content, context):
     """Background worker for sending emails."""
-    # ── LOCAL DEV FALLBACK ────────────────────────────────────────────────────
+    # â”€â”€ LOCAL DEV FALLBACK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # If SMTP credentials are missing, print OTP to console instead of crashing.
     if not mail_server or not mail_username or not mail_password:
         logger.info("\n" + "="*60)
-        logger.info("⚠  SMTP CREDENTIALS NOT SET IN .env — EMAIL NOT SENT")
+        logger.info("âš   SMTP CREDENTIALS NOT SET IN .env â€” EMAIL NOT SENT")
         logger.info(f"   TO      : {to_email}")
         logger.info(f"   SUBJECT : {subject}")
         if 'otp' in context:
@@ -22,17 +24,28 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
         logger.info("="*60 + "\n")
         return
 
-    # ── BUILD MESSAGE ─────────────────────────────────────────────────────────
-    msg = EmailMessage()
-    msg['Subject'] = subject
+    # â”€â”€ BUILD MESSAGE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Use MIMEMultipart so we can explicitly set charset=utf-8 on every part.
+    # This fixes emojis (ðŸŽ‰ âš¡) and Naira sign (â‚¦) rendering as garbled Latin-1
+    # characters like Ã°Å¸Å½â€° and Ã‚Å Â¡ in Gmail and other clients.
+    msg = MIMEMultipart('alternative')
+
+    # Subject: RFC 2047 encoded-word â€” supports emojis and any Unicode in headers
+    msg['Subject'] = Header(subject, charset='utf-8')
     msg['From']    = f"Siiqo <{mail_sender}>"
     msg['To']      = to_email
-    msg.set_content("Please enable HTML to view this Siiqo email.")
-    msg.add_alternative(html_content, subtype='html')
+
+    # Plain-text fallback (utf-8)
+    plain_part = MIMEText("Please enable HTML to view this Siiqo email.", 'plain', 'utf-8')
+    # HTML body (utf-8) â€” last attachment wins per RFC 2046 multipart/alternative
+    html_part  = MIMEText(html_content, 'html', 'utf-8')
+
+    msg.attach(plain_part)
+    msg.attach(html_part)
 
     ssl_context = ssl.create_default_context()
 
-    # ── SEND ──────────────────────────────────────────────────────────────────
+    # â”€â”€ SEND â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         if mail_port == 465:
             with smtplib.SMTP_SSL(mail_server, mail_port, context=ssl_context, timeout=15) as server:
@@ -69,7 +82,7 @@ def send_siiqo_email(to_email, subject, template_name, **context):
         context['logo_url'] = f"{request.host_url.rstrip('/')}/static/logo.png"
     except Exception:
         context['logo_url'] = "https://siiqo.com/images/Siiqo.png"  # Fallback
-        
+
     # Render the HTML template synchronously (requires request context)
     try:
         html_content = render_template(f"emails/{template_name}.html", **context)
@@ -85,5 +98,4 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     thread.daemon = True
     thread.start()
     return True
-
 
