@@ -1,6 +1,6 @@
 import logging
 """
-cart.py — Cart and checkout routes
+cart.py â€” Cart and checkout routes
 """
 import uuid
 from datetime import datetime, timezone
@@ -220,7 +220,7 @@ def clear_cart():
 
 
 # ---------------------------------------------------------------------------
-# POST /cart/checkout  — the canonical checkout
+# POST /cart/checkout  â€” the canonical checkout
 # ---------------------------------------------------------------------------
 
 @cart_bp.route('/checkout', methods=['POST'])
@@ -242,7 +242,7 @@ def checkout():
     if payment_method not in ['ESCROW', 'POD']:
         payment_method = 'ESCROW'  # Default to ESCROW if invalid
 
-    # ── Optional vendor filter (storefront single-vendor checkout) ────
+    # â”€â”€ Optional vendor filter (storefront single-vendor checkout) â”€â”€â”€â”€
     # Frontend sends vendor_name or vendor_id to check out only one vendor's items.
     # If neither is provided, all cart items are checked out (marketplace flow).
     filter_vendor_name = (data.get('vendor_name') or '').strip().lower()
@@ -253,9 +253,9 @@ def checkout():
     except (ValueError, TypeError):
         filter_vendor_id = None
 
-    # Group active items by vendor, applying the optional filter
-    vendors: dict[int, list] = {}
-    skipped_items = []  # items with pending/countered negotiations — excluded from this checkout
+    # Group active items by (vendor_id, is_physical), applying the optional filter
+    vendors: dict[tuple[int, bool], list] = {}
+    skipped_items = []  # items with pending/countered negotiations â€” excluded from this checkout
     for item in cart.items:
         if not (item.product and item.product.is_active and item.product.storefront):
             continue
@@ -270,7 +270,7 @@ def checkout():
         if item.negotiation and item.negotiation.status in ('PENDING', 'COUNTERED'):
             skipped_items.append({
                 "product_name": item.product.name,
-                "reason": "Offer pending — checkout at agreed price once vendor responds",
+                "reason": "Offer pending â€” checkout at agreed price once vendor responds",
             })
             continue
         # If accepted negotiation has expired, clear it so listed price is used
@@ -286,14 +286,16 @@ def checkout():
                     item.negotiated_price = None
                     item.negotiation_id = None
                     neg.status = 'EXPIRED'
-        vendors.setdefault(vid, []).append(item)
+        p_type = (item.product.product_type if item.product else 'physical') or 'physical'
+        is_physical = (p_type == 'physical')
+        vendors.setdefault((vid, is_physical), []).append(item)
 
     if not vendors:
         return jsonify({"message": "No valid items in cart"}), 400
 
     # Validate that all vendors have bank accounts if payment method is ESCROW
     if payment_method == 'ESCROW':
-        for vid in vendors.keys():
+        for (vid, is_physical) in vendors.keys():
             bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid, is_default=True).first()
             if not bank_acc:
                 bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid).first()
@@ -327,7 +329,7 @@ def checkout():
 
     logistics_selections = data.get('logistics_selections', [])
 
-    for vid, items in vendors.items():
+    for (vid, is_physical), items in vendors.items():
         total = sum(
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
             for item in items
@@ -336,10 +338,7 @@ def checkout():
         fee_amount = total * (fee_percent / 100)
 
         # Match logistics selection for this vendor if there are physical items
-        has_physical_items = any(
-            ((item.product.product_type if item.product else 'physical') or 'physical') == 'physical'
-            for item in items
-        )
+        has_physical_items = is_physical
 
         logistics_fee = 0.0
         logistics_provider_id = None
@@ -427,7 +426,7 @@ def checkout():
             db.session.add(Notification(
                 user_id=vid,
                 title="New POD Order Received",
-                message=f"You have a new Pay on Delivery order #{new_order.id} worth ₦{total:,.2f}. Deliver and collect payment.",
+                message=f"You have a new Pay on Delivery order #{new_order.id} worth â‚¦{total:,.2f}. Deliver and collect payment.",
                 type="ORDER",
                 order_id=new_order.id,
             ))
@@ -441,7 +440,7 @@ def checkout():
                         template_name="order_received_vendor",
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
-                        total_amount=f"₦{total:,.2f}",
+                        total_amount=f"â‚¦{total:,.2f}",
                         payment_method="POD"
                     )
                 except Exception:
@@ -469,7 +468,7 @@ def checkout():
             )
             db.session.add(new_escrow)
 
-            # NOTE: No in-app notification here — vendor is notified AFTER
+            # NOTE: No in-app notification here â€” vendor is notified AFTER
             # the buyer completes payment, via the Paystack/Payscrow webhook.
             # Sending a notification before payment causes false alerts when
             # buyers abandon checkout mid-flow.
