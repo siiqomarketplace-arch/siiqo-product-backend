@@ -1,6 +1,6 @@
 """
 """
-withdrawal.py — Vendor Withdrawal Models
+withdrawal.py - Vendor Withdrawal Models
 Handles vendor bank accounts and withdrawal requests
 """
 from app.extensions import db
