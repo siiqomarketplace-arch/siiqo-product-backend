@@ -1,4 +1,3 @@
-import logging
 """
 bridge.py — Route aliases & missing endpoints
 
@@ -9,6 +8,7 @@ the missing endpoints the frontend expects at /api/*.
 This file is intentionally kept thin — business logic lives in the
 dedicated route files. Bridge routes delegate or re-use that logic.
 """
+import logging
 import uuid
 import os
 import hmac
@@ -1701,3 +1701,25 @@ def rider_mark_delivered(order_id):
 
     db.session.commit()
     return jsonify({"status": "success", "message": "Order marked as delivered"}), 200
+
+# ===========================================================================
+# VENDOR CRYPTO WALLET  — bridge aliases
+# Frontend calls /api/vendor/crypto-wallet (vendor_bp prefix is /api/vendor,
+# but VendorCryptoWallet routes live in payments_bp at /api/payments).
+# These thin aliases keep the frontend URL intact without touching payments.py
+# ===========================================================================
+
+@bridge_bp.route('/vendor/crypto-wallet', methods=['GET'])
+@jwt_required()
+def vendor_crypto_wallet_get():
+    """Alias: GET /api/vendor/crypto-wallet → payments.get_vendor_crypto_wallet"""
+    from app.routes.payments import get_vendor_crypto_wallet
+    return get_vendor_crypto_wallet()
+
+
+@bridge_bp.route('/vendor/crypto-wallet', methods=['POST'])
+@jwt_required()
+def vendor_crypto_wallet_post():
+    """Alias: POST /api/vendor/crypto-wallet → payments.save_vendor_crypto_wallet"""
+    from app.routes.payments import save_vendor_crypto_wallet
+    return save_vendor_crypto_wallet()

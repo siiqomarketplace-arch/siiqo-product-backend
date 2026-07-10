@@ -10,7 +10,7 @@ from .partnerships import PartnerApplication, Referral, PartnerStaff
 from .admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription, SponsoredListing, Favorite
 from .communication import Notification, Message
 from .social import Post, PostLike, PostComment, Follow, PostView, UserActivity
-from .withdrawal import VendorBankAccount, Withdrawal, PODPayment
+from .withdrawal import VendorBankAccount, Withdrawal, PODPayment, VendorCryptoWallet, DayaPayment
 from .negotiation import NegotiationRequest, NegotiationHistory
 from .payment_link import PaymentLink
 from .trust import VendorTrustProfile, TrustScoreHistory
@@ -29,7 +29,7 @@ __all__ = [
     'SponsoredListing', 'Favorite',
     'Notification', 'Message',
     'Post', 'PostLike', 'PostComment', 'Follow', 'PostView', 'UserActivity',
-    'VendorBankAccount', 'Withdrawal', 'PODPayment',
+    'VendorBankAccount', 'Withdrawal', 'PODPayment', 'VendorCryptoWallet', 'DayaPayment',
     'NegotiationRequest', 'NegotiationHistory',
     'PaymentLink',
     'VendorTrustProfile', 'TrustScoreHistory',

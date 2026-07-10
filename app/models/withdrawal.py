@@ -1,4 +1,5 @@
 """
+"""
 withdrawal.py — Vendor Withdrawal Models
 Handles vendor bank accounts and withdrawal requests
 """
@@ -290,4 +291,136 @@ class PartnerWithdrawal(db.Model):
             'failure_reason': self.failure_reason,
             'requested_at': self.requested_at.isoformat() if self.requested_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+# =============================================================================
+# VendorCryptoWallet — Daya crypto payout / payment acceptance settings
+# One row per vendor. Created on first POST /vendor/crypto-wallet.
+# =============================================================================
+
+class VendorCryptoWallet(db.Model):
+    """
+    Stores a vendor's crypto wallet for:
+    1. Accepting buyer payments in USDT/USDC via Daya
+    2. Receiving crypto payouts instead of NGN bank transfer
+
+    Validation of address format is done on the frontend before saving.
+    The backend stores it as-is after a basic regex check.
+    """
+    __tablename__ = 'vendor_crypto_wallets'
+
+    id            = db.Column(db.Integer, primary_key=True)
+    vendor_id     = db.Column(db.Integer, db.ForeignKey('users.id'),
+                              nullable=False, unique=True, index=True)
+
+    # Wallet address — TRC20 (34 chars starting T) or EVM (0x + 40 hex)
+    wallet_address  = db.Column(db.String(100), nullable=False)
+
+    # USDT or USDC
+    asset           = db.Column(db.String(10), nullable=False, default='USDT')
+
+    # TRC20 | ERC20 | BASE | BEP20
+    network         = db.Column(db.String(20), nullable=False, default='TRC20')
+
+    # When True the crypto payment option is shown to buyers at checkout
+    accepts_crypto  = db.Column(db.Boolean, nullable=False, default=False)
+
+    # Daya customer_id — created once via POST /v1/customers, reused for all
+    # subsequent funding-account calls for this vendor's buyers
+    daya_customer_id = db.Column(db.String(100), nullable=True)
+
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow,
+                           onupdate=utcnow)
+
+    vendor = db.relationship('User', backref=db.backref('crypto_wallet',
+                                                        uselist=False))
+
+    def to_dict(self) -> dict:
+        return {
+            'vendor_id':      self.vendor_id,
+            'wallet_address': self.wallet_address,
+            'asset':          self.asset,
+            'network':        self.network,
+            'accepts_crypto': self.accepts_crypto,
+        }
+
+
+# =============================================================================
+# DayaPayment — tracks one Daya funding-account / deposit lifecycle per order
+# =============================================================================
+
+class DayaPayment(db.Model):
+    """
+    Created when a buyer chooses "Pay with Crypto" at checkout.
+    Tracks the Daya funding account and deposit until COMPLETED or FAILED.
+    """
+    __tablename__ = 'daya_payments'
+
+    id                  = db.Column(db.Integer, primary_key=True)
+    order_id            = db.Column(db.Integer, db.ForeignKey('orders.id'),
+                                    nullable=False, index=True)
+    # The buyer (stored for Daya customer creation if needed)
+    buyer_id            = db.Column(db.Integer, db.ForeignKey('users.id'),
+                                    nullable=False)
+
+    # "ngn_onramp" — buyer transfers NGN, Daya converts to stablecoin
+    # "crypto_direct" — buyer sends USDT/USDC directly
+    payment_type        = db.Column(db.String(20), nullable=False)
+
+    # Daya-returned funding account details
+    daya_funding_account_id = db.Column(db.String(100), nullable=True)
+    daya_rate_id        = db.Column(db.String(100), nullable=True)
+    rate_expires_at     = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # NGN amount shown to buyer (for onramp) or NGN equivalent (for direct)
+    amount_ngn          = db.Column(db.Numeric(12, 2), nullable=False)
+    # Crypto amount to send (for direct; NULL for onramp until rate fetched)
+    amount_crypto       = db.Column(db.String(30), nullable=True)  # e.g. "10.52"
+    asset               = db.Column(db.String(10), nullable=True)  # USDT | USDC
+    network             = db.Column(db.String(20), nullable=True)  # TRC20 etc.
+
+    # Daya payment instructions shown to buyer
+    bank_name           = db.Column(db.String(100), nullable=True)  # onramp
+    account_number      = db.Column(db.String(30),  nullable=True)  # onramp
+    account_name        = db.Column(db.String(150), nullable=True)  # onramp
+    wallet_address      = db.Column(db.String(100), nullable=True)  # direct
+
+    # Deposit status mirrored from Daya
+    # PENDING | RECEIVED | PROCESSING | COMPLETED | FAILED | EXPIRED
+    status              = db.Column(db.String(20), nullable=False,
+                                    default='PENDING', index=True)
+
+    # Daya deposit id once deposit.received fires
+    daya_deposit_id     = db.Column(db.String(100), nullable=True)
+
+    # FX rate at time of initiation (NGN per 1 stablecoin) — for display only
+    rate                = db.Column(db.Numeric(12, 4), nullable=True)
+
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow,
+                           onupdate=utcnow)
+
+    order = db.relationship('Order',
+                            backref=db.backref('daya_payment', uselist=False))
+    buyer = db.relationship('User', foreign_keys=[buyer_id])
+
+    def to_dict(self) -> dict:
+        return {
+            'id':                       self.id,
+            'order_id':                 self.order_id,
+            'payment_type':             self.payment_type,
+            'daya_funding_account_id':  self.daya_funding_account_id,
+            'amount_ngn':               str(self.amount_ngn),
+            'amount_crypto':            self.amount_crypto,
+            'asset':                    self.asset,
+            'network':                  self.network,
+            'bank_name':                self.bank_name,
+            'account_number':           self.account_number,
+            'account_name':             self.account_name,
+            'wallet_address':           self.wallet_address,
+            'status':                   self.status,
+            'rate_expires_at':          self.rate_expires_at.isoformat() if self.rate_expires_at else None,
+            'created_at':               self.created_at.isoformat() if self.created_at else None,
         }

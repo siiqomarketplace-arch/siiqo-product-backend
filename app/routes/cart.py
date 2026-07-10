@@ -1,7 +1,7 @@
-import logging
 """
 cart.py — Cart and checkout routes
 """
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -25,6 +25,40 @@ cart_bp = Blueprint('cart', __name__)
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Helper — vendor crypto wallet fields for cart items
+# ---------------------------------------------------------------------------
+
+def _vendor_crypto_fields(vendor_id) -> dict:
+    """
+    Return Daya crypto payment fields for a vendor's cart items.
+    Safe to call with vendor_id=None — returns disabled defaults.
+    One indexed DB lookup per unique vendor_id per request.
+    """
+    if not vendor_id:
+        return {
+            "vendor_accepts_crypto": False,
+            "vendor_crypto_asset":   "USDT",
+            "vendor_crypto_network": "TRC20",
+        }
+    try:
+        from app.models.withdrawal import VendorCryptoWallet
+        wallet = VendorCryptoWallet.query.filter_by(
+            vendor_id=vendor_id, accepts_crypto=True
+        ).first()
+        return {
+            "vendor_accepts_crypto": bool(wallet),
+            "vendor_crypto_asset":   wallet.asset   if wallet else "USDT",
+            "vendor_crypto_network": wallet.network if wallet else "TRC20",
+        }
+    except Exception:
+        return {
+            "vendor_accepts_crypto": False,
+            "vendor_crypto_asset":   "USDT",
+            "vendor_crypto_network": "TRC20",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +98,9 @@ def get_cart():
                     (sf.vendor_id and db.session.query(db.exists().where(VendorBankAccount.vendor_id == sf.vendor_id)).scalar()) or
                     (sf and sf.bank_code and sf.account_number)
                 ) if sf else False,
+                # ── Crypto payment fields (Daya) ──────────────────────────
+                # Read from VendorCryptoWallet — lazily imported to avoid circular deps
+                **_vendor_crypto_fields(sf.vendor_id if sf else None),
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
                 "product_type": (item.product.product_type if item.product else 'physical') or 'physical',
@@ -253,8 +290,8 @@ def checkout():
     except (ValueError, TypeError):
         filter_vendor_id = None
 
-    # Group active items by vendor, applying the optional filter
-    vendors: dict[int, list] = {}
+    # Group active items by (vendor_id, is_physical), applying the optional filter
+    vendors: dict[tuple[int, bool], list] = {}
     skipped_items = []  # items with pending/countered negotiations — excluded from this checkout
     for item in cart.items:
         if not (item.product and item.product.is_active and item.product.storefront):
@@ -286,14 +323,16 @@ def checkout():
                     item.negotiated_price = None
                     item.negotiation_id = None
                     neg.status = 'EXPIRED'
-        vendors.setdefault(vid, []).append(item)
+        p_type = (item.product.product_type if item.product else 'physical') or 'physical'
+        is_physical = (p_type == 'physical')
+        vendors.setdefault((vid, is_physical), []).append(item)
 
     if not vendors:
         return jsonify({"message": "No valid items in cart"}), 400
 
     # Validate that all vendors have bank accounts if payment method is ESCROW
     if payment_method == 'ESCROW':
-        for vid in vendors.keys():
+        for (vid, is_physical) in vendors.keys():
             bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid, is_default=True).first()
             if not bank_acc:
                 bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid).first()
@@ -327,7 +366,7 @@ def checkout():
 
     logistics_selections = data.get('logistics_selections', [])
 
-    for vid, items in vendors.items():
+    for (vid, is_physical), items in vendors.items():
         total = sum(
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
             for item in items
@@ -336,10 +375,7 @@ def checkout():
         fee_amount = total * (fee_percent / 100)
 
         # Match logistics selection for this vendor if there are physical items
-        has_physical_items = any(
-            ((item.product.product_type if item.product else 'physical') or 'physical') == 'physical'
-            for item in items
-        )
+        has_physical_items = is_physical
 
         logistics_fee = 0.0
         logistics_provider_id = None

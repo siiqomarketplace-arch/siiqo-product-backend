@@ -169,6 +169,7 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.withdrawal import withdrawal_bp
     from app.routes.negotiation import negotiation_bp
     from app.routes.payment_links import payment_links_bp
+    from app.routes.payments import payments_bp
 
     app.register_blueprint(auth_bp,         url_prefix='/api/auth')
     app.register_blueprint(public_bp,       url_prefix='/api/marketplace')
@@ -183,6 +184,8 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(withdrawal_bp,   url_prefix='/api/withdrawal')
     app.register_blueprint(negotiation_bp,  url_prefix='/api/negotiations')
     app.register_blueprint(payment_links_bp, url_prefix='/api')
+    # Daya crypto payments + vendor crypto wallet management
+    app.register_blueprint(payments_bp,     url_prefix='/api/payments')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
 

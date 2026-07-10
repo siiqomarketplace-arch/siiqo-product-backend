@@ -112,11 +112,15 @@ def _deliver_digital_products(order, escrow):
     # - If vendor has a subaccount_code → Paystack Split Payment already settled
     #   them directly at checkout. No manual transfer needed.
     # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
-    is_paystack = (
+    # NOTE: CRYPTO orders skip all Paystack payout — funds sit in Siiqo's Daya
+    #       merchant balance and are paid out to the vendor separately via Daya.
+    is_crypto = (order.payment_method or '').upper() == 'CRYPTO'
+    is_paystack = not is_crypto and (
         (order.payment_method or '').upper() == 'PAYSTACK'
         or (
             escrow.payscrow_transaction_id
             and not escrow.payscrow_transaction_id.startswith('ESC-')
+            and not escrow.payscrow_transaction_id.startswith('DAYA-')
         )
     )
     if is_paystack:
@@ -251,11 +255,14 @@ def _deliver_service_products(order, escrow):
     # - If vendor has a subaccount_code → Paystack Split Payment already settled
     #   them directly at checkout. No manual transfer needed.
     # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
-    is_paystack = (
+    # NOTE: CRYPTO orders skip all Paystack payout (funds held in Daya balance).
+    is_crypto = (order.payment_method or '').upper() == 'CRYPTO'
+    is_paystack = not is_crypto and (
         (order.payment_method or '').upper() == 'PAYSTACK'
         or (
             escrow.payscrow_transaction_id
             and not escrow.payscrow_transaction_id.startswith('ESC-')
+            and not escrow.payscrow_transaction_id.startswith('DAYA-')
         )
     )
     if is_paystack:
