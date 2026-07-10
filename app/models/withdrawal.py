@@ -1,8 +1,5 @@
-"""
-"""
-withdrawal.py - Vendor Withdrawal Models
-Handles vendor bank accounts and withdrawal requests
-"""
+# withdrawal.py - Vendor Withdrawal Models
+# Handles vendor bank accounts, withdrawal requests, and Daya crypto wallet settings
 from app.extensions import db
 from datetime import datetime, timezone
 import uuid
@@ -18,33 +15,24 @@ class VendorBankAccount(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-    
-    # Bank details
+
     bank_name = db.Column(db.String(100), nullable=False)
-    bank_code = db.Column(db.String(10), nullable=False)  # Paystack bank code
+    bank_code = db.Column(db.String(10), nullable=False)
     account_number = db.Column(db.String(20), nullable=False)
     account_name = db.Column(db.String(255), nullable=False)
-    
-    # Paystack recipient code (for manual transfers)
-    recipient_code = db.Column(db.String(100), nullable=True, unique=True)
 
-    # Paystack subaccount code (for split payments at checkout)
+    recipient_code = db.Column(db.String(100), nullable=True, unique=True)
     paystack_subaccount_code = db.Column(db.String(100), nullable=True)
-    
-    # Verification
+
     is_verified = db.Column(db.Boolean, default=False)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
-    
-    # Default account
     is_default = db.Column(db.Boolean, default=False)
-    
-    # Timestamps
+
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    
-    # Relationships
+
     vendor = db.relationship('User', backref='bank_accounts')
-    
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -68,49 +56,37 @@ class Withdrawal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
     bank_account_id = db.Column(db.Integer, db.ForeignKey('vendor_bank_accounts.id'), nullable=False)
-    
-    # Withdrawal details
+
     withdrawal_number = db.Column(
         db.String(100), unique=True, nullable=False, index=True,
         default=lambda: f"WD-{uuid.uuid4().hex[:10].upper()}"
     )
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     currency = db.Column(db.String(10), default='NGN')
-    
-    # Fees
-    fee_amount = db.Column(db.Numeric(10, 2), default=50.00)  # Paystack transfer fee
-    net_amount = db.Column(db.Numeric(10, 2), nullable=False)  # Amount - fee
-    
-    # Status tracking
+    fee_amount = db.Column(db.Numeric(10, 2), default=50.00)
+    net_amount = db.Column(db.Numeric(10, 2), nullable=False)
+
     status = db.Column(db.String(50), default='PENDING', index=True)
-    # PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED
-    
-    # Paystack transfer details
     transfer_code = db.Column(db.String(100), nullable=True)
     transfer_reference = db.Column(db.String(100), nullable=True)
-    
-    # Failure tracking
     failure_reason = db.Column(db.Text, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
-    
-    # Admin actions
+
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
     rejected_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     rejected_at = db.Column(db.DateTime(timezone=True), nullable=True)
     rejection_reason = db.Column(db.Text, nullable=True)
-    
-    # Timestamps
+
     requested_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     processed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
-    
-    # Relationships
+
     vendor = db.relationship('User', foreign_keys=[vendor_id], backref='withdrawals')
     bank_account = db.relationship('VendorBankAccount', backref='withdrawals')
     approver = db.relationship('User', foreign_keys=[approved_by])
     rejecter = db.relationship('User', foreign_keys=[rejected_by])
-    
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -136,36 +112,24 @@ class PODPayment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), unique=True, nullable=False, index=True)
     vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-    
-    # Payment details
+
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     currency = db.Column(db.String(10), default='NGN')
-    
-    # Confirmation
     confirmed_by_vendor = db.Column(db.Boolean, default=False)
     confirmed_at = db.Column(db.DateTime(timezone=True), nullable=True)
-    
-    # Payment method (cash, card, transfer at pickup)
     payment_method = db.Column(db.String(50), default='CASH')
-    # CASH, CARD, TRANSFER
-    
-    # Notes
     vendor_notes = db.Column(db.Text, nullable=True)
-    
-    # Reconciliation
     reconciled = db.Column(db.Boolean, default=False)
     reconciled_at = db.Column(db.DateTime(timezone=True), nullable=True)
     reconciled_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    
-    # Timestamps
+
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    
-    # Relationships
+
     order = db.relationship('Order', backref='pod_payment')
     vendor = db.relationship('User', foreign_keys=[vendor_id], backref='pod_payments')
     reconciler = db.relationship('User', foreign_keys=[reconciled_by])
-    
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -189,30 +153,21 @@ class PartnerBankAccount(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-    
-    # Bank details
+
     bank_name = db.Column(db.String(100), nullable=False)
-    bank_code = db.Column(db.String(10), nullable=False)  # Paystack bank code
+    bank_code = db.Column(db.String(10), nullable=False)
     account_number = db.Column(db.String(20), nullable=False)
     account_name = db.Column(db.String(255), nullable=False)
-    
-    # Paystack recipient code (for transfers)
     recipient_code = db.Column(db.String(100), nullable=True, unique=True)
-    
-    # Verification
     is_verified = db.Column(db.Boolean, default=False)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
-    
-    # Default account
     is_default = db.Column(db.Boolean, default=False)
-    
-    # Timestamps
+
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    
-    # Relationships
+
     partner = db.relationship('User', backref='partner_bank_accounts')
-    
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -235,47 +190,34 @@ class PartnerWithdrawal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
     bank_account_id = db.Column(db.Integer, db.ForeignKey('partner_bank_accounts.id'), nullable=False)
-    
-    # Withdrawal details
+
     withdrawal_number = db.Column(
         db.String(100), unique=True, nullable=False, index=True,
         default=lambda: f"PWD-{uuid.uuid4().hex[:10].upper()}"
     )
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     currency = db.Column(db.String(10), default='NGN')
-    
-    # Fees
-    fee_amount = db.Column(db.Numeric(10, 2), default=50.00)  # Paystack transfer fee
-    net_amount = db.Column(db.Numeric(10, 2), nullable=False)  # Amount - fee
-    
-    # Status tracking
+    fee_amount = db.Column(db.Numeric(10, 2), default=50.00)
+    net_amount = db.Column(db.Numeric(10, 2), nullable=False)
     status = db.Column(db.String(50), default='PENDING', index=True)
-    # PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED
-    
-    # Paystack transfer details
     transfer_code = db.Column(db.String(100), nullable=True)
     transfer_reference = db.Column(db.String(100), nullable=True)
-    
-    # Failure tracking
     failure_reason = db.Column(db.Text, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
-    
-    # Admin actions
+
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
     rejected_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     rejected_at = db.Column(db.DateTime(timezone=True), nullable=True)
     rejection_reason = db.Column(db.Text, nullable=True)
-    
-    # Timestamps
+
     requested_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     processed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
-    
-    # Relationships
+
     partner = db.relationship('User', foreign_keys=[partner_id], backref='partner_withdrawals')
     bank_account = db.relationship('PartnerBankAccount', backref='partner_withdrawals')
-    
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -295,47 +237,27 @@ class PartnerWithdrawal(db.Model):
 
 
 # =============================================================================
-# VendorCryptoWallet — Daya crypto payout / payment acceptance settings
+# VendorCryptoWallet - Daya crypto payout / payment acceptance settings
 # One row per vendor. Created on first POST /vendor/crypto-wallet.
 # =============================================================================
 
 class VendorCryptoWallet(db.Model):
-    """
-    Stores a vendor's crypto wallet for:
-    1. Accepting buyer payments in USDT/USDC via Daya
-    2. Receiving crypto payouts instead of NGN bank transfer
-
-    Validation of address format is done on the frontend before saving.
-    The backend stores it as-is after a basic regex check.
-    """
+    """Stores a vendor's crypto wallet for accepting USDT/USDC payments via Daya."""
     __tablename__ = 'vendor_crypto_wallets'
 
-    id            = db.Column(db.Integer, primary_key=True)
-    vendor_id     = db.Column(db.Integer, db.ForeignKey('users.id'),
-                              nullable=False, unique=True, index=True)
-
-    # Wallet address — TRC20 (34 chars starting T) or EVM (0x + 40 hex)
-    wallet_address  = db.Column(db.String(100), nullable=False)
-
-    # USDT or USDC
-    asset           = db.Column(db.String(10), nullable=False, default='USDT')
-
-    # TRC20 | ERC20 | BASE | BEP20
-    network         = db.Column(db.String(20), nullable=False, default='TRC20')
-
-    # When True the crypto payment option is shown to buyers at checkout
-    accepts_crypto  = db.Column(db.Boolean, nullable=False, default=False)
-
-    # Daya customer_id — created once via POST /v1/customers, reused for all
-    # subsequent funding-account calls for this vendor's buyers
+    id             = db.Column(db.Integer, primary_key=True)
+    vendor_id      = db.Column(db.Integer, db.ForeignKey('users.id'),
+                               nullable=False, unique=True, index=True)
+    wallet_address = db.Column(db.String(100), nullable=False)
+    asset          = db.Column(db.String(10), nullable=False, default='USDT')
+    network        = db.Column(db.String(20), nullable=False, default='TRC20')
+    accepts_crypto = db.Column(db.Boolean, nullable=False, default=False)
     daya_customer_id = db.Column(db.String(100), nullable=True)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
-    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow,
-                           onupdate=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    vendor = db.relationship('User', backref=db.backref('crypto_wallet',
-                                                        uselist=False))
+    vendor = db.relationship('User', backref=db.backref('crypto_wallet', uselist=False))
 
     def to_dict(self) -> dict:
         return {
@@ -348,79 +270,59 @@ class VendorCryptoWallet(db.Model):
 
 
 # =============================================================================
-# DayaPayment — tracks one Daya funding-account / deposit lifecycle per order
+# DayaPayment - tracks one Daya funding-account / deposit lifecycle per order
 # =============================================================================
 
 class DayaPayment(db.Model):
-    """
-    Created when a buyer chooses "Pay with Crypto" at checkout.
-    Tracks the Daya funding account and deposit until COMPLETED or FAILED.
-    """
+    """Tracks a crypto payment via Daya from initiation until COMPLETED or FAILED."""
     __tablename__ = 'daya_payments'
 
-    id                  = db.Column(db.Integer, primary_key=True)
-    order_id            = db.Column(db.Integer, db.ForeignKey('orders.id'),
-                                    nullable=False, index=True)
-    # The buyer (stored for Daya customer creation if needed)
-    buyer_id            = db.Column(db.Integer, db.ForeignKey('users.id'),
-                                    nullable=False)
+    id      = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False, index=True)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
-    # "ngn_onramp" — buyer transfers NGN, Daya converts to stablecoin
-    # "crypto_direct" — buyer sends USDT/USDC directly
-    payment_type        = db.Column(db.String(20), nullable=False)
+    # "ngn_onramp" or "crypto_direct"
+    payment_type = db.Column(db.String(20), nullable=False)
 
-    # Daya-returned funding account details
     daya_funding_account_id = db.Column(db.String(100), nullable=True)
-    daya_rate_id        = db.Column(db.String(100), nullable=True)
-    rate_expires_at     = db.Column(db.DateTime(timezone=True), nullable=True)
+    daya_rate_id    = db.Column(db.String(100), nullable=True)
+    rate_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
-    # NGN amount shown to buyer (for onramp) or NGN equivalent (for direct)
-    amount_ngn          = db.Column(db.Numeric(12, 2), nullable=False)
-    # Crypto amount to send (for direct; NULL for onramp until rate fetched)
-    amount_crypto       = db.Column(db.String(30), nullable=True)  # e.g. "10.52"
-    asset               = db.Column(db.String(10), nullable=True)  # USDT | USDC
-    network             = db.Column(db.String(20), nullable=True)  # TRC20 etc.
+    amount_ngn    = db.Column(db.Numeric(12, 2), nullable=False)
+    amount_crypto = db.Column(db.String(30), nullable=True)
+    asset         = db.Column(db.String(10), nullable=True)
+    network       = db.Column(db.String(20), nullable=True)
 
-    # Daya payment instructions shown to buyer
-    bank_name           = db.Column(db.String(100), nullable=True)  # onramp
-    account_number      = db.Column(db.String(30),  nullable=True)  # onramp
-    account_name        = db.Column(db.String(150), nullable=True)  # onramp
-    wallet_address      = db.Column(db.String(100), nullable=True)  # direct
+    bank_name      = db.Column(db.String(100), nullable=True)
+    account_number = db.Column(db.String(30), nullable=True)
+    account_name   = db.Column(db.String(150), nullable=True)
+    wallet_address = db.Column(db.String(100), nullable=True)
 
-    # Deposit status mirrored from Daya
-    # PENDING | RECEIVED | PROCESSING | COMPLETED | FAILED | EXPIRED
-    status              = db.Column(db.String(20), nullable=False,
-                                    default='PENDING', index=True)
-
-    # Daya deposit id once deposit.received fires
-    daya_deposit_id     = db.Column(db.String(100), nullable=True)
-
-    # FX rate at time of initiation (NGN per 1 stablecoin) — for display only
-    rate                = db.Column(db.Numeric(12, 4), nullable=True)
+    status         = db.Column(db.String(20), nullable=False, default='PENDING', index=True)
+    daya_deposit_id = db.Column(db.String(100), nullable=True)
+    rate           = db.Column(db.Numeric(12, 4), nullable=True)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
-    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow,
-                           onupdate=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    order = db.relationship('Order',
-                            backref=db.backref('daya_payment', uselist=False))
+    order = db.relationship('Order', backref=db.backref('daya_payment', uselist=False))
     buyer = db.relationship('User', foreign_keys=[buyer_id])
 
     def to_dict(self) -> dict:
         return {
-            'id':                       self.id,
-            'order_id':                 self.order_id,
-            'payment_type':             self.payment_type,
-            'daya_funding_account_id':  self.daya_funding_account_id,
-            'amount_ngn':               str(self.amount_ngn),
-            'amount_crypto':            self.amount_crypto,
-            'asset':                    self.asset,
-            'network':                  self.network,
-            'bank_name':                self.bank_name,
-            'account_number':           self.account_number,
-            'account_name':             self.account_name,
-            'wallet_address':           self.wallet_address,
-            'status':                   self.status,
-            'rate_expires_at':          self.rate_expires_at.isoformat() if self.rate_expires_at else None,
-            'created_at':               self.created_at.isoformat() if self.created_at else None,
+            'id':                      self.id,
+            'order_id':                self.order_id,
+            'payment_type':            self.payment_type,
+            'daya_funding_account_id': self.daya_funding_account_id,
+            'amount_ngn':              str(self.amount_ngn),
+            'amount_crypto':           self.amount_crypto,
+            'asset':                   self.asset,
+            'network':                 self.network,
+            'bank_name':               self.bank_name,
+            'account_number':          self.account_number,
+            'account_name':            self.account_name,
+            'wallet_address':          self.wallet_address,
+            'status':                  self.status,
+            'rate_expires_at':         self.rate_expires_at.isoformat() if self.rate_expires_at else None,
+            'created_at':              self.created_at.isoformat() if self.created_at else None,
         }
