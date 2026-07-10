@@ -1,7 +1,5 @@
+# cart.py - Cart and checkout routes
 import logging
-"""
-cart.py â€” Cart and checkout routes
-"""
 import uuid
 from datetime import datetime, timezone
 
@@ -25,6 +23,39 @@ cart_bp = Blueprint('cart', __name__)
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Helper: vendor crypto wallet fields for cart items (Daya integration)
+# ---------------------------------------------------------------------------
+
+def _vendor_crypto_fields(vendor_id) -> dict:
+    """
+    Return Daya crypto payment fields for a vendor.
+    One indexed DB lookup per vendor. Safe to call with vendor_id=None.
+    """
+    if not vendor_id:
+        return {
+            "vendor_accepts_crypto": False,
+            "vendor_crypto_asset":   "USDT",
+            "vendor_crypto_network": "TRC20",
+        }
+    try:
+        from app.models.withdrawal import VendorCryptoWallet
+        wallet = VendorCryptoWallet.query.filter_by(
+            vendor_id=vendor_id, accepts_crypto=True
+        ).first()
+        return {
+            "vendor_accepts_crypto": bool(wallet),
+            "vendor_crypto_asset":   wallet.asset   if wallet else "USDT",
+            "vendor_crypto_network": wallet.network if wallet else "TRC20",
+        }
+    except Exception:
+        return {
+            "vendor_accepts_crypto": False,
+            "vendor_crypto_asset":   "USDT",
+            "vendor_crypto_network": "TRC20",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -52,24 +83,25 @@ def get_cart():
                 "product_id": item.product.id,
                 "name": item.product.name,
                 "price": str(item.product.price),
-                "unit_price": float(item.product.price),    # frontend reads unit_price
+                "unit_price": float(item.product.price),
                 "quantity": item.quantity,
                 "subtotal": str(subtotal),
                 "image": item.product.images[0] if item.product.images else None,
                 "storefront": sf.store_name if sf else None,
                 "storefront_slug": sf.store_slug if sf else None,
-                "vendor_name": sf.store_name if sf else None,    # alias for cart filter
-                "vendor_id": sf.vendor_id if sf else None,       # stable ID for cart filter
+                "vendor_name": sf.store_name if sf else None,
+                "vendor_id": sf.vendor_id if sf else None,
                 "vendor_has_bank": bool(
                     (sf.vendor_id and db.session.query(db.exists().where(VendorBankAccount.vendor_id == sf.vendor_id)).scalar()) or
                     (sf and sf.bank_code and sf.account_number)
                 ) if sf else False,
+                # Daya crypto payment fields
+                **_vendor_crypto_fields(sf.vendor_id if sf else None),
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
                 "product_type": (item.product.product_type if item.product else 'physical') or 'physical',
                 "file_url": item.product.file_url if item.product else None,
                 "booking_link": item.product.booking_link if item.product else None,
-                # Negotiation fields
                 "is_negotiable": item.product.is_negotiable,
                 "negotiated_price": str(item.negotiated_price) if item.negotiated_price else None,
                 "negotiation_id": item.negotiation_id,
@@ -220,7 +252,7 @@ def clear_cart():
 
 
 # ---------------------------------------------------------------------------
-# POST /cart/checkout  â€” the canonical checkout
+# POST /cart/checkout - the canonical checkout
 # ---------------------------------------------------------------------------
 
 @cart_bp.route('/checkout', methods=['POST'])
@@ -236,15 +268,12 @@ def checkout():
     data = request.get_json() or {}
     referral_code = (data.get('referral_code') or '').strip().upper()
     delivery_address = data.get('delivery_address', '')
-    
-    # Get payment method (ESCROW or POD)
-    payment_method = (data.get('payment_method') or 'ESCROW').upper()
-    if payment_method not in ['ESCROW', 'POD']:
-        payment_method = 'ESCROW'  # Default to ESCROW if invalid
 
-    # â”€â”€ Optional vendor filter (storefront single-vendor checkout) â”€â”€â”€â”€
-    # Frontend sends vendor_name or vendor_id to check out only one vendor's items.
-    # If neither is provided, all cart items are checked out (marketplace flow).
+    # Get payment method (ESCROW, POD, or CRYPTO)
+    payment_method = (data.get('payment_method') or 'ESCROW').upper()
+    if payment_method not in ['ESCROW', 'POD', 'CRYPTO']:
+        payment_method = 'ESCROW'
+
     filter_vendor_name = (data.get('vendor_name') or '').strip().lower()
     filter_vendor_id = None
     try:
@@ -253,27 +282,23 @@ def checkout():
     except (ValueError, TypeError):
         filter_vendor_id = None
 
-    # Group active items by (vendor_id, is_physical), applying the optional filter
     vendors: dict[tuple[int, bool], list] = {}
-    skipped_items = []  # items with pending/countered negotiations â€” excluded from this checkout
+    skipped_items = []
     for item in cart.items:
         if not (item.product and item.product.is_active and item.product.storefront):
             continue
         sf = item.product.storefront
         vid = sf.vendor_id
-        # Apply filter if provided
         if filter_vendor_id and vid != filter_vendor_id:
             continue
         if filter_vendor_name and sf.store_name.lower() != filter_vendor_name:
             continue
-        # Skip items whose negotiation is still in-flight (PENDING or COUNTERED)
         if item.negotiation and item.negotiation.status in ('PENDING', 'COUNTERED'):
             skipped_items.append({
                 "product_name": item.product.name,
-                "reason": "Offer pending â€” checkout at agreed price once vendor responds",
+                "reason": "Offer pending -- checkout at agreed price once vendor responds",
             })
             continue
-        # If accepted negotiation has expired, clear it so listed price is used
         if item.negotiation and item.negotiation.status == 'ACCEPTED':
             from app.models.negotiation import NegotiationRequest
             neg = item.negotiation
@@ -293,7 +318,7 @@ def checkout():
     if not vendors:
         return jsonify({"message": "No valid items in cart"}), 400
 
-    # Validate that all vendors have bank accounts if payment method is ESCROW
+    # Validate bank accounts for ESCROW (not needed for CRYPTO or POD)
     if payment_method == 'ESCROW':
         for (vid, is_physical) in vendors.keys():
             bank_acc = VendorBankAccount.query.filter_by(vendor_id=vid, is_default=True).first()
@@ -308,12 +333,10 @@ def checkout():
 
     orders_created = []
 
-    # Process referral rewards for the first 100 transactions
     buyer_order_count = Order.query.filter_by(buyer_id=user_id).count()
     if buyer_order_count < 100:
         from app.models.partnerships import Referral
         existing_ref = Referral.query.filter_by(referred_id=user_id).first()
-        # Fallback if referral code was entered at checkout but missed at signup
         if not existing_ref and referral_code:
             referrer = User.query.filter_by(referral_code=referral_code).first()
             if referrer and referrer.id != int(user_id):
@@ -336,12 +359,10 @@ def checkout():
         )
         fee_percent = 12.00
         fee_amount = total * (fee_percent / 100)
-
-        # Match logistics selection for this vendor if there are physical items
         has_physical_items = is_physical
-
         logistics_fee = 0.0
         logistics_provider_id = None
+
         if has_physical_items and logistics_selections:
             for sel in logistics_selections:
                 sel_vid = sel.get('vendorId')
@@ -351,7 +372,6 @@ def checkout():
                     logistics_provider_id = opt.get('id')
                     break
 
-        # Create Order
         new_order = Order(
             buyer_id=user_id,
             vendor_id=vid,
@@ -369,15 +389,11 @@ def checkout():
         db.session.add(new_order)
         db.session.flush()
 
-        # If a logistics partner is selected, create LogisticsAssignment record
         if logistics_provider_id and logistics_provider_id.startswith('siiqo_partner_'):
             pid_str = logistics_provider_id.replace('siiqo_partner_', '')
             if pid_str.isdigit():
                 partner_id = int(pid_str)
-                # Delivery Partner gets 100% of their base fee (fee / 1.10)
                 partner_base_fee = round(logistics_fee / 1.10, 2)
-                
-                # Create the assignment
                 from app.models.escrow import LogisticsAssignment
                 assignment = LogisticsAssignment(
                     order_id=new_order.id,
@@ -395,8 +411,6 @@ def checkout():
                 if product.stock_quantity < item.quantity:
                     db.session.rollback()
                     return jsonify({"message": f"Insufficient stock for {product.name}"}), 400
-                
-                # Decrement inventory
                 product.stock_quantity -= item.quantity
 
             effective_price = item.negotiated_price if item.negotiated_price else product.price
@@ -407,9 +421,7 @@ def checkout():
                 quantity=item.quantity,
             ))
 
-        # Handle payment method: ESCROW or POD
         if payment_method == 'POD':
-            # Pay on Delivery - Create POD payment record
             pod_payment = PODPayment(
                 order_id=new_order.id,
                 vendor_id=vid,
@@ -418,19 +430,14 @@ def checkout():
                 confirmed_by_vendor=False,
             )
             db.session.add(pod_payment)
-            
-            # Set order status to PENDING_DELIVERY (no payment needed yet)
             new_order.status = 'PENDING_DELIVERY'
-            
-            # Notify vendor about POD order
             db.session.add(Notification(
                 user_id=vid,
                 title="New POD Order Received",
-                message=f"You have a new Pay on Delivery order #{new_order.id} worth â‚¦{total:,.2f}. Deliver and collect payment.",
+                message=f"You have a new Pay on Delivery order #{new_order.id} worth NGN{total:,.2f}. Deliver and collect payment.",
                 type="ORDER",
                 order_id=new_order.id,
             ))
-            
             vendor = db.session.get(User, vid)
             if vendor:
                 try:
@@ -440,12 +447,11 @@ def checkout():
                         template_name="order_received_vendor",
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
-                        total_amount=f"â‚¦{total:,.2f}",
+                        total_amount=f"NGN{total:,.2f}",
                         payment_method="POD"
                     )
                 except Exception:
                     pass
-            
             orders_created.append({
                 "order_id": new_order.id,
                 "vendor_id": vid,
@@ -453,9 +459,32 @@ def checkout():
                 "payment_method": "POD",
                 "status": "PENDING_DELIVERY",
             })
-            
+
+        elif payment_method == 'CRYPTO':
+            # For crypto, create an escrow transaction record in PENDING_PAYMENT state.
+            # The DayaPayment record is created by /payments/daya/initiate AFTER checkout.
+            # When Daya confirms payment, _handle_crypto_payment_confirmed() updates both.
+            txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
+            new_escrow = EscrowTransaction(
+                order_id=new_order.id,
+                transaction_number=txn_number,
+                status=EscrowStatus.PENDING_PAYMENT,
+                amount=total,
+                fee_percent=6.00,
+                fee_amount=round(total * 0.06, 2),
+                currency='NGN',
+            )
+            db.session.add(new_escrow)
+            orders_created.append({
+                "order_id": new_order.id,
+                "id": new_order.id,
+                "vendor_id": vid,
+                "total_amount": str(total),
+                "escrow_txn": txn_number,
+                "payment_method": "CRYPTO",
+            })
+
         else:  # ESCROW (default)
-            # Create EscrowTransaction
             txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
             new_escrow = EscrowTransaction(
                 order_id=new_order.id,
@@ -467,12 +496,6 @@ def checkout():
                 currency='NGN',
             )
             db.session.add(new_escrow)
-
-            # NOTE: No in-app notification here â€” vendor is notified AFTER
-            # the buyer completes payment, via the Paystack/Payscrow webhook.
-            # Sending a notification before payment causes false alerts when
-            # buyers abandon checkout mid-flow.
-
             orders_created.append({
                 "order_id": new_order.id,
                 "vendor_id": vid,
@@ -480,15 +503,13 @@ def checkout():
                 "escrow_txn": txn_number,
                 "payment_method": "ESCROW",
             })
-        
-        # Create Invoice (for both payment methods)
+
         db.session.add(Invoice(
             order_id=new_order.id,
             vendor_id=vid,
             buyer_id=user_id,
         ))
 
-        # Send Order Confirmation Email to Buyer (Only for POD here, Escrow sent via webhook)
         if payment_method == 'POD':
             try:
                 send_siiqo_email(
@@ -502,7 +523,6 @@ def checkout():
             except Exception as e:
                 logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
 
-        # Update CRM CustomerProfile (for both payment methods)
         profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()
         if profile:
             profile.total_spent = float(profile.total_spent or 0) + total
@@ -522,15 +542,12 @@ def checkout():
                 last_purchase_date=_utcnow(),
             ))
 
-    # Only clear the checked-out items (not the whole cart if vendor-filtered)
     checked_out_item_ids = [
         item.id
         for items_list in vendors.values()
         for item in items_list
     ]
-    
-    # Detach any negotiation requests from the cart items being deleted
-    # to avoid ForeignKeyViolation on cart_items.id
+
     if checked_out_item_ids:
         from app.models.negotiation import NegotiationRequest
         NegotiationRequest.query.filter(
