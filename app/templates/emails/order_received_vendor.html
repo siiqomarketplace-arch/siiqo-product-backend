@@ -45,7 +45,12 @@
             <p>Hi {{ vendor_name or first_name }},<br><br>
             Congratulations! A buyer has just placed order <strong>#{{ order_id }}</strong> on your storefront for <strong>{{ total_amount }}</strong>.</p>
 
-            {% if payment_method == 'POD' %}
+            {% if is_digital_or_service %}
+            <div class="highlight-box pod" style="background-color: #f0fdf4; border: 2px dashed #86efac;">
+                <span class="badge pod" style="background: #dcfce7; color: #15803d;">⚡ Direct Payment</span>
+                <p style="margin: 0; font-weight: 600; color: #15803d;">The buyer's payment has been confirmed and the funds have been credited directly to your account. Your digital/service items have been automatically delivered to the buyer.</p>
+            </div>
+            {% elif payment_method == 'POD' %}
             <div class="highlight-box pod">
                 <span class="badge pod">💵 Pay on Delivery</span>
                 <p style="margin: 0; font-weight: 600; color: #15803d;">This order is set for <strong>Pay on Delivery</strong>. The buyer will pay you directly upon receiving the goods. Please prepare the order for dispatch and confirm payment when it is received.</p>
@@ -64,11 +69,6 @@
             <div class="highlight-box transfer">
                 <span class="badge transfer">🏦 Bank Transfer</span>
                 <p style="margin: 0; font-weight: 600; color: #c2410c;">This order will be settled via <strong>bank transfer to Siiqo Escrow</strong>. The buyer will upload their payment receipt. Funds will be released to you after delivery is confirmed.</p>
-            </div>
-            {% elif is_digital_or_service %}
-            <div class="highlight-box pod" style="background-color: #f0fdf4; border: 2px dashed #86efac;">
-                <span class="badge pod" style="background: #dcfce7; color: #15803d;">⚡ Direct Payment</span>
-                <p style="margin: 0; font-weight: 600; color: #15803d;">The buyer's payment has been confirmed and the funds have been credited directly to your account. Your digital/service items have been automatically delivered to the buyer.</p>
             </div>
             {% else %}
             <div class="highlight-box escrow">

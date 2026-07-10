@@ -45,7 +45,12 @@
             <p>Hi {{ first_name }},<br><br>
             Thank you for shopping on Siiqo! Your order <strong>#{{ order_id }}</strong> has been successfully placed and the vendor has been notified.</p>
 
-            {% if payment_method == 'POD' %}
+            {% if is_digital_or_service %}
+            <div class="highlight-box pod" style="background-color: #f0fdf4; border: 2px dashed #86efac;">
+                <span class="badge pod" style="background: #dcfce7; color: #15803d;">⚡ Direct Payment</span>
+                <p style="margin: 0; font-weight: 600; color: #15803d;">Your payment is confirmed. Since this order contains digital or service items, the funds have been released directly to the vendor and your download/booking links have been delivered.</p>
+            </div>
+            {% elif payment_method == 'POD' %}
             <div class="highlight-box pod">
                 <span class="badge pod">💵 Pay on Delivery</span>
                 <p style="margin: 0; font-weight: 600; color: #15803d;">You chose <strong>Pay on Delivery</strong>. You will pay the vendor directly when your order arrives. Please have the exact amount ready at the time of delivery.</p>
@@ -64,11 +69,6 @@
             <div class="highlight-box transfer">
                 <span class="badge transfer">🏦 Bank Transfer</span>
                 <p style="margin: 0; font-weight: 600; color: #c2410c;">Your order is awaiting your <strong>bank transfer to Siiqo Escrow</strong>. Please make the transfer and upload your receipt from your order dashboard to proceed.</p>
-            </div>
-            {% elif is_digital_or_service %}
-            <div class="highlight-box pod" style="background-color: #f0fdf4; border: 2px dashed #86efac;">
-                <span class="badge pod" style="background: #dcfce7; color: #15803d;">⚡ Direct Payment</span>
-                <p style="margin: 0; font-weight: 600; color: #15803d;">Your payment is confirmed. Since this order contains digital or service items, the funds have been released directly to the vendor and your download/booking links have been delivered.</p>
             </div>
             {% else %}
             <div class="highlight-box escrow">

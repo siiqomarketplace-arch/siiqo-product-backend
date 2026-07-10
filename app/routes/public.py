@@ -1,6 +1,6 @@
 import logging
 """
-public.py — Public marketplace routes (no auth required)
+public.py â€” Public marketplace routes (no auth required)
 """
 from flask import Blueprint, request, jsonify
 from app.extensions import db, limiter
@@ -21,6 +21,7 @@ def get_products():
     city = (request.args.get('city') or '').strip()
     category_slug = (request.args.get('category') or '').strip()
     search_q = (request.args.get('q') or '').strip()
+    product_type = (request.args.get('product_type') or '').strip()
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 24)), 100)
 
@@ -46,6 +47,14 @@ def get_products():
         cat = Cat.query.filter_by(slug=category_slug).first()
         if cat:
             query = query.filter(Product.category_id == cat.id)
+
+    if product_type:
+        types = [t.strip().lower() for t in product_type.split(',')]
+        if 'physical' in types:
+            # Physical includes 'physical', None, and empty strings since it is the default
+            query = query.filter((Product.product_type == 'physical') | (Product.product_type == None) | (Product.product_type == ''))
+        else:
+            query = query.filter(Product.product_type.in_(types))
 
     # Hyper-local: products from buyer's city come first
     if city:
@@ -98,11 +107,11 @@ def get_products():
             "storefront_slug": sf.store_slug if sf else None,
             "trust_score": sf.vendor.trust_score_or_default if sf and sf.vendor else 500,
             "trust_tier": sf.vendor.trust_tier_or_default if sf and sf.vendor else 'SILVER',
-            # ── vendor identity (required for chat / messaging) ──
+            # â”€â”€ vendor identity (required for chat / messaging) â”€â”€
             "vendor_id": sf.vendor_id if sf else None,
             "user_id": sf.vendor_id if sf else None,
             "vendor_name": sf.store_name if sf else None,
-            # ── contact details ──
+            # â”€â”€ contact details â”€â”€
             "vendor_phone": sf.phone if sf else None,
             "whatsapp_link": (f"https://wa.me/{sf.phone}" if sf and sf.phone else None),
             "city": sf.city if sf else None,
@@ -111,9 +120,9 @@ def get_products():
             "category": p.category.name if p.category else "General",
             "is_negotiable": p.is_negotiable,
             "is_sponsored": is_sponsored,
-            # ── ratings (now included in listing so marketplace cards show real stars) ──
+            # â”€â”€ ratings (now included in listing so marketplace cards show real stars) â”€â”€
             "avg_rating": avg_rating,
-            "rating": avg_rating,         # alias — frontend reads either key
+            "rating": avg_rating,         # alias â€” frontend reads either key
             "review_count": review_count,
             "condition": p.condition,
             "location": p.location,
@@ -122,7 +131,7 @@ def get_products():
             "product_type": p.product_type or "physical",
             "file_url": p.file_url,
             "booking_link": p.booking_link,
-            # Category-specific attributes — null for old listings, safe to show
+            # Category-specific attributes â€” null for old listings, safe to show
             "attributes": p.attributes or {},
         }
 
@@ -148,7 +157,7 @@ def get_product_details(product_id):
     if not p or not p.is_active:
         return jsonify({"message": "Product not found"}), 404
 
-    # Average rating — p.reviews is a dynamic relationship, use query
+    # Average rating â€” p.reviews is a dynamic relationship, use query
     avg_rating = None
     review_count = 0
     try:
@@ -184,7 +193,7 @@ def get_product_details(product_id):
         "seo_description": p.seo_description,
         "created_at": p.created_at.isoformat() + "Z" if p.created_at else None,
         "updated_at": p.updated_at.isoformat() + "Z" if p.updated_at else None,
-        # Category-specific attributes — null for old listings, safe to show
+        # Category-specific attributes â€” null for old listings, safe to show
         "attributes": p.attributes or {},
         "storefront": {
             "id": p.storefront.id,
@@ -203,7 +212,7 @@ def get_product_details(product_id):
 
 
 # ---------------------------------------------------------------------------
-# GET /marketplace/storefronts  — only live stores
+# GET /marketplace/storefronts  â€” only live stores
 # ---------------------------------------------------------------------------
 
 @public_bp.route('/storefronts', methods=['GET'])
@@ -363,13 +372,13 @@ def get_categories():
             "id": c.id,
             "name": c.name,
             "slug": c.slug,
-            # New fields — null for old categories, schema for enriched ones
+            # New fields â€” null for old categories, schema for enriched ones
             "icon": c.icon,
             "attribute_schema": c.attribute_schema or [],
             "product_type_hint": c.product_type_hint or [],
         } for c in cats]), 200
 
-    # Seed defaults if DB is empty — now with icons included
+    # Seed defaults if DB is empty â€” now with icons included
     return jsonify([
         {"id": 1, "name": "Electronics", "slug": "electronics", "icon": "Cpu", "attribute_schema": [], "product_type_hint": ["physical"]},
         {"id": 2, "name": "Fashion", "slug": "fashion", "icon": "Shirt", "attribute_schema": [], "product_type_hint": ["physical"]},
@@ -466,13 +475,13 @@ def get_vendor_reviews(vendor_id):
 
 
 # ---------------------------------------------------------------------------
-# GET /marketplace/vendor/<vendor_id>/trust-breakdown  — public trust detail
+# GET /marketplace/vendor/<vendor_id>/trust-breakdown  â€” public trust detail
 # ---------------------------------------------------------------------------
 
 @public_bp.route('/vendor/<int:vendor_id>/trust-breakdown', methods=['GET'])
 def get_vendor_trust_breakdown(vendor_id):
     """
-    Public endpoint — returns a vendor's trust score breakdown.
+    Public endpoint â€” returns a vendor's trust score breakdown.
     Only non-private information is included (no financial or personal data).
     """
     vendor = User.query.get(vendor_id)

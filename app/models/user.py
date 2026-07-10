@@ -32,7 +32,7 @@ class User(db.Model):
     is_verified = db.Column(db.Boolean, default=False)   # email verified
     is_active = db.Column(db.Boolean, default=True)      # account not suspended
 
-    # OTP — shared for email verification + password reset
+    # OTP â€” shared for email verification + password reset
     reset_otp = db.Column(db.String(10), nullable=True)
     otp_expiry = db.Column(db.DateTime(timezone=True), nullable=True)
 
@@ -74,7 +74,7 @@ class User(db.Model):
         name = f"{self.first_name or ''} {self.last_name or ''}".strip()
         if name:
             return name
-        # Generate a friendly username from email (e.g. "john.doe@gmail.com" → "john.doe")
+        # Generate a friendly username from email (e.g. "john.doe@gmail.com" â†’ "john.doe")
         prefix = self.email.split('@')[0]
         # Replace dots/underscores/hyphens with spaces and title-case
         friendly = prefix.replace('.', ' ').replace('_', ' ').replace('-', ' ').title()
@@ -183,6 +183,32 @@ class Storefront(db.Model):
         return self.is_verified and self.is_published
 
     def to_public_dict(self) -> dict:
+        # Avoid circular imports by loading models inline
+        from app.models.community import Review
+        from app.models.product import Product
+
+        try:
+            approved_reviews = Review.query.filter_by(vendor_id=self.vendor_id, is_approved=True).all()
+            ratings = [r.vendor_rating for r in approved_reviews]
+            avg_rating = round(sum(ratings) / len(ratings), 1) if ratings else None
+            review_count = len(ratings)
+        except Exception:
+            avg_rating = None
+            review_count = 0
+
+        try:
+            p = Product.query.filter(
+                Product.storefront_id == self.id,
+                Product.is_active == True,
+                Product.latitude != None,
+                Product.longitude != None
+            ).first()
+            lat = p.latitude if p else None
+            lng = p.longitude if p else None
+        except Exception:
+            lat = None
+            lng = None
+
         return {
             "id": self.id,
             "store_name": self.store_name,
@@ -201,18 +227,24 @@ class Storefront(db.Model):
             "is_verified": self.is_verified,
             "is_published": self.is_published,
             "is_live": self.is_live,
-            # ── vendor identity (required for chat / messaging) ──
+            # â”€â”€ vendor identity (required for chat / messaging) â”€â”€
             "vendor_id": self.vendor_id,
             "user_id": self.vendor_id,
             "vendor_phone": self.phone,
             "whatsapp_link": (f"https://wa.me/{self.phone}" if self.phone else None),
-            # ── trust fields ──
+            # â”€â”€ trust fields â”€â”€
             "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
             "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
-            # ── verification fields ──
+            # â”€â”€ verification fields â”€â”€
             "account_type": self.account_type,
             "cac_reg": self.cac_reg,
             "nin_document_url": self.nin_document_url,
             "cac_document_url": self.cac_document_url,
             "verification_status": self.verification_status,
+            # â”€â”€ calculated fields â”€â”€
+            "avg_rating": avg_rating,
+            "rating": avg_rating,
+            "review_count": review_count,
+            "latitude": lat,
+            "longitude": lng,
         }

@@ -1,7 +1,7 @@
-"""
-cart.py — Cart and checkout routes
-"""
 import logging
+"""
+cart.py â€” Cart and checkout routes
+"""
 import uuid
 from datetime import datetime, timezone
 
@@ -25,40 +25,6 @@ cart_bp = Blueprint('cart', __name__)
 
 def _utcnow():
     return datetime.now(timezone.utc)
-
-
-# ---------------------------------------------------------------------------
-# Helper — vendor crypto wallet fields for cart items
-# ---------------------------------------------------------------------------
-
-def _vendor_crypto_fields(vendor_id) -> dict:
-    """
-    Return Daya crypto payment fields for a vendor's cart items.
-    Safe to call with vendor_id=None — returns disabled defaults.
-    One indexed DB lookup per unique vendor_id per request.
-    """
-    if not vendor_id:
-        return {
-            "vendor_accepts_crypto": False,
-            "vendor_crypto_asset":   "USDT",
-            "vendor_crypto_network": "TRC20",
-        }
-    try:
-        from app.models.withdrawal import VendorCryptoWallet
-        wallet = VendorCryptoWallet.query.filter_by(
-            vendor_id=vendor_id, accepts_crypto=True
-        ).first()
-        return {
-            "vendor_accepts_crypto": bool(wallet),
-            "vendor_crypto_asset":   wallet.asset   if wallet else "USDT",
-            "vendor_crypto_network": wallet.network if wallet else "TRC20",
-        }
-    except Exception:
-        return {
-            "vendor_accepts_crypto": False,
-            "vendor_crypto_asset":   "USDT",
-            "vendor_crypto_network": "TRC20",
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +64,6 @@ def get_cart():
                     (sf.vendor_id and db.session.query(db.exists().where(VendorBankAccount.vendor_id == sf.vendor_id)).scalar()) or
                     (sf and sf.bank_code and sf.account_number)
                 ) if sf else False,
-                # ── Crypto payment fields (Daya) ──────────────────────────
-                # Read from VendorCryptoWallet — lazily imported to avoid circular deps
-                **_vendor_crypto_fields(sf.vendor_id if sf else None),
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
                 "product_type": (item.product.product_type if item.product else 'physical') or 'physical',
@@ -257,7 +220,7 @@ def clear_cart():
 
 
 # ---------------------------------------------------------------------------
-# POST /cart/checkout  — the canonical checkout
+# POST /cart/checkout  â€” the canonical checkout
 # ---------------------------------------------------------------------------
 
 @cart_bp.route('/checkout', methods=['POST'])
@@ -279,7 +242,7 @@ def checkout():
     if payment_method not in ['ESCROW', 'POD']:
         payment_method = 'ESCROW'  # Default to ESCROW if invalid
 
-    # ── Optional vendor filter (storefront single-vendor checkout) ────
+    # â”€â”€ Optional vendor filter (storefront single-vendor checkout) â”€â”€â”€â”€
     # Frontend sends vendor_name or vendor_id to check out only one vendor's items.
     # If neither is provided, all cart items are checked out (marketplace flow).
     filter_vendor_name = (data.get('vendor_name') or '').strip().lower()
@@ -292,7 +255,7 @@ def checkout():
 
     # Group active items by (vendor_id, is_physical), applying the optional filter
     vendors: dict[tuple[int, bool], list] = {}
-    skipped_items = []  # items with pending/countered negotiations — excluded from this checkout
+    skipped_items = []  # items with pending/countered negotiations â€” excluded from this checkout
     for item in cart.items:
         if not (item.product and item.product.is_active and item.product.storefront):
             continue
@@ -307,7 +270,7 @@ def checkout():
         if item.negotiation and item.negotiation.status in ('PENDING', 'COUNTERED'):
             skipped_items.append({
                 "product_name": item.product.name,
-                "reason": "Offer pending — checkout at agreed price once vendor responds",
+                "reason": "Offer pending â€” checkout at agreed price once vendor responds",
             })
             continue
         # If accepted negotiation has expired, clear it so listed price is used
@@ -463,7 +426,7 @@ def checkout():
             db.session.add(Notification(
                 user_id=vid,
                 title="New POD Order Received",
-                message=f"You have a new Pay on Delivery order #{new_order.id} worth ₦{total:,.2f}. Deliver and collect payment.",
+                message=f"You have a new Pay on Delivery order #{new_order.id} worth â‚¦{total:,.2f}. Deliver and collect payment.",
                 type="ORDER",
                 order_id=new_order.id,
             ))
@@ -477,7 +440,7 @@ def checkout():
                         template_name="order_received_vendor",
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
-                        total_amount=f"₦{total:,.2f}",
+                        total_amount=f"â‚¦{total:,.2f}",
                         payment_method="POD"
                     )
                 except Exception:
@@ -505,7 +468,7 @@ def checkout():
             )
             db.session.add(new_escrow)
 
-            # NOTE: No in-app notification here — vendor is notified AFTER
+            # NOTE: No in-app notification here â€” vendor is notified AFTER
             # the buyer completes payment, via the Paystack/Payscrow webhook.
             # Sending a notification before payment causes false alerts when
             # buyers abandon checkout mid-flow.
