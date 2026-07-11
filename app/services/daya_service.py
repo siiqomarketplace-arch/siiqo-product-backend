@@ -89,16 +89,21 @@ def get_rate(asset: str = "USDT", side: str = "BUY") -> dict:
 
 def get_or_create_customer(email: str, first_name: str = "", last_name: str = "") -> str:
     """Ensure a Daya customer record exists. Returns the Daya customer_id."""
-    idem_key = f"customer-{email.lower().replace('@', '-').replace('.', '-')}"
+    # Note: POST /v1/customers does NOT use an idempotency key header.
+    # Only funding-accounts, transfers, and balance-transfers require it.
+    body = {
+        "email": email,
+        "first_name": first_name or email.split("@")[0],
+    }
+    # Only include last_name if it has a value -- Daya rejects empty strings
+    if last_name and last_name.strip():
+        body["last_name"] = last_name.strip()
+
     data = _request(
         "POST",
         "/v1/customers",
-        headers=_headers(idem_key),
-        json={
-            "email": email,
-            "first_name": first_name or email.split("@")[0],
-            "last_name": last_name or "",
-        },
+        headers=_headers(),   # no idempotency key
+        json=body,
     )
     return data["id"]
 
