@@ -152,10 +152,12 @@ def create_crypto_funding_account(
     idempotency_key: str,
     developer_fee_pct: str = "0",
 ) -> dict:
-    """Create a temporary CRYPTO_ADDRESS funding account. Buyer sends USDT/USDC."""
+    """Create a PERMANENT CRYPTO_ADDRESS funding account settling to INTERNAL_BALANCE.
+    Permanent is required because TEMPORARY crypto accounts only support NGN_PAYOUT.
+    Buyer sends USDT/USDC to the returned wallet address."""
     daya_chain = NETWORK_TO_DAYA_CHAIN.get(network, network)
     payload = {
-        "type": "TEMPORARY",
+        "type": "PERMANENT",
         "rail": "CRYPTO_ADDRESS",
         "asset": asset,
         "chain": daya_chain,
@@ -163,7 +165,6 @@ def create_crypto_funding_account(
         "developer_fee": {"percentage": str(developer_fee_pct)},
         "settlement_destination": {
             "type": "INTERNAL_BALANCE",
-            "rate_id": rate_id,
         },
     }
     data = _request("POST", "/v1/funding-accounts", headers=_headers(idempotency_key), json=payload)
