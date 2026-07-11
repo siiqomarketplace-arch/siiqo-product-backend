@@ -271,6 +271,23 @@ def transfer_ngn_to_vendor(
 
 
 # ---------------------------------------------------------------------------
+# Merchant balance transfer (collection -> withdrawal)
+# ---------------------------------------------------------------------------
+
+def transfer_collection_to_withdrawal(amount_usd: float, idempotency_key: str) -> dict:
+    """Move USD from collection_balance to withdrawal_balance so it can be used for transfers."""
+    data = _request(
+        "POST",
+        "/v1/merchant-balance/transfer",
+        headers=_headers(idempotency_key),
+        json={"amount_usd": f"{amount_usd:.4f}"},
+    )
+    logger.info("[DAYA BALANCE] Moved $%s from collection to withdrawal. New withdrawal: $%s",
+                amount_usd, data.get("data", {}).get("withdrawal_balance_usd"))
+    return data
+
+
+# ---------------------------------------------------------------------------
 # Merchant balance
 # ---------------------------------------------------------------------------
 

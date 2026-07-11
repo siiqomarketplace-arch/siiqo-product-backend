@@ -510,6 +510,12 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         if not is_digital:
             is_service = _deliver_service_products(order, escrow)
 
+        # ── Vendor payout via Daya for digital/service orders ─────────────
+        # For physical orders, payout happens when buyer confirms delivery.
+        # For digital/service, payout is immediate (same as Paystack flow).
+        if is_digital or is_service:
+            _payout_vendor_via_daya(order, escrow)
+
         if not is_digital and not is_service:
             db.session.add(Notification(
                 user_id=order.vendor_id,
@@ -533,6 +539,100 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
     except Exception as exc:
         db.session.rollback()
         logger.error("[DAYA CONFIRM] Error confirming Order %s: %s", order_id, exc)
+
+
+def _payout_vendor_via_daya(order, escrow):
+    """
+    Pay vendor their 94% share via Daya transfers after a crypto order is confirmed.
+
+    Flow:
+    1. Get vendor's bank account details
+    2. Move the order's USD equivalent from collection -> withdrawal balance
+    3. Transfer NGN (94% of order total) to vendor's bank
+    4. Log the result — failures are non-fatal (order is still marked complete,
+       payout can be retried manually from the Daya dashboard)
+    """
+    from app.models.withdrawal import VendorBankAccount
+
+    net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
+
+    # Get vendor's bank account
+    bank_acc = VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id, is_default=True
+    ).first() or VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id
+    ).first()
+
+    if not bank_acc:
+        logger.warning(
+            "[DAYA PAYOUT] Order %s -- vendor %s has no bank account, "
+            "skipping automatic payout. Credit ledger only.",
+            order.id, order.vendor_id
+        )
+        return
+
+    # Step 1: Estimate USD needed (rough: use 1550 NGN/USD as fallback)
+    # Daya will use the live rate when executing the transfer -- we just
+    # need enough in withdrawal_balance to cover it.
+    try:
+        balance = daya_service.get_merchant_balance()
+        collection_usd = float(balance.get("data", {}).get("collection_balance_usd", 0))
+        withdrawal_usd = float(balance.get("data", {}).get("withdrawal_balance_usd", 0))
+
+        # Estimate NGN->USD: use net_amount_ngn / 1550 as a conservative estimate
+        estimated_usd_needed = round(net_amount_ngn / 1550, 4)
+
+        if withdrawal_usd < estimated_usd_needed and collection_usd >= estimated_usd_needed:
+            # Move funds from collection to withdrawal
+            transfer_idem = f"bal-transfer-{order.id}-{uuid.uuid4().hex[:8]}"
+            daya_service.transfer_collection_to_withdrawal(
+                amount_usd=round(estimated_usd_needed + 0.5, 2),  # small buffer
+                idempotency_key=transfer_idem,
+            )
+            logger.info("[DAYA PAYOUT] Moved $%s from collection to withdrawal for Order %s",
+                        estimated_usd_needed, order.id)
+    except Exception as exc:
+        logger.warning("[DAYA PAYOUT] Balance check/transfer failed for Order %s: %s -- continuing",
+                       order.id, exc)
+
+    # Step 2: Transfer NGN to vendor's bank
+    payout_ref = f"CRYPTO-PAYOUT-{order.id}-{uuid.uuid4().hex[:8].upper()}"
+    result = daya_service.transfer_ngn_to_vendor(
+        amount_ngn=net_amount_ngn,
+        bank_code=bank_acc.bank_code,
+        account_number=bank_acc.account_number,
+        reference=payout_ref,
+        order_id=order.id,
+    )
+
+    if result.get("success"):
+        logger.info("[DAYA PAYOUT] Order %s -- vendor %s payout initiated: NGN%.2f ref=%s",
+                    order.id, order.vendor_id, net_amount_ngn, payout_ref)
+        # Notify vendor
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Crypto Payment Received",
+            message=(
+                f"Your crypto payment for Order #{order.id} has been confirmed. "
+                f"NGN{net_amount_ngn:,.2f} is being transferred to your bank account."
+            ),
+            type="ESCROW",
+            order_id=order.id,
+        ))
+    else:
+        logger.error("[DAYA PAYOUT] Order %s -- vendor payout FAILED: %s",
+                     order.id, result.get("error_message"))
+        # Still notify vendor but flag the issue
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Crypto Order Complete - Payout Pending",
+            message=(
+                f"Your crypto payment for Order #{order.id} is confirmed. "
+                "Your payout is being processed -- please contact support if not received within 24 hours."
+            ),
+            type="ESCROW",
+            order_id=order.id,
+        ))
 
 
 # ===========================================================================
