@@ -203,6 +203,10 @@ def daya_initiate():
             account_name   = instructions.get("account_name", "")
             wallet_addr    = None
             amount_crypto  = None
+            # Use the amount Daya returns — this is what the buyer MUST send
+            # (includes Daya's processing fee, may differ from the order total)
+            daya_amount_ngn = fa.get("amount", amount_ngn)
+            amount_ngn = float(daya_amount_ngn)
         else:
             crypto_amount = round(amount_ngn / rate, 6)
             amount_crypto = f"{crypto_amount:.6f}".rstrip("0").rstrip(".")
