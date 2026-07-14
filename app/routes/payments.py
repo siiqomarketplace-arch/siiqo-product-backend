@@ -548,15 +548,9 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
 def _payout_vendor_via_daya(order, escrow):
     """
     Pay vendor their 94% share via Daya transfers after a crypto order is confirmed.
-
-    Flow:
-    1. Get vendor's bank account details
-    2. Move the order's USD equivalent from collection -> withdrawal balance
-    3. Transfer NGN (94% of order total) to vendor's bank
-    4. Log the result — failures are non-fatal (order is still marked complete,
-       payout can be retried manually from the Daya dashboard)
     """
     from app.models.withdrawal import VendorBankAccount
+    from app.models.communication import Notification
 
     net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
 
@@ -600,7 +594,26 @@ def _payout_vendor_via_daya(order, escrow):
                        order.id, exc)
 
     # Step 2: Transfer NGN to vendor's bank
+    # First verify the bank account resolves correctly with Daya
     payout_ref = f"CRYPTO-PAYOUT-{order.id}-{uuid.uuid4().hex[:8].upper()}"
+    try:
+        daya_service.resolve_bank_account(bank_acc.bank_code, bank_acc.account_number)
+    except RuntimeError as exc:
+        logger.error("[DAYA PAYOUT] Order %s -- bank account resolution failed (%s/%s): %s",
+                     order.id, bank_acc.bank_code, bank_acc.account_number, exc)
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Crypto Order Complete - Payout Pending",
+            message=(
+                f"Your crypto payment for Order #{order.id} is confirmed. "
+                "We could not verify your bank account for automatic payout. "
+                "Please contact support to receive your payment."
+            ),
+            type="ESCROW",
+            order_id=order.id,
+        ))
+        return
+
     result = daya_service.transfer_ngn_to_vendor(
         amount_ngn=net_amount_ngn,
         bank_code=bank_acc.bank_code,

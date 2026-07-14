@@ -298,4 +298,30 @@ def transfer_collection_to_withdrawal(amount_usd: float, idempotency_key: str) -
 
 def get_merchant_balance() -> dict:
     """Return Siiqo Daya merchant balance {collection_balance_usd, withdrawal_balance_usd}."""
-    return _request("GET", "/v1/merchant-balance", headers=_headers())
+    # Try the v1 path first, fall back to the full resource path
+    try:
+        return _request("GET", "/v1/merchant-balance", headers=_headers())
+    except RuntimeError:
+        # Some Daya environments use the full path
+        return _request("GET", "/v1/merchant-balance/balance", headers=_headers())
+
+
+# ---------------------------------------------------------------------------
+# Bank account resolution (verify before transferring)
+# ---------------------------------------------------------------------------
+
+def resolve_bank_account(bank_code: str, account_number: str) -> dict:
+    """
+    Verify a Nigerian bank account exists and return the account name.
+    Raises RuntimeError if the account cannot be resolved.
+    Used before POST /v1/transfers to avoid 502 INTEGRATION_FAILED errors.
+    """
+    data = _request(
+        "GET",
+        "/v1/banks/resolve",
+        headers=_headers(),
+        params={"bank_code": bank_code, "account_number": account_number},
+    )
+    logger.info("[DAYA] Resolved bank account %s/%s -> %s",
+                bank_code, account_number, data.get("account_name"))
+    return data
