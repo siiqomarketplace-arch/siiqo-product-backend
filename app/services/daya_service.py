@@ -280,10 +280,12 @@ def transfer_ngn_to_vendor(
 # ---------------------------------------------------------------------------
 
 def transfer_collection_to_withdrawal(amount_usd: float, idempotency_key: str) -> dict:
-    """Move USD from collection_balance to withdrawal_balance so it can be used for transfers."""
+    """Move USD from collection_balance to withdrawal_balance so it can be used for transfers.
+    Uses the correct path /v1/merchant/balance/transfer (confirmed working in production).
+    """
     data = _request(
         "POST",
-        "/v1/merchant-balance/transfer",
+        "/v1/merchant/balance/transfer",
         headers=_headers(idempotency_key),
         json={"amount_usd": f"{amount_usd:.4f}"},
     )
@@ -323,5 +325,49 @@ def resolve_bank_account(bank_code: str, account_number: str) -> dict:
         params={"bank_code": bank_code, "account_number": account_number},
     )
     logger.info("[DAYA] Resolved bank account %s/%s -> %s",
-                bank_code, account_number, data.get("account_name"))
+                bank_code, account_number, data.get("data", {}).get("account_name"))
+    return data
+
+
+# ---------------------------------------------------------------------------
+# On-chain USDT/USDC withdrawal to vendor wallet (Flow B — crypto direct)
+# ---------------------------------------------------------------------------
+
+def withdraw_usdt_to_wallet(
+    amount_usd: float,
+    token: str,
+    chain: str,
+    destination_address: str,
+    idempotency_key: str,
+) -> dict:
+    """
+    Send USDT or USDC on-chain from Siiqo's Daya withdrawal balance to a vendor's wallet.
+    Used when buyer paid with crypto_direct — vendor receives crypto directly.
+
+    Args:
+        amount_usd:           Amount in USD to send (Daya converts to token amount)
+        token:                "USDT" or "USDC"
+        chain:                "TRON" | "ETHEREUM" | "BASE" | "POLYGON" | "SOLANA"
+        destination_address:  Vendor's on-chain wallet address
+        idempotency_key:      Unique reference per request
+
+    Returns dict with transaction_id on success.
+    Raises RuntimeError on failure.
+    """
+    data = _request(
+        "POST",
+        "/v1/merchant/balance/withdraw",
+        headers=_headers(idempotency_key),
+        json={
+            "amount_usd":           f"{amount_usd:.6f}",
+            "token":                token,
+            "chain":                chain,
+            "destination_address":  destination_address,
+        },
+    )
+    logger.info(
+        "[DAYA WITHDRAW] %s $%.6f -> %s on %s txn=%s",
+        token, amount_usd, destination_address, chain,
+        data.get("data", {}).get("transaction_id")
+    )
     return data

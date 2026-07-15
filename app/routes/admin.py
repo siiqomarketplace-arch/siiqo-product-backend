@@ -749,6 +749,79 @@ def admin_refund_buyer(order_id):
 @jwt_required()
 def admin_verify_payment(order_id):
     """Admin manually marks a payment as received (for bank transfer cases)."""
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/escrow/fix-crypto-order/<order_id>
+# Marks a crypto order as COMPLETED when it got stuck in PENDING due to
+# a backend error (e.g. Notification import crash on Order #226-228).
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/escrow/fix-crypto-order/<int:order_id>', methods=['POST'])
+@jwt_required()
+def admin_fix_crypto_order(order_id):
+    """
+    Admin route to fix crypto orders stuck in PENDING status.
+    Marks the order and its EscrowTransaction as COMPLETED/RELEASED.
+    Use when order was paid via Daya but backend crashed before committing.
+    """
+    from app.models.order import Order
+    admin_id = get_jwt_identity()
+    if not _get_admin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": f"Order #{order_id} not found"}), 404
+
+    if order.payment_method not in ("CRYPTO", "crypto"):
+        return jsonify({"message": f"Order #{order_id} is not a crypto order"}), 400
+
+    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+    if not escrow:
+        return jsonify({"message": f"No escrow record for Order #{order_id}"}), 404
+
+    old_order_status  = order.status
+    old_escrow_status = escrow.status
+
+    # Mark order as COMPLETED
+    order.status = 'COMPLETED'
+
+    # Mark escrow as RELEASED
+    from datetime import datetime, timezone
+    escrow.status      = EscrowStatus.RELEASED
+    escrow.released_at = escrow.released_at or datetime.now(timezone.utc)
+
+    # Send notifications
+    db.session.add(Notification(
+        user_id=order.buyer_id,
+        title="Order Completed",
+        message=f"Your crypto payment for Order #{order_id} is confirmed and the order is complete.",
+        type="ORDER",
+        order_id=order_id,
+    ))
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title="Order Complete",
+        message=f"Order #{order_id} has been marked complete by admin.",
+        type="ESCROW",
+        order_id=order_id,
+    ))
+
+    db.session.commit()
+
+    logging.info(
+        "[ADMIN FIX] Order #%s status %s->COMPLETED, escrow %s->RELEASED",
+        order_id, old_order_status, old_escrow_status
+    )
+
+    return jsonify({
+        "message": f"Order #{order_id} fixed successfully",
+        "order_status": "COMPLETED",
+        "escrow_status": "RELEASED",
+        "previous_order_status": old_order_status,
+        "previous_escrow_status": old_escrow_status,
+    }), 200
     admin_id = get_jwt_identity()
     if not _require_superadmin(_parse_admin_id(admin_id)):
         return jsonify({"message": "SuperAdmin required"}), 403
