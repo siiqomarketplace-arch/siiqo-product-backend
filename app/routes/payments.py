@@ -344,14 +344,49 @@ def daya_status():
         try:
             deposit = daya_service.get_deposit_by_funding_account(dp.daya_funding_account_id)
             if deposit:
-                new_status = daya_service._map_daya_status(deposit.get("status", ""))
-                dp.daya_deposit_id = deposit.get("id")
-                if new_status != dp.status:
-                    dp.status     = new_status
-                    dp.updated_at = _utcnow()
-                    db.session.commit()
-                    if new_status == "COMPLETED":
-                        _handle_crypto_payment_confirmed(order_id, dp)
+                # ── STALE DEPOSIT GUARD ────────────────────────────────────────
+                # Crypto funding accounts are PERMANENT (reused across orders).
+                # get_deposit_by_funding_account returns limit=1 (most recent deposit).
+                # If a previous order already completed on this address, that old
+                # COMPLETED deposit would be returned here and falsely trigger
+                # order confirmation BEFORE the buyer has transferred anything.
+                #
+                # We only accept this deposit if it was created AFTER this
+                # DayaPayment record was created (i.e. it belongs to THIS order).
+                deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
+                deposit_is_fresh = False
+                if deposit_created_raw and dp.created_at:
+                    try:
+                        from datetime import datetime as _dt2
+                        dep_ts = _dt2.fromisoformat(
+                            deposit_created_raw.replace("Z", "+00:00")
+                        )
+                        # Give 30-second grace period for clock skew
+                        from datetime import timedelta
+                        cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=30)
+                        deposit_is_fresh = dep_ts >= cutoff
+                    except Exception:
+                        deposit_is_fresh = False  # If we can't parse, don't trust it
+                else:
+                    # No timestamp available — can't verify, treat as stale
+                    deposit_is_fresh = False
+
+                if not deposit_is_fresh:
+                    logger.info(
+                        "[DAYA STATUS] Order %s — deposit %s predates this payment session "
+                        "(deposit created_at=%s, payment created_at=%s). Ignoring stale deposit.",
+                        order_id, deposit.get("id"), deposit_created_raw,
+                        dp.created_at.isoformat() if dp.created_at else "unknown",
+                    )
+                else:
+                    new_status = daya_service._map_daya_status(deposit.get("status", ""))
+                    dp.daya_deposit_id = deposit.get("id")
+                    if new_status != dp.status:
+                        dp.status     = new_status
+                        dp.updated_at = _utcnow()
+                        db.session.commit()
+                        if new_status == "COMPLETED":
+                            _handle_crypto_payment_confirmed(order_id, dp)
         except Exception as exc:
             logger.warning("[DAYA STATUS] Poll failed for order %s: %s", order_id, exc)
 
