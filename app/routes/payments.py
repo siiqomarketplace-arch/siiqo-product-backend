@@ -248,6 +248,9 @@ def daya_initiate():
         dp.status                   = "PENDING"
         dp.rate                     = rate
         dp.updated_at               = _utcnow()
+        # Reset created_at so the stale deposit guard uses THIS session's start time,
+        # not the timestamp of a previous payment attempt on the same order.
+        dp.created_at               = _utcnow()
     else:
         dp = DayaPayment(
             order_id=primary_order_id,
@@ -484,16 +487,52 @@ def daya_webhook():
     if event_type == "deposit.completed":
         funding_account_id = deposit.get("funding_account_id")
         deposit_id         = deposit.get("id")
+        deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
+
         if funding_account_id:
             dp = DayaPayment.query.filter_by(
                 daya_funding_account_id=funding_account_id
-            ).first()
-            if dp and dp.status not in ("COMPLETED", "FAILED"):
-                dp.status          = "COMPLETED"
-                dp.daya_deposit_id = deposit_id
-                dp.updated_at      = _utcnow()
-                db.session.commit()
-                _handle_crypto_payment_confirmed(dp.order_id, dp)
+            ).filter(DayaPayment.status.notin_(["COMPLETED", "FAILED"])).first()
+
+            if dp:
+                # ── STALE DEPOSIT GUARD (webhook) ─────────────────────────────
+                # Permanent funding accounts are reused. Verify this deposit was
+                # created AFTER this payment session was initiated.
+                deposit_is_fresh = False
+                if deposit_created_raw and dp.created_at:
+                    try:
+                        from datetime import datetime as _dt2, timedelta
+                        dep_ts = _dt2.fromisoformat(
+                            deposit_created_raw.replace("Z", "+00:00")
+                        )
+                        cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=30)
+                        deposit_is_fresh = dep_ts >= cutoff
+                    except Exception:
+                        # Can't parse timestamp — trust the webhook but log it
+                        logger.warning(
+                            "[DAYA WEBHOOK] Could not parse deposit created_at=%s for order %s. "
+                            "Proceeding cautiously.",
+                            deposit_created_raw, dp.order_id
+                        )
+                        deposit_is_fresh = True  # Webhooks come from Daya directly — trust them
+                else:
+                    # No timestamp on the deposit — webhook is direct from Daya, trust it
+                    deposit_is_fresh = True
+
+                if deposit_is_fresh:
+                    dp.status          = "COMPLETED"
+                    dp.daya_deposit_id = deposit_id
+                    dp.updated_at      = _utcnow()
+                    db.session.commit()
+                    _handle_crypto_payment_confirmed(dp.order_id, dp)
+                else:
+                    logger.warning(
+                        "[DAYA WEBHOOK] Stale deposit %s (created_at=%s) arrived for "
+                        "order %s (payment_created_at=%s). Ignoring.",
+                        deposit_id, deposit_created_raw,
+                        dp.order_id,
+                        dp.created_at.isoformat() if dp.created_at else "unknown",
+                    )
 
     return jsonify({"received": True}), 200
 
