@@ -1839,35 +1839,67 @@ def admin_wipe_transactions():
     counts = {}
 
     try:
-        # Delete in dependency order to avoid FK constraint errors
+        # Delete in dependency order — children before parents to avoid FK violations
 
-        # 1. Notifications linked to orders
+        # 1. Notifications and messages linked to orders
         notif_result = db.session.execute(
             text("DELETE FROM notifications WHERE order_id IS NOT NULL")
         )
         counts["notifications"] = notif_result.rowcount
 
+        msg_result = db.session.execute(
+            text("DELETE FROM messages WHERE order_id IS NOT NULL")
+        )
+        counts["messages"] = msg_result.rowcount
+
         # 2. Ledger entries
         ledger_result = db.session.execute(text("DELETE FROM ledgers"))
         counts["ledger_entries"] = ledger_result.rowcount
 
-        # 3. Receipts
+        # 3. Invoices (references orders)
+        invoice_result = db.session.execute(text("DELETE FROM invoices"))
+        counts["invoices"] = invoice_result.rowcount
+
+        # 4. Receipts (references orders)
         receipt_result = db.session.execute(text("DELETE FROM receipts"))
         counts["receipts"] = receipt_result.rowcount
 
-        # 4. Daya payments
+        # 5. Reviews (references orders)
+        try:
+            review_result = db.session.execute(
+                text("DELETE FROM reviews WHERE order_id IS NOT NULL")
+            )
+            counts["reviews"] = review_result.rowcount
+        except Exception:
+            counts["reviews"] = 0  # table may not exist yet
+
+        # 6. Daya payments (references orders)
         daya_result = db.session.execute(text("DELETE FROM daya_payments"))
         counts["daya_payments"] = daya_result.rowcount
 
-        # 5. Escrow transactions
+        # 7. POD payments (references orders)
+        try:
+            pod_result = db.session.execute(text("DELETE FROM pod_payments"))
+            counts["pod_payments"] = pod_result.rowcount
+        except Exception:
+            counts["pod_payments"] = 0
+
+        # 8. Logistics assignments (references orders)
+        try:
+            la_result = db.session.execute(text("DELETE FROM logistics_assignments"))
+            counts["logistics_assignments"] = la_result.rowcount
+        except Exception:
+            counts["logistics_assignments"] = 0
+
+        # 9. Escrow transactions (references orders)
         escrow_result = db.session.execute(text("DELETE FROM escrow_transactions"))
         counts["escrow_transactions"] = escrow_result.rowcount
 
-        # 6. Order items
+        # 10. Order items (references orders)
         items_result = db.session.execute(text("DELETE FROM order_items"))
         counts["order_items"] = items_result.rowcount
 
-        # 7. Orders
+        # 11. Orders — everything that references them is now gone
         orders_result = db.session.execute(text("DELETE FROM orders"))
         counts["orders"] = orders_result.rowcount
 
