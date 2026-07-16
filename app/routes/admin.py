@@ -1848,7 +1848,7 @@ def admin_wipe_transactions():
         counts["notifications"] = notif_result.rowcount
 
         # 2. Ledger entries
-        ledger_result = db.session.execute(text("DELETE FROM ledger"))
+        ledger_result = db.session.execute(text("DELETE FROM ledgers"))
         counts["ledger_entries"] = ledger_result.rowcount
 
         # 3. Receipts
