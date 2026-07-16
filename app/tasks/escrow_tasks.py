@@ -124,6 +124,21 @@ def auto_release_escrow():
                     "releasing internally."
                 )
 
+            # ── Trigger vendor payout based on payment method ────────────────
+            is_crypto_order = (order.payment_method or '').upper() == 'CRYPTO'
+            if is_crypto_order:
+                # Funds in Daya collection balance — pay out via Daya
+                try:
+                    from app.routes.payments import _payout_vendor_via_daya
+                    _payout_vendor_via_daya(order, escrow)
+                    logger.info(
+                        f"  [DAYA AUTO-RELEASE] Payout initiated for Order #{order.id}"
+                    )
+                except Exception as daya_err:
+                    logger.error(
+                        f"  [DAYA AUTO-RELEASE] Payout failed for Order #{order.id}: {daya_err}"
+                    )
+
             # Release funds in DB
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = utcnow()

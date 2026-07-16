@@ -745,7 +745,15 @@ def release_escrow():
         (escrow.transaction_number and escrow.transaction_number.startswith('ORD-'))
     )
 
-    if is_paystack_order:
+    is_crypto_order = (order.payment_method or '').upper() == 'CRYPTO'
+
+    if is_crypto_order:
+        # ── Daya payout — funds are in Siiqo's Daya collection balance ──────
+        # Move collection → withdrawal, then transfer NGN to vendor bank.
+        # This is the same payout logic used for digital/service Daya orders.
+        from app.routes.payments import _payout_vendor_via_daya
+        _payout_vendor_via_daya(order, escrow)
+    elif is_paystack_order:
         _paystack_payout_vendor(order, escrow)
     else:
         # ── Legacy Payscrow applycode (Payment Links) ─────────────────────
