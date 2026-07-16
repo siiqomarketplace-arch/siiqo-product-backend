@@ -956,3 +956,140 @@ def request_partner_withdrawal():
         'amount': str(requested_amount),
     }), 200
 
+
+
+# ---------------------------------------------------------------------------
+# DAYA-NATIVE BANK ACCOUNT REGISTRATION
+# Separate from Paystack path — fetches banks and verifies accounts via Daya.
+# Bank codes stored here are CBN codes that work directly with Daya transfers.
+# ---------------------------------------------------------------------------
+
+@withdrawal_bp.route('/daya-banks', methods=['GET'])
+def get_daya_banks():
+    """
+    Return Nigerian banks from Daya's bank list.
+    These use CBN bank codes (not Paystack internal codes) so they work
+    directly with Daya /v1/transfers without any translation.
+    Public endpoint — no auth required.
+    """
+    from app.services import daya_service
+    try:
+        data = daya_service._request(
+            "GET",
+            "/v1/banks",
+            headers=daya_service._headers(),
+        )
+        banks = data.get("data", [])
+        formatted = sorted(
+            [{"name": b["name"], "code": b["code"]} for b in banks if b.get("code") and b.get("name")],
+            key=lambda x: x["name"],
+        )
+        return jsonify({"status": "success", "banks": formatted}), 200
+    except Exception as exc:
+        logging.warning("[DAYA BANKS] Failed to fetch: %s — falling back to empty list", exc)
+        return jsonify({"status": "success", "banks": []}), 200
+
+
+@withdrawal_bp.route('/daya-bank-account', methods=['POST'])
+@jwt_required()
+def add_daya_bank_account():
+    """
+    Register a vendor payout bank account using Daya's verification.
+    Bank codes are Daya/CBN-native — no Paystack involved.
+
+    Used for Daya-path payouts (NGN onramp + crypto orders).
+    Completely separate from Paystack bank account registration.
+
+    Body: { bank_code, account_number, bank_name }
+    """
+    from app.services import daya_service
+
+    vendor_id = int(get_jwt_identity())
+    data = request.get_json() or {}
+
+    bank_code = (data.get("bank_code") or "").strip()
+    account_number = (data.get("account_number") or "").strip()
+    bank_name = (data.get("bank_name") or "").strip()
+
+    if not bank_code or not account_number:
+        return jsonify({"message": "bank_code and account_number are required"}), 400
+
+    if len(account_number) != 10 or not account_number.isdigit():
+        return jsonify({"message": "Account number must be exactly 10 digits"}), 400
+
+    # Step 1: Verify account via Daya's resolve endpoint
+    account_name = ""
+    try:
+        resolved = daya_service.resolve_bank_account(bank_code, account_number)
+        account_name = resolved.get("account_name", "")
+    except RuntimeError as exc:
+        logging.warning(
+            "[DAYA BANK REG] Could not verify account %s/%s via Daya: %s — saving without name",
+            bank_code, account_number, exc
+        )
+        # Not a hard failure — Daya resolve is best-effort.
+        # Transfer still includes account_name if we have it, which bypasses
+        # Daya's internal resolution on payout anyway.
+
+    # Step 2: Check for duplicate (same account_number + bank_code for this vendor)
+    existing = VendorBankAccount.query.filter_by(
+        vendor_id=vendor_id,
+        account_number=account_number,
+        bank_code=bank_code,
+    ).first()
+    if existing:
+        return jsonify({"message": "This bank account is already registered"}), 400
+
+    # Step 3: Save with Daya-native bank code
+    is_first = VendorBankAccount.query.filter_by(vendor_id=vendor_id).count() == 0
+
+    bank_account = VendorBankAccount(
+        vendor_id=vendor_id,
+        bank_name=bank_name,
+        bank_code=bank_code,           # CBN/Daya code — works on Daya transfers
+        account_number=account_number,
+        account_name=account_name,
+        recipient_code=None,           # No Paystack recipient for Daya-path accounts
+        is_verified=bool(account_name),
+        verified_at=_utcnow() if account_name else None,
+        is_default=is_first,
+    )
+    db.session.add(bank_account)
+
+    # Step 4: Optionally create Paystack subaccount for split payments
+    # (This is best-effort — if it fails, Daya payout still works fine)
+    try:
+        from app.services.escrow.paystack_provider import create_paystack_subaccount
+        from app.models.user import Storefront
+        storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
+        business_name = storefront.store_name if storefront else (account_name or bank_name)
+        # Use Paystack's bank code if different from Daya's
+        # For standard banks they're the same; for mobile money they differ.
+        # We attempt with the Daya code — Paystack will accept most standard codes.
+        sub_result = create_paystack_subaccount(
+            business_name=business_name,
+            bank_code=bank_code,
+            account_number=account_number,
+        )
+        if sub_result.get("success"):
+            bank_account.paystack_subaccount_code = sub_result["subaccount_code"]
+            if storefront:
+                storefront.paystack_subaccount_code = sub_result["subaccount_code"]
+            logging.info("[DAYA BANK REG] Paystack subaccount %s created for vendor %s",
+                         sub_result["subaccount_code"], vendor_id)
+        else:
+            logging.warning("[DAYA BANK REG] Paystack subaccount failed for vendor %s: %s",
+                            vendor_id, sub_result.get("error_message"))
+    except Exception as exc:
+        logging.warning("[DAYA BANK REG] Paystack subaccount error for vendor %s: %s", vendor_id, exc)
+
+    db.session.commit()
+
+    logging.info("[DAYA BANK REG] Vendor %s registered Daya bank: %s %s (%s)",
+                 vendor_id, bank_name, account_number[-4:], bank_code)
+
+    return jsonify({
+        "status": "success",
+        "message": "Bank account registered successfully" + (f" — verified as {account_name}" if account_name else ""),
+        "account": bank_account.to_dict(),
+    }), 201
