@@ -255,7 +255,8 @@ def verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> boo
 PAYSTACK_TO_DAYA_BANK_CODE: dict[str, str] = {
     "999992": "100004",   # Paystack OPay code → CBN OPay code (confirmed working)
     "100004": "100004",   # Already correct CBN code
-    "999991": "999991",   # PalmPay — same on both (leave as-is)
+    "999991": "100033",   # Paystack PalmPay code → CBN PalmPay code
+    "100033": "100033",   # Already correct CBN PalmPay code
     "50515":  "50515",    # Moniepoint — same on both
     "50211":  "50211",    # Kuda — same on both
 }
