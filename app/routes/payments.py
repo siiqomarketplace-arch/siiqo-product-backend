@@ -760,6 +760,7 @@ def _payout_vendor_via_daya(order, escrow):
         amount_ngn=net_amount_ngn,
         bank_code=bank_acc.bank_code,
         account_number=bank_acc.account_number,
+        account_name=bank_acc.account_name or "",
         reference=payout_ref,
         order_id=order.id,
     )

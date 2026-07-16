@@ -1440,3 +1440,357 @@ def adjust_user_balance(user_id):
         "new_balance": balance_after
     }), 200
 
+
+
+# ---------------------------------------------------------------------------
+# GET  /admin/payout/vendor-accounts
+# POST /admin/payout/fix-bank-code
+# POST /admin/payout/retry-order/<order_id>
+# POST /admin/payout/retry-all-failed
+#
+# These routes let admin inspect vendor bank data and retry failed payouts
+# without needing direct DB access from CloudShell.
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/payout/vendor-accounts', methods=['GET'])
+@jwt_required()
+def admin_list_vendor_bank_accounts():
+    """
+    List all vendor bank accounts — shows bank_code, account_number,
+    is_default, is_verified. Use to spot wrong bank codes before they
+    cause payout failures.
+    """
+    from app.models.withdrawal import VendorBankAccount
+    admin_id = get_jwt_identity()
+    if not _get_admin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    accounts = (
+        db.session.query(VendorBankAccount, User)
+        .join(User, User.id == VendorBankAccount.vendor_id)
+        .order_by(VendorBankAccount.created_at.desc())
+        .all()
+    )
+
+    return jsonify({
+        "accounts": [
+            {
+                "id": acc.id,
+                "vendor_id": acc.vendor_id,
+                "vendor_email": user.email,
+                "bank_name": acc.bank_name,
+                "bank_code": acc.bank_code,
+                "account_number": acc.account_number,
+                "account_name": acc.account_name,
+                "is_default": acc.is_default,
+                "is_verified": acc.is_verified,
+                "recipient_code": acc.recipient_code,
+                "created_at": acc.created_at.isoformat() if acc.created_at else None,
+            }
+            for acc, user in accounts
+        ],
+        "count": len(accounts),
+    }), 200
+
+
+@admin_bp.route('/payout/fix-bank-code', methods=['POST'])
+@jwt_required()
+def admin_fix_bank_code():
+    """
+    Fix a vendor's stored bank_code and/or bank_name.
+    Use when the wrong code is stored (e.g. OPay 999992 → 100004).
+
+    Body: { account_number, bank_code, bank_name (optional) }
+    Updates ALL rows matching account_number.
+    """
+    from app.models.withdrawal import VendorBankAccount
+    admin_id = get_jwt_identity()
+    if not _require_superadmin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    data = request.get_json() or {}
+    account_number = (data.get("account_number") or "").strip()
+    new_bank_code = (data.get("bank_code") or "").strip()
+    new_bank_name = (data.get("bank_name") or "").strip()
+
+    if not account_number or not new_bank_code:
+        return jsonify({"message": "account_number and bank_code are required"}), 400
+
+    accounts = VendorBankAccount.query.filter_by(account_number=account_number).all()
+    if not accounts:
+        return jsonify({"message": f"No bank accounts found with account_number {account_number}"}), 404
+
+    updated = []
+    for acc in accounts:
+        old_code = acc.bank_code
+        old_name = acc.bank_name
+        acc.bank_code = new_bank_code
+        if new_bank_name:
+            acc.bank_name = new_bank_name
+        updated.append({
+            "id": acc.id,
+            "vendor_id": acc.vendor_id,
+            "account_number": acc.account_number,
+            "old_bank_code": old_code,
+            "new_bank_code": new_bank_code,
+            "old_bank_name": old_name,
+            "new_bank_name": new_bank_name or old_name,
+        })
+
+    db.session.commit()
+    logging.info("[ADMIN PAYOUT] Fixed bank code for account %s: %s → %s (%d rows)",
+                 account_number, accounts[0].bank_code, new_bank_code, len(updated))
+
+    return jsonify({
+        "message": f"Bank code updated for {len(updated)} account(s)",
+        "updated": updated,
+    }), 200
+
+
+@admin_bp.route('/payout/retry-order/<int:order_id>', methods=['POST'])
+@jwt_required()
+def admin_retry_payout(order_id):
+    """
+    Retry the Daya vendor payout for a specific order.
+    Use when automatic payout failed (INTEGRATION_FAILED, wrong bank code, etc.)
+
+    The order must be COMPLETED/PAID status with a CRYPTO payment method.
+    Funds must already be in Daya withdrawal balance.
+
+    Optional body: { amount_ngn: float } to override the payout amount.
+    """
+    from app.models.order import Order
+    from app.models.escrow import EscrowTransaction
+    from app.models.withdrawal import VendorBankAccount
+    from app.services import daya_service
+    import uuid
+
+    admin_id = get_jwt_identity()
+    if not _require_superadmin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": f"Order #{order_id} not found"}), 404
+
+    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+    if not escrow:
+        return jsonify({"message": f"No escrow record for Order #{order_id}"}), 404
+
+    data = request.get_json() or {}
+    override_amount = data.get("amount_ngn")
+
+    # Calculate payout amount
+    if override_amount:
+        net_amount_ngn = float(override_amount)
+    else:
+        net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
+
+    # Get vendor's current default bank account
+    bank_acc = VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id, is_default=True
+    ).first() or VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id
+    ).first()
+
+    if not bank_acc:
+        return jsonify({
+            "message": f"Vendor {order.vendor_id} has no bank account registered",
+            "vendor_id": order.vendor_id,
+        }), 400
+
+    # Step 1: Ensure enough in withdrawal balance
+    balance_info = {}
+    try:
+        balance = daya_service.get_merchant_balance()
+        bal_data = balance.get("data", {})
+        collection_usd = float(bal_data.get("collection_balance_usd", 0))
+        withdrawal_usd = float(bal_data.get("withdrawal_balance_usd", 0))
+        balance_info = {"collection_usd": collection_usd, "withdrawal_usd": withdrawal_usd}
+
+        estimated_usd_needed = round((net_amount_ngn / 1380) * 1.02, 4)
+        if withdrawal_usd < estimated_usd_needed:
+            shortfall = estimated_usd_needed - withdrawal_usd
+            amount_to_move = min(round(shortfall + 0.10, 4), collection_usd)
+            if amount_to_move > 0:
+                idem = f"admin-bal-transfer-{order_id}-{uuid.uuid4().hex[:8]}"
+                daya_service.transfer_collection_to_withdrawal(
+                    amount_usd=amount_to_move,
+                    idempotency_key=idem,
+                )
+                balance_info["moved_usd"] = amount_to_move
+    except Exception as exc:
+        balance_info["balance_error"] = str(exc)
+
+    # Step 2: Attempt the NGN transfer with account_name to bypass Daya resolution
+    payout_ref = f"ADMIN-RETRY-{order_id}-{uuid.uuid4().hex[:8].upper()}"
+    result = daya_service.transfer_ngn_to_vendor(
+        amount_ngn=net_amount_ngn,
+        bank_code=bank_acc.bank_code,
+        account_number=bank_acc.account_number,
+        account_name=bank_acc.account_name or "",
+        reference=payout_ref,
+        order_id=order_id,
+    )
+
+    if result.get("success"):
+        # Add notification to vendor
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Payment On Its Way",
+            message=(
+                f"Order #{order_id} payout has been processed. "
+                f"NGN{net_amount_ngn:,.2f} is being transferred to your bank account "
+                f"({bank_acc.bank_name} ···{bank_acc.account_number[-4:]})."
+            ),
+            type="ESCROW",
+            order_id=order_id,
+        ))
+        db.session.commit()
+        logging.info("[ADMIN PAYOUT] Retry succeeded for Order #%s: NGN%.2f → %s/%s ref=%s",
+                     order_id, net_amount_ngn, bank_acc.bank_code, bank_acc.account_number, payout_ref)
+        return jsonify({
+            "message": f"Payout initiated successfully for Order #{order_id}",
+            "amount_ngn": net_amount_ngn,
+            "bank_code": bank_acc.bank_code,
+            "account_number": bank_acc.account_number,
+            "account_name": bank_acc.account_name,
+            "reference": payout_ref,
+            "balance_info": balance_info,
+        }), 200
+    else:
+        logging.error("[ADMIN PAYOUT] Retry FAILED for Order #%s: %s",
+                      order_id, result.get("error_message"))
+        return jsonify({
+            "message": f"Payout failed for Order #{order_id}",
+            "error": result.get("error_message"),
+            "bank_code_used": bank_acc.bank_code,
+            "account_number_used": bank_acc.account_number,
+            "account_name_used": bank_acc.account_name,
+            "reference": payout_ref,
+            "balance_info": balance_info,
+            "hint": "If error is INTEGRATION_FAILED, the bank_code may still be wrong. "
+                    "Use POST /admin/payout/fix-bank-code first, then retry.",
+        }), 502
+
+
+@admin_bp.route('/payout/retry-all-failed', methods=['POST'])
+@jwt_required()
+def admin_retry_all_failed_payouts():
+    """
+    Scan all COMPLETED crypto orders where vendor hasn't been paid
+    (escrow is RELEASED but no successful Daya transfer logged) and retry each.
+
+    This is the 'fix it once and for all' route — run it after fixing bank codes
+    and it will sweep through every unpaid order automatically.
+    """
+    from app.models.order import Order
+    from app.models.escrow import EscrowTransaction
+    from app.models.withdrawal import VendorBankAccount, DayaPayment
+    from app.services import daya_service
+    import uuid
+
+    admin_id = get_jwt_identity()
+    if not _require_superadmin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    # Find all crypto orders that are COMPLETED/PAID but whose escrow is
+    # RELEASED (meaning we already confirmed payment) — these are candidates
+    # for a vendor payout retry.
+    # We use a dry-run flag to preview without actually sending.
+    dry_run = request.get_json().get("dry_run", False) if request.get_json() else False
+
+    completed_crypto_orders = (
+        db.session.query(Order, EscrowTransaction)
+        .join(EscrowTransaction, EscrowTransaction.order_id == Order.id)
+        .filter(
+            Order.payment_method == "CRYPTO",
+            Order.status.in_(["COMPLETED", "PAID"]),
+            EscrowTransaction.status == EscrowStatus.RELEASED,
+        )
+        .all()
+    )
+
+    results = []
+    for order, escrow in completed_crypto_orders:
+        bank_acc = VendorBankAccount.query.filter_by(
+            vendor_id=order.vendor_id, is_default=True
+        ).first() or VendorBankAccount.query.filter_by(
+            vendor_id=order.vendor_id
+        ).first()
+
+        net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
+
+        entry = {
+            "order_id": order.id,
+            "vendor_id": order.vendor_id,
+            "amount_ngn": net_amount_ngn,
+            "bank_code": bank_acc.bank_code if bank_acc else None,
+            "account_number": bank_acc.account_number if bank_acc else None,
+            "account_name": bank_acc.account_name if bank_acc else None,
+            "bank_name": bank_acc.bank_name if bank_acc else None,
+            "status": None,
+            "error": None,
+            "reference": None,
+        }
+
+        if not bank_acc:
+            entry["status"] = "SKIPPED"
+            entry["error"] = "No bank account registered for vendor"
+            results.append(entry)
+            continue
+
+        if dry_run:
+            entry["status"] = "DRY_RUN"
+            results.append(entry)
+            continue
+
+        # Attempt payout
+        payout_ref = f"ADMIN-SWEEP-{order.id}-{uuid.uuid4().hex[:8].upper()}"
+        entry["reference"] = payout_ref
+
+        try:
+            result = daya_service.transfer_ngn_to_vendor(
+                amount_ngn=net_amount_ngn,
+                bank_code=bank_acc.bank_code,
+                account_number=bank_acc.account_number,
+                account_name=bank_acc.account_name or "",
+                reference=payout_ref,
+                order_id=order.id,
+            )
+            if result.get("success"):
+                entry["status"] = "SUCCESS"
+                db.session.add(Notification(
+                    user_id=order.vendor_id,
+                    title="Payment On Its Way",
+                    message=(
+                        f"Order #{order.id} payout processed. "
+                        f"NGN{net_amount_ngn:,.2f} is being transferred to your bank account."
+                    ),
+                    type="ESCROW",
+                    order_id=order.id,
+                ))
+            else:
+                entry["status"] = "FAILED"
+                entry["error"] = result.get("error_message")
+        except Exception as exc:
+            entry["status"] = "ERROR"
+            entry["error"] = str(exc)
+
+        results.append(entry)
+
+    if not dry_run:
+        db.session.commit()
+
+    success_count = sum(1 for r in results if r["status"] == "SUCCESS")
+    failed_count = sum(1 for r in results if r["status"] in ("FAILED", "ERROR"))
+    skipped_count = sum(1 for r in results if r["status"] == "SKIPPED")
+
+    return jsonify({
+        "dry_run": dry_run,
+        "total_orders_checked": len(results),
+        "success": success_count,
+        "failed": failed_count,
+        "skipped": skipped_count,
+        "results": results,
+    }), 200

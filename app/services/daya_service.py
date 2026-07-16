@@ -242,10 +242,25 @@ def transfer_ngn_to_vendor(
     account_number: str,
     reference: str,
     order_id: int,
+    account_name: str = "",
 ) -> dict:
-    """Send NGN from Siiqo Daya withdrawal balance to vendor bank account."""
+    """Send NGN from Siiqo Daya withdrawal balance to vendor bank account.
+
+    Including account_name in the payload tells Daya to skip its internal
+    bank resolution step — this prevents INTEGRATION_FAILED errors for
+    mobile money operators (OPay, PalmPay, etc.) that Daya struggles to
+    resolve automatically.
+    """
     if not _key():
         return {"success": False, "error_message": "DAYA_API_KEY not configured"}
+
+    bank_account_payload: dict = {
+        "account_number": account_number,
+        "bank_code": bank_code,
+    }
+    # Only include account_name if provided — it bypasses Daya's resolution
+    if account_name and account_name.strip():
+        bank_account_payload["account_name"] = account_name.strip()
 
     try:
         data = _request(
@@ -258,10 +273,7 @@ def transfer_ngn_to_vendor(
                 "reference": reference,
                 "destination": {
                     "type": "BANK_ACCOUNT",
-                    "bank_account": {
-                        "account_number": account_number,
-                        "bank_code": bank_code,
-                    },
+                    "bank_account": bank_account_payload,
                 },
             },
         )
