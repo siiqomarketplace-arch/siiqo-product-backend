@@ -357,7 +357,7 @@ def checkout():
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
             for item in items
         )
-        fee_percent = 12.00
+        fee_percent = 6.00
         fee_amount = total * (fee_percent / 100)
         has_physical_items = is_physical
         logistics_fee = 0.0

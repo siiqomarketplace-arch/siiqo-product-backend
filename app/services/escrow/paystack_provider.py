@@ -103,12 +103,12 @@ class PaystackProvider(BaseEscrowProvider):
         buyer_phone = _format_phone(buyer.phone if buyer else None)
 
         # ── fee accounting ───────────────────────────────────────────────
-        # 12% platform fee. For split payments this is the transaction_charge
+        # 6% platform fee. For split payments this is the transaction_charge
         # sent to Paystack so Siiqo keeps it in its main balance.
         siiqo_fee_total = Decimal("0.00")
         for o in orders:
             subtotal = Decimal(str(o.total_amount))
-            siiqo_fee_total += (subtotal * Decimal("0.12")).quantize(Decimal("0.01"))
+            siiqo_fee_total += (subtotal * Decimal("0.06")).quantize(Decimal("0.01"))
         siiqo_fee_kobo = int(round(float(siiqo_fee_total) * 100))
 
         # ── Vendor subaccount (for split payments) ───────────────────────

@@ -749,12 +749,40 @@ def release_escrow():
 
     if is_crypto_order:
         # ── Daya payout — funds are in Siiqo's Daya collection balance ──────
-        # Move collection → withdrawal, then transfer NGN to vendor bank.
-        # This is the same payout logic used for digital/service Daya orders.
         from app.routes.payments import _payout_vendor_via_daya
         _payout_vendor_via_daya(order, escrow)
     elif is_paystack_order:
-        _paystack_payout_vendor(order, escrow)
+        # ── Paystack split payment ────────────────────────────────────────────
+        # Check if vendor was paid via Paystack split at checkout time.
+        # If paystack_subaccount_code exists, Paystack already settled the
+        # vendor's 94% directly to their bank when the buyer paid.
+        # Calling _paystack_payout_vendor() again would be a double payment.
+        vendor_already_paid_via_split = False
+        try:
+            bank_acc = VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id, is_default=True
+            ).first() or VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id
+            ).first()
+            if bank_acc and bank_acc.paystack_subaccount_code:
+                vendor_already_paid_via_split = True
+            else:
+                from app.models.user import Storefront
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.paystack_subaccount_code:
+                    vendor_already_paid_via_split = True
+        except Exception as _exc:
+            logging.warning("[RELEASE] Could not check subaccount for vendor %s: %s",
+                            order.vendor_id, _exc)
+
+        if vendor_already_paid_via_split:
+            logging.info(
+                "[RELEASE] Order #%s — vendor already paid via Paystack split at checkout. "
+                "Skipping manual transfer.", order.id
+            )
+        else:
+            # Legacy non-split flow — manual Paystack transfer
+            _paystack_payout_vendor(order, escrow)
     else:
         # ── Legacy Payscrow applycode (Payment Links) ─────────────────────
         if not escrow.payscrow_transaction_id:
