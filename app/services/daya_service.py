@@ -236,6 +236,41 @@ def verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> boo
 # NGN payout to vendor (post-escrow release)
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Paystack → Daya bank code translation
+# ---------------------------------------------------------------------------
+# Paystack uses their own internal codes for mobile money operators that
+# differ from the CBN codes Daya requires. When a vendor saves their bank
+# account via Paystack's /bank/resolve flow, we get Paystack's code.
+# This map translates those to Daya-compatible CBN codes at payout time.
+#
+# Sources:
+#   OPay CBN code:     100004  (confirmed working in manual transfers)
+#   PalmPay CBN code:  999991  (Paystack and CBN use same code for PalmPay)
+#   Moniepoint:        50515
+#   Kuda:              50211
+#   Opay (alt):        100004
+# ---------------------------------------------------------------------------
+PAYSTACK_TO_DAYA_BANK_CODE: dict[str, str] = {
+    "999992": "100004",   # Paystack OPay code → CBN OPay code (confirmed working)
+    "100004": "100004",   # Already correct CBN code
+    "999991": "999991",   # PalmPay — same on both (leave as-is)
+    "50515":  "50515",    # Moniepoint — same on both
+    "50211":  "50211",    # Kuda — same on both
+}
+
+
+def _translate_bank_code(bank_code: str) -> str:
+    """Translate a Paystack bank code to the Daya-compatible CBN code.
+    Returns the original code unchanged if no translation is needed.
+    """
+    translated = PAYSTACK_TO_DAYA_BANK_CODE.get(bank_code, bank_code)
+    if translated != bank_code:
+        logger.info("[DAYA] Translating Paystack bank code %s → %s", bank_code, translated)
+    return translated
+
+
 def transfer_ngn_to_vendor(
     amount_ngn: float,
     bank_code: str,
@@ -246,17 +281,20 @@ def transfer_ngn_to_vendor(
 ) -> dict:
     """Send NGN from Siiqo Daya withdrawal balance to vendor bank account.
 
+    Automatically translates Paystack bank codes to Daya-compatible CBN codes.
     Including account_name in the payload tells Daya to skip its internal
-    bank resolution step — this prevents INTEGRATION_FAILED errors for
-    mobile money operators (OPay, PalmPay, etc.) that Daya struggles to
-    resolve automatically.
+    bank resolution step — prevents INTEGRATION_FAILED for mobile money
+    operators (OPay, PalmPay, etc.).
     """
     if not _key():
         return {"success": False, "error_message": "DAYA_API_KEY not configured"}
 
+    # Translate Paystack code → Daya CBN code before sending
+    daya_bank_code = _translate_bank_code(bank_code)
+
     bank_account_payload: dict = {
         "account_number": account_number,
-        "bank_code": bank_code,
+        "bank_code": daya_bank_code,
     }
     # Only include account_name if provided — it bypasses Daya's resolution
     if account_name and account_name.strip():
@@ -277,8 +315,8 @@ def transfer_ngn_to_vendor(
                 },
             },
         )
-        logger.info("[DAYA TRANSFER] NGN%s -> %s/%s ref=%s id=%s status=%s",
-                    amount_ngn, bank_code, account_number,
+        logger.info("[DAYA TRANSFER] NGN%s -> %s/%s (original_code=%s) ref=%s id=%s status=%s",
+                    amount_ngn, daya_bank_code, account_number, bank_code,
                     reference, data.get("id"), data.get("status"))
         return {"success": True, "transfer_id": data.get("id"),
                 "status": data.get("status"), "error_message": None}

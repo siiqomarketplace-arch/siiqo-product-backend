@@ -1794,3 +1794,101 @@ def admin_retry_all_failed_payouts():
         "skipped": skipped_count,
         "results": results,
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/data/wipe-transactions
+#
+# Wipes all test transaction data — orders, escrow, daya_payments, ledger,
+# receipts, notifications linked to orders — while preserving users,
+# products, storefronts, and bank accounts.
+#
+# SUPERADMIN only. Requires { "confirm": "WIPE_ALL_TRANSACTIONS" } in body
+# as a safety check so it can't be triggered accidentally.
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/data/wipe-transactions', methods=['POST'])
+@jwt_required()
+def admin_wipe_transactions():
+    """
+    Wipe all test transaction data cleanly.
+    Preserves: users, products, storefronts, bank accounts, blog, categories.
+    Deletes: orders, order_items, escrow_transactions, daya_payments,
+             ledger entries, receipts, order-linked notifications.
+
+    Body must include: { "confirm": "WIPE_ALL_TRANSACTIONS" }
+    """
+    admin_id = get_jwt_identity()
+    if not _require_superadmin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    data = request.get_json() or {}
+    if data.get("confirm") != "WIPE_ALL_TRANSACTIONS":
+        return jsonify({
+            "message": "Safety check failed. Send { \"confirm\": \"WIPE_ALL_TRANSACTIONS\" } to proceed.",
+            "hint": "This deletes ALL orders, escrow records, daya payments, ledger entries and notifications.",
+        }), 400
+
+    from app.models.order import Order, OrderItem
+    from app.models.escrow import EscrowTransaction
+    from app.models.withdrawal import DayaPayment
+    from app.models.finance import Ledger, Receipt
+    from app.models.communication import Notification
+    from sqlalchemy import text
+
+    counts = {}
+
+    try:
+        # Delete in dependency order to avoid FK constraint errors
+
+        # 1. Notifications linked to orders
+        notif_result = db.session.execute(
+            text("DELETE FROM notifications WHERE order_id IS NOT NULL")
+        )
+        counts["notifications"] = notif_result.rowcount
+
+        # 2. Ledger entries
+        ledger_result = db.session.execute(text("DELETE FROM ledger"))
+        counts["ledger_entries"] = ledger_result.rowcount
+
+        # 3. Receipts
+        receipt_result = db.session.execute(text("DELETE FROM receipts"))
+        counts["receipts"] = receipt_result.rowcount
+
+        # 4. Daya payments
+        daya_result = db.session.execute(text("DELETE FROM daya_payments"))
+        counts["daya_payments"] = daya_result.rowcount
+
+        # 5. Escrow transactions
+        escrow_result = db.session.execute(text("DELETE FROM escrow_transactions"))
+        counts["escrow_transactions"] = escrow_result.rowcount
+
+        # 6. Order items
+        items_result = db.session.execute(text("DELETE FROM order_items"))
+        counts["order_items"] = items_result.rowcount
+
+        # 7. Orders
+        orders_result = db.session.execute(text("DELETE FROM orders"))
+        counts["orders"] = orders_result.rowcount
+
+        db.session.commit()
+
+        logging.warning(
+            "[ADMIN WIPE] SuperAdmin %s wiped all transactions. Counts: %s",
+            admin_id, counts
+        )
+
+        return jsonify({
+            "message": "All transaction data wiped successfully. Ready for fresh testing.",
+            "deleted": counts,
+            "preserved": [
+                "users", "products", "storefronts", "vendor_bank_accounts",
+                "vendor_crypto_wallets", "categories", "blog_articles",
+                "cart_items", "platform_settings",
+            ],
+        }), 200
+
+    except Exception as exc:
+        db.session.rollback()
+        logging.error("[ADMIN WIPE] Failed: %s", exc)
+        return jsonify({"message": f"Wipe failed: {str(exc)}"}), 500
