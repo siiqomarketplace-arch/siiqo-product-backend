@@ -378,6 +378,15 @@ def profile():
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
+
+    # Auto-generate referral code for users who registered before this feature
+    if not user.referral_code:
+        user.generate_referral_code()
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
     payload = _user_payload(user)
     # Ensure city falls back to storefront city for vendors
     if not payload.get('city') and user.storefront:

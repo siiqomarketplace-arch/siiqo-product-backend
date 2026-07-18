@@ -81,6 +81,14 @@ def get_settings():
     if not user:
         return jsonify({"message": "User not found"}), 404
 
+    # Auto-generate referral code for users who registered before this feature
+    if not user.referral_code:
+        user.generate_referral_code()
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
     sf = user.storefront
     full_name = user.full_name
     
@@ -165,12 +173,14 @@ def get_settings():
         "phone": user.phone,
         "profile_pic": user.profile_pic,
         "is_verified": user.is_verified,
+        "referral_code": user.referral_code or "",
         "telegram_id": user.telegram_id,
         "telegram_notification_prefs": user.telegram_notification_prefs or {},
         "personal_info": {
             "fullname": full_name,
             "email": user.email,
             "phone": user.phone or "",
+            "referral_code": user.referral_code or "",
         },
         "store_settings": store_settings,
     }), 200

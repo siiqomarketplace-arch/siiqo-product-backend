@@ -231,7 +231,11 @@ class Storefront(db.Model):
             "vendor_id": self.vendor_id,
             "user_id": self.vendor_id,
             "vendor_phone": self.phone,
-            "whatsapp_link": (f"https://wa.me/{self.phone}" if self.phone else None),
+            "whatsapp_link": (
+                f"https://wa.me/{str((self.social_links or {}).get('whatsapp') or self.phone or '').strip().replace(' ', '').replace('+', '')}"
+                if (self.social_links or {}).get('whatsapp') or self.phone
+                else None
+            ),
             # â”€â”€ trust fields â”€â”€
             "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
             "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
