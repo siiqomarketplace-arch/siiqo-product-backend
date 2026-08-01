@@ -1014,22 +1014,41 @@ def initiate_pro_subscription():
     if not PAYSTACK_SECRET_KEY:
         return jsonify({"message": "Payment gateway not configured"}), 503
 
-    if not plan_code:
+    if not plan_code and billing_cycle != 'lifetime':
         return jsonify({"message": "Subscription plan not configured"}), 503
+
+    # Determine amount in kobo and plan label
+    if billing_cycle == 'annual':
+        amount_kobo = 2400000   # ₦24,000
+        plan_label  = 'PRO_ANNUAL'
+    elif billing_cycle == 'lifetime':
+        amount_kobo = 1000000   # ₦10,000
+        plan_label  = 'LIFETIME'
+    else:
+        amount_kobo = 300000    # ₦3,000
+        plan_label  = 'PRO_MONTHLY'
+
+    import uuid as _sub_uuid
+    ref = f"SUB-{plan_label}-{user_id}-{_sub_uuid.uuid4().hex[:8].upper()}"
 
     # Call Paystack initialize endpoint
     try:
         payload = {
             "email": user.email,
-            "amount": 4800000 if billing_cycle == 'annual' else 500000,
-            "plan": plan_code,
-            "callback_url": f"{SITE_URL}/payment/subscription-success",
+            "amount": amount_kobo,
+            "reference": ref,
+            "callback_url": f"{SITE_URL}/payment/subscription-success?plan={plan_label}&ref={ref}",
             "metadata": {
                 "user_id": str(user_id),
                 "billing_cycle": billing_cycle,
+                "plan_name": plan_label,
                 "cancel_action": f"{SITE_URL}/finance-tools/upgrade",
             }
         }
+        # Only attach a recurring plan code for monthly/annual (not lifetime one-time)
+        if plan_code and billing_cycle != 'lifetime':
+            payload["plan"] = plan_code
+
         resp = http_requests.post(
             f"{PAYSTACK_BASE_URL}/transaction/initialize",
             json=payload,
@@ -1814,8 +1833,7 @@ def get_plans():
     # Upsert plans so DB stays in sync with the catalogue
     for plan_def in PLAN_CATALOGUE:
         existing = SubscriptionPlan.query.filter_by(name=plan_def["name"]).first()
-        if not existing:
-            db.session.add(SubscriptionPlan(
+        if not existing:            db.session.add(SubscriptionPlan(
                 name=plan_def["name"],
                 price_ngn=plan_def["price_ngn"],
                 features=plan_def["features"],
@@ -1831,70 +1849,6 @@ def get_plans():
         db.session.rollback()
 
     return jsonify({"status": "success", "plans": PLAN_CATALOGUE}), 200
-
-
-@bridge_bp.route('/payments/initiate-pro-subscription', methods=['POST'])
-@jwt_required()
-def initiate_pro_subscription():
-    """Delegates to the admin.bridge subscription handler."""
-    from app.routes.admin import admin_bp
-    # This route already exists in admin.py — re-expose it at /payments prefix
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    if not user:
-        return jsonify({"message": "User not found"}), 404
-
-    data = request.get_json() or {}
-    billing_cycle = data.get("billing_cycle", "monthly")
-    plan_name = "PRO_ANNUAL" if billing_cycle == "annual" else "PRO_MONTHLY"
-
-    # For Lifetime, handle separately
-    if billing_cycle == "lifetime":
-        plan_name = "LIFETIME"
-
-    plan = SubscriptionPlan.query.filter_by(name=plan_name, is_active=True).first()
-    if not plan:
-        return jsonify({"message": f"Plan '{plan_name}' not found"}), 404
-
-    amount_kobo = int(float(plan.price_ngn) * 100)
-    import os as _os
-    key = _os.environ.get("PAYSTACK_SECRET_KEY", "")
-    if not key:
-        return jsonify({"message": "Payment gateway not configured"}), 503
-
-    import uuid as _uuid
-    ref = f"SUB-{plan_name}-{user.id}-{_uuid.uuid4().hex[:8].upper()}"
-    site_url = _os.environ.get("FRONTEND_URL", "https://siiqo.com").rstrip("/")
-    callback = f"{site_url}/payment/subscription-success?plan={plan_name}&ref={ref}"
-
-    import requests as _req
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    resp = _req.post(
-        "https://api.paystack.co/transaction/initialize",
-        json={
-            "email": user.email,
-            "amount": amount_kobo,
-            "reference": ref,
-            "callback_url": callback,
-            "metadata": {
-                "user_id": str(user.id),
-                "plan_name": plan_name,
-                "billing_cycle": billing_cycle,
-                "source": "siiqo_subscription",
-            },
-        },
-        headers=headers,
-        timeout=15,
-    )
-    result = resp.json()
-    if not result.get("status"):
-        return jsonify({"message": result.get("message", "Payment initiation failed")}), 400
-
-    return jsonify({
-        "status": "success",
-        "data": {"authorization_url": result["data"]["authorization_url"]},
-        "reference": ref,
-    }), 200
 
 
 @bridge_bp.route('/payments/subscription', methods=['GET'])
