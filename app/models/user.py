@@ -224,6 +224,8 @@ class Storefront(db.Model):
             "banner_url": self.banner_url,
             "city": self.city,
             "state": self.state,
+            "address": ", ".join(filter(None, [self.address, self.city, self.state])) or None,
+            "vendor_email": self.vendor.email if self.vendor else None,
             "phone": self.phone,
             "website": self.website,
             "social_links": self.social_links or {},
