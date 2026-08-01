@@ -947,7 +947,7 @@ def initiate_pro_subscription():
         amount_kobo = 2400000   # ₦24,000
         plan_label  = 'PRO_ANNUAL'
     elif billing_cycle == 'lifetime':
-        amount_kobo = 1000000   # ₦10,000
+        amount_kobo = 8700000   # ₦87,000
         plan_label  = 'LIFETIME'
     else:
         amount_kobo = 300000    # ₦3,000
@@ -1245,7 +1245,7 @@ def paystack_webhook():
                 # Find or create the SubscriptionPlan record
                 plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
                 if not plan:
-                    price_map = {'LIFETIME': 10000, 'PRO_ANNUAL': 24000, 'PRO_MONTHLY': 3000}
+                    price_map = {'LIFETIME': 87000, 'PRO_ANNUAL': 24000, 'PRO_MONTHLY': 3000}
                     plan = SubscriptionPlan(
                         name=plan_name,
                         price_ngn=price_map.get(plan_name, 3000),
@@ -1803,7 +1803,7 @@ PLAN_CATALOGUE = [
     },
     {
         "name": "LIFETIME",
-        "price_ngn": 10000,
+        "price_ngn": 87000,
         "billing": "lifetime",
         "label": "Lifetime Access",
         "tagline": "Pay once. Own forever.",
@@ -1815,7 +1815,7 @@ PLAN_CATALOGUE = [
             "Exclusive 'Lifetime Member' badge",
         ],
         "transaction_fee_pct": 6.0,
-        "cta": "Get Lifetime — ₦10,000",
+        "cta": "Get Lifetime — ₦87,000",
         "highlight": False,
     },
 ]
