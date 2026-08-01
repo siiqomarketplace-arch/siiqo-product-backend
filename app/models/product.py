@@ -51,6 +51,7 @@ class Product(db.Model):
     images = db.Column(db.JSON, default=list) # Array of image URLs
     is_active = db.Column(db.Boolean, default=True)
     is_deleted = db.Column(db.Boolean, default=False)
+    view_count = db.Column(db.Integer, default=0)
 
     # ── Condition & Location ─────────────────────────────────────────
     condition = db.Column(db.String(50), default='New')

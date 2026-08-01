@@ -1924,3 +1924,40 @@ def admin_wipe_transactions():
         db.session.rollback()
         logging.error("[ADMIN WIPE] Failed: %s", exc)
         return jsonify({"message": f"Wipe failed: {str(exc)}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/storefronts/<int:storefront_id>/verify-pro
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/storefronts/<int:storefront_id>/verify-pro', methods=['POST'])
+@jwt_required()
+def admin_verify_pro_storefront(storefront_id):
+    admin_id = get_jwt_identity()
+    admin = _get_admin(admin_id)
+    if not admin:
+        return jsonify({"message": "Admin authorization required"}), 403
+
+    sf = db.session.get(Storefront, storefront_id)
+    if not sf:
+        return jsonify({"message": "Storefront not found"}), 404
+
+    from datetime import timedelta
+    sf.is_pro_verified = True
+    sf.pro_verified_expires_at = _utcnow() + timedelta(days=365)
+    sf.verification_status = 'APPROVED'
+    sf.is_verified = True
+
+    db.session.add(Notification(
+        user_id=sf.vendor_id,
+        title="Pro Verified Status Activated! ⭐",
+        message="Congratulations! Your NIN & CAC verification has been approved. You now enjoy Pro Verified Gold status and a reduced 5.4% platform fee.",
+        type="SYSTEM"
+    ))
+
+    db.session.commit()
+    return jsonify({
+        "status": "success",
+        "message": f"Storefront #{sf.id} '{sf.store_name}' is now Pro Verified until {sf.pro_verified_expires_at.strftime('%Y-%m-%d')}.",
+        "storefront": sf.to_public_dict()
+    }), 200

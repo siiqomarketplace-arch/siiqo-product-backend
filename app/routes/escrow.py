@@ -412,13 +412,14 @@ def initiate_escrow():
         if not escrow_txn:
             # fee_amount for an individual order in a master transaction
             # the result['fee_amount'] is total, so we calculate proportional
-            individual_fee = round(float(order.total_amount) * 0.06, 2)
+            fee_rate = 0.054 if (order.vendor and order.vendor.storefront and order.vendor.storefront.is_pro_verified) else 0.06
+            individual_fee = round(float(order.total_amount) * fee_rate, 2)
             escrow_txn = EscrowTransaction(
                 order_id=order.id,
                 transaction_number=result['transaction_number'],
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(order.total_amount),
-                fee_percent=6.00,
+                fee_percent=fee_rate * 100,
                 fee_amount=individual_fee,
                 payment_link=result['payment_link'],
                 payscrow_transaction_id=result['provider_transaction_id'],
@@ -853,6 +854,38 @@ def release_escrow():
         check_and_reward_referral_on_order_complete(order)
     except Exception as ex:
         logging.error(f"[REFERRAL ERR] Escrow release referral reward failed: {ex}")
+
+    # ── First-sale celebration ─────────────────────────────────────────────
+    try:
+        from app.models.order import Order as _Order
+        vendor_order_count = _Order.query.filter_by(vendor_id=order.vendor_id).count()
+        if vendor_order_count == 1:
+            vendor_user = db.session.get(User, order.vendor_id)
+            db.session.add(Notification(
+                user_id=order.vendor_id,
+                title="🎉 Your First Sale!",
+                message=(
+                    f"Congratulations! You just made your first sale on Siiqo — Order #{order.id}. "
+                    "Check your orders page to confirm delivery and get paid."
+                ),
+                type="ORDER",
+                order_id=order.id,
+            ))
+            if vendor_user and vendor_user.email:
+                from app.utils.email import send_siiqo_email as _send_email
+                try:
+                    _send_email(
+                        to_email=vendor_user.email,
+                        subject="Your First Sale on Siiqo! 🎉",
+                        template_name="first_sale",
+                        first_name=vendor_user.first_name or "Vendor",
+                        order_id=order.id,
+                        total_amount=f"₦{float(order.total_amount):,.2f}",
+                    )
+                except Exception as mail_err:
+                    logging.warning(f"[FIRST SALE EMAIL ERR] {mail_err}")
+    except Exception as ex:
+        logging.error(f"[FIRST SALE ERR] {ex}")
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,

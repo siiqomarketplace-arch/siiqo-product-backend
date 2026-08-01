@@ -1251,16 +1251,26 @@ def paystack_webhook():
         if customer_email and status == 'success':
             user = User.query.filter_by(email=customer_email).first()
             if user:
-                # Determine billing cycle from plan code
-                billing_cycle = 'annual' if plan_code == PAYSTACK_ANNUAL_PLAN else 'monthly'
-                plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
+                # Check metadata for plan_name (Lifetime payments embed this since they
+                # are one-time transactions, not recurring Paystack plan subscriptions)
+                meta_plan_name = metadata.get('plan_name', '')
+                is_lifetime = (meta_plan_name == 'LIFETIME' or 'LIFETIME' in reference.upper())
+
+                if is_lifetime:
+                    billing_cycle = 'lifetime'
+                    plan_name = 'LIFETIME'
+                else:
+                    # Determine billing cycle from plan code
+                    billing_cycle = 'annual' if plan_code == PAYSTACK_ANNUAL_PLAN else 'monthly'
+                    plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
 
                 # Find or create the SubscriptionPlan record
                 plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
                 if not plan:
+                    price_map = {'LIFETIME': 10000, 'PRO_ANNUAL': 24000, 'PRO_MONTHLY': 3000}
                     plan = SubscriptionPlan(
                         name=plan_name,
-                        price_ngn=48000 if billing_cycle == 'annual' else 5000,
+                        price_ngn=price_map.get(plan_name, 3000),
                         features={"unlimited_invoices": True, "crm": True},
                         is_active=True,
                     )
@@ -1276,8 +1286,14 @@ def paystack_webhook():
 
                 # Calculate end date
                 from dateutil.relativedelta import relativedelta
+                from datetime import datetime as _dt_cls
                 now = _utcnow()
-                end_date = now + (relativedelta(years=1) if billing_cycle == 'annual' else relativedelta(months=1))
+                if billing_cycle == 'lifetime':
+                    end_date = _dt_cls(2099, 12, 31, 23, 59, 59)  # permanent access
+                elif billing_cycle == 'annual':
+                    end_date = now + relativedelta(years=1)
+                else:
+                    end_date = now + relativedelta(months=1)
 
                 # Create new subscription record
                 new_sub = VendorSubscription(

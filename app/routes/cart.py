@@ -464,14 +464,15 @@ def checkout():
             # For crypto, create an escrow transaction record in PENDING_PAYMENT state.
             # The DayaPayment record is created by /payments/daya/initiate AFTER checkout.
             # When Daya confirms payment, _handle_crypto_payment_confirmed() updates both.
+            fee_rate = 0.054 if (new_order.vendor and new_order.vendor.storefront and new_order.vendor.storefront.is_pro_verified) else 0.06
             txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
             new_escrow = EscrowTransaction(
                 order_id=new_order.id,
                 transaction_number=txn_number,
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=total,
-                fee_percent=6.00,
-                fee_amount=round(total * 0.06, 2),
+                fee_percent=fee_rate * 100,
+                fee_amount=round(total * fee_rate, 2),
                 currency='NGN',
             )
             db.session.add(new_escrow)

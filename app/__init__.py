@@ -213,11 +213,14 @@ def create_app(config_name: str | None = None) -> Flask:
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
             from apscheduler.triggers.interval import IntervalTrigger
+            from apscheduler.triggers.cron import CronTrigger
             from app.tasks.escrow_tasks import (
                 auto_release_escrow,
                 send_delivery_reminders,
                 check_pending_payments,
             )
+            from app.tasks.onboarding_tasks import run_onboarding_email_sequence
+            from app.tasks.recap_tasks import run_monday_recap_task
 
             scheduler = BackgroundScheduler(daemon=True)
 
@@ -243,6 +246,22 @@ def create_app(config_name: str | None = None) -> Flask:
                 trigger=IntervalTrigger(hours=24),
                 id='check_pending_payments',
                 name='Cancel orders stuck in PENDING_PAYMENT for 24 h',
+                replace_existing=True,
+            )
+            # Onboarding email sequence — check every 6 hours (lightweight)
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, run_onboarding_email_sequence),
+                trigger=IntervalTrigger(hours=6),
+                id='onboarding_email_sequence',
+                name='Day-1/3/7 vendor onboarding emails',
+                replace_existing=True,
+            )
+            # Monday morning recap — runs every Monday at 7:00 UTC (8:00 WAT)
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, run_monday_recap_task),
+                trigger=CronTrigger(day_of_week='mon', hour=7, minute=0),
+                id='monday_recap',
+                name='Weekly store recap email to all active vendors',
                 replace_existing=True,
             )
 

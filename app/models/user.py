@@ -153,6 +153,12 @@ class Storefront(db.Model):
     # Status flags
     is_verified = db.Column(db.Boolean, default=False)   # admin approved
     is_published = db.Column(db.Boolean, default=False)  # vendor published
+    is_pro_verified = db.Column(db.Boolean, default=False)  # Pro Verified badge subscription (₦2,500/yr)
+    pro_verified_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Analytics & Onboarding
+    view_count = db.Column(db.Integer, default=0)
+    onboarding_emails_sent = db.Column(db.JSON, nullable=True, default=dict)
 
     # Extended profile
     phone = db.Column(db.String(20), nullable=True)
@@ -227,6 +233,9 @@ class Storefront(db.Model):
             "is_verified": self.is_verified,
             "is_published": self.is_published,
             "is_live": self.is_live,
+            "is_pro_verified": bool(self.is_pro_verified),
+            "pro_verified_expires_at": self.pro_verified_expires_at.isoformat() if self.pro_verified_expires_at else None,
+            "view_count": self.view_count or 0,
             # â”€â”€ vendor identity (required for chat / messaging) â”€â”€
             "vendor_id": self.vendor_id,
             "user_id": self.vendor_id,

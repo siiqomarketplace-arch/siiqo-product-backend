@@ -131,6 +131,35 @@ with app.app_context():
         else:
             print(f"  [EXISTS] receipts.{col_name}")
     
+    # --- Step 3.5: Add missing storefronts and products columns ---
+    print("\n[STEP 2.5] Adding view_count & Pro Verified columns to storefronts and products...")
+    sf_cols = [c['name'] for c in inspector.get_columns('storefronts')]
+    sf_additions = [
+        ("view_count",              "INTEGER DEFAULT 0"),
+        ("is_pro_verified",         "BOOLEAN DEFAULT FALSE"),
+        ("pro_verified_expires_at", "TIMESTAMP WITH TIME ZONE"),
+        ("onboarding_emails_sent",  "JSONB DEFAULT '{}'"),
+    ]
+    for col_name, col_type in sf_additions:
+        if col_name not in sf_cols:
+            try:
+                db.session.execute(text(f"ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                db.session.commit()
+                print(f"  [OK] Added storefronts.{col_name}")
+            except Exception as e:
+                db.session.rollback()
+                print(f"  [SKIP] storefronts.{col_name}: {e}")
+
+    prod_cols = [c['name'] for c in inspector.get_columns('products')]
+    if 'view_count' not in prod_cols:
+        try:
+            db.session.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("  [OK] Added products.view_count")
+        except Exception as e:
+            db.session.rollback()
+            print(f"  [SKIP] products.view_count: {e}")
+
     # Make order_id nullable on receipts
     try:
         db.session.execute(text(

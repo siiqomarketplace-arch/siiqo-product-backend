@@ -560,14 +560,15 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
 
         escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
         if not escrow:
-            fee_amount = round(float(order.total_amount) * 0.06, 2)
+            fee_rate = 0.054 if (order.vendor and order.vendor.storefront and order.vendor.storefront.is_pro_verified) else 0.06
+            fee_amount = round(float(order.total_amount) * fee_rate, 2)
             txn_number = f"DYA-{uuid.uuid4().hex[:12].upper()}"
             escrow = EscrowTransaction(
                 order_id=order_id,
                 transaction_number=txn_number,
                 status=EscrowStatus.IN_ESCROW,
                 amount=float(order.total_amount),
-                fee_percent=6.00,
+                fee_percent=fee_rate * 100,
                 fee_amount=fee_amount,
                 payment_link=None,
                 payscrow_transaction_id=f"DAYA-{dp.daya_deposit_id or dp.daya_funding_account_id}",

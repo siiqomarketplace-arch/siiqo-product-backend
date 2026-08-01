@@ -157,6 +157,13 @@ def get_product_details(product_id):
     if not p or not p.is_active:
         return jsonify({"message": "Product not found"}), 404
 
+    # Increment view_count on fetch
+    try:
+        p.view_count = (p.view_count or 0) + 1
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
     # Average rating â€” p.reviews is a dynamic relationship, use query
     avg_rating = None
     review_count = 0
@@ -262,6 +269,13 @@ def get_storefront_details(slug):
             "status": "offline",
             "message": "This storefront is currently offline.",
         }), 202
+
+    # Increment store view_count on public fetch
+    try:
+        s.view_count = (s.view_count or 0) + 1
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
 
     products = Product.query.filter(
         Product.storefront_id == s.id,

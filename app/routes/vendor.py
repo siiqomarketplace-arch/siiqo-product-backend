@@ -186,6 +186,61 @@ def get_settings():
     }), 200
 
 
+
+# ---------------------------------------------------------------------------
+# GET /vendor/dashboard  — nudge stats for dashboard engagement cards
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/dashboard', methods=['GET'])
+@jwt_required()
+def get_vendor_dashboard_stats():
+    """Returns lightweight engagement nudge data for the vendor dashboard home."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    sf = user.storefront
+    store_view_count = sf.view_count if sf else 0
+
+    # Products with views but no completed orders
+    nudge_products = []
+    if sf:
+        from app.models.order import OrderItem
+        products = Product.query.filter_by(storefront_id=sf.id).all()
+        for p in products:
+            if (p.view_count or 0) >= 3:
+                completed = db.session.query(Order).join(
+                    OrderItem, OrderItem.order_id == Order.id
+                ).filter(
+                    OrderItem.product_id == p.id,
+                    Order.vendor_id == user.id,
+                    Order.status.in_(['COMPLETED', 'DELIVERED'])
+                ).count()
+                if completed == 0:
+                    nudge_products.append({
+                        "id": p.id,
+                        "name": p.name,
+                        "view_count": p.view_count or 0,
+                    })
+
+
+    # Is first sale — detect exactly when first order arrives (across all paid statuses)
+    # Show celebration once: tracked via a flag; falls back to count-based check
+    total_orders = Order.query.filter(
+        Order.vendor_id == user.id,
+        Order.status.in_(['PAID', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'PENDING_DELIVERY'])
+    ).count()
+    is_first_sale = (total_orders == 1)
+
+    return jsonify({
+        "store_view_count": store_view_count,
+        "nudge_products": nudge_products,
+        "is_first_sale": is_first_sale,
+        "total_orders": total_orders,
+    }), 200
+
+
 # ---------------------------------------------------------------------------
 # POST /vendor/onboard & GET /vendor/check-slug
 # ---------------------------------------------------------------------------
@@ -1332,5 +1387,185 @@ def get_vendor_trust_profile():
         return jsonify({"message": "Trust profile not found"}), 404
         
     return jsonify(profile.to_dict()), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /vendor/dashboard-stats — Nudges, views & first-sale stats
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/dashboard-stats', methods=['GET'])
+@jwt_required()
+def get_vendor_dashboard_stats():
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user:
+        return jsonify({"message": "Vendor account required"}), 403
+
+    orders = Order.query.filter_by(vendor_id=user.id).all()
+    total_orders = len(orders)
+    completed_orders = [o for o in orders if o.status in ('COMPLETED', 'PAID', 'DELIVERED', 'SHIPPED', 'IN_ESCROW')]
+    total_revenue = sum(float(o.total_amount) for o in completed_orders)
+
+    # First sale check
+    is_first_sale = (total_orders == 1)
+
+    # Product views & zero-order nudges
+    products = Product.query.filter_by(storefront_id=sf.id, is_active=True, is_deleted=False).all() if sf else []
+    total_product_views = sum(p.view_count or 0 for p in products)
+
+    from app.models.order import OrderItem
+    nudge_products = []
+    for p in products:
+        views = p.view_count or 0
+        if views >= 3:
+            # Check if this product has any order items
+            order_item_count = db.session.query(OrderItem).filter_by(product_id=p.id).count()
+            if order_item_count == 0:
+                nudge_products.append({
+                    "id": p.id,
+                    "name": p.name,
+                    "view_count": views,
+                    "price": str(p.price),
+                    "image": p.images[0] if p.images else None,
+                })
+
+    from app.models.admin import SponsoredListing
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    active_sponsored = SponsoredListing.query.filter(
+        SponsoredListing.vendor_id == user.id,
+        SponsoredListing.is_active == True,
+        SponsoredListing.end_date > now
+    ).all()
+    sponsored_product_ids = [s.product_id for s in active_sponsored]
+
+    return jsonify({
+        "store_view_count": sf.view_count if sf else 0,
+        "total_product_views": total_product_views,
+        "total_orders": total_orders,
+        "total_revenue": total_revenue,
+        "is_first_sale": is_first_sale,
+        "nudge_products": nudge_products,
+        "sponsored_product_ids": sponsored_product_ids,
+        "pro_verified": {
+            "is_pro_verified": bool(sf.is_pro_verified) if sf else False,
+            "expires_at": sf.pro_verified_expires_at.isoformat() if (sf and sf.pro_verified_expires_at) else None,
+            "verification_status": sf.verification_status if sf else "NOT_SUBMITTED"
+        }
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# POST /vendor/pro-verified/checkout — Pay ₦2,500/yr for Pro Verified badge
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/pro-verified/checkout', methods=['POST'])
+@jwt_required()
+def checkout_pro_verified():
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user or not sf:
+        return jsonify({"message": "Storefront required"}), 400
+
+    from app.services.escrow.paystack_provider import PaystackProvider
+    import requests, os
+
+    key = os.environ.get("PAYSTACK_SECRET_KEY", "")
+    if not key:
+        return jsonify({"message": "Paystack is not configured"}), 400
+
+    txn_ref = f"PRO-VER-{sf.id}-{_uuid.uuid4().hex[:8].upper()}"
+    amount_kobo = 250000  # ₦2,500 in kobo
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+
+    site_url = os.environ.get("SITE_URL", "https://siiqo.com").rstrip('/')
+    payload = {
+        "email": user.email,
+        "amount": amount_kobo,
+        "reference": txn_ref,
+        "callback_url": f"{site_url}/vendor/settings?pro_verified=success",
+        "metadata": {
+            "type": "pro_verified_subscription",
+            "vendor_id": user.id,
+            "storefront_id": sf.id
+        }
+    }
+
+    try:
+        resp = requests.post("https://api.paystack.co/transaction/initialize", json=payload, headers=headers, timeout=15)
+        res_data = resp.json()
+        if res_data.get("status"):
+            return jsonify({
+                "status": "success",
+                "payment_url": res_data["data"]["authorization_url"],
+                "reference": txn_ref,
+            }), 200
+        return jsonify({"message": res_data.get("message", "Paystack payment init failed")}), 400
+    except Exception as e:
+        logging.error(f"[PRO VERIFIED CHECKOUT ERR] {e}")
+        return jsonify({"message": f"Payment error: {str(e)}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /vendor/products/<int:product_id>/sponsor — Sponsor product (₦2,000/wk)
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/products/<int:product_id>/sponsor', methods=['POST'])
+@jwt_required()
+def sponsor_product(product_id):
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user or not sf:
+        return jsonify({"message": "Vendor storefront required"}), 400
+
+    product = Product.query.filter_by(id=product_id, storefront_id=sf.id).first()
+    if not product:
+        return jsonify({"message": "Product not found or not owned by vendor"}), 404
+
+    from app.services.escrow.paystack_provider import PaystackProvider
+    import requests, os
+
+    key = os.environ.get("PAYSTACK_SECRET_KEY", "")
+    if not key:
+        return jsonify({"message": "Paystack is not configured"}), 400
+
+    txn_ref = f"SPONSOR-{product.id}-{_uuid.uuid4().hex[:8].upper()}"
+    amount_kobo = 200000  # ₦2,000 in kobo
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+
+    site_url = os.environ.get("SITE_URL", "https://siiqo.com").rstrip('/')
+    payload = {
+        "email": user.email,
+        "amount": amount_kobo,
+        "reference": txn_ref,
+        "callback_url": f"{site_url}/vendor/products?sponsored=success",
+        "metadata": {
+            "type": "sponsored_listing",
+            "vendor_id": user.id,
+            "product_id": product.id,
+        }
+    }
+
+    try:
+        resp = requests.post("https://api.paystack.co/transaction/initialize", json=payload, headers=headers, timeout=15)
+        res_data = resp.json()
+        if res_data.get("status"):
+            return jsonify({
+                "status": "success",
+                "payment_url": res_data["data"]["authorization_url"],
+                "reference": txn_ref,
+            }), 200
+        return jsonify({"message": res_data.get("message", "Paystack payment init failed")}), 400
+    except Exception as e:
+        logging.error(f"[SPONSOR PRODUCT ERR] {e}")
+        return jsonify({"message": f"Payment error: {str(e)}"}), 500
 
 
