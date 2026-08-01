@@ -194,7 +194,7 @@ def get_settings():
 @vendor_bp.route('/dashboard', methods=['GET'])
 @jwt_required()
 def get_vendor_dashboard_stats():
-    """Returns lightweight engagement nudge data for the vendor dashboard home."""
+    """Returns engagement nudge data + stats for the vendor dashboard home."""
     user_id = get_jwt_identity()
     user = db.session.get(User, int(user_id))
     if not user:
@@ -203,41 +203,67 @@ def get_vendor_dashboard_stats():
     sf = user.storefront
     store_view_count = sf.view_count if sf else 0
 
-    # Products with views but no completed orders
-    nudge_products = []
-    if sf:
-        from app.models.order import OrderItem
-        products = Product.query.filter_by(storefront_id=sf.id).all()
-        for p in products:
-            if (p.view_count or 0) >= 3:
-                completed = db.session.query(Order).join(
-                    OrderItem, OrderItem.order_id == Order.id
-                ).filter(
-                    OrderItem.product_id == p.id,
-                    Order.vendor_id == user.id,
-                    Order.status.in_(['COMPLETED', 'DELIVERED'])
-                ).count()
-                if completed == 0:
-                    nudge_products.append({
-                        "id": p.id,
-                        "name": p.name,
-                        "view_count": p.view_count or 0,
-                    })
-
-
-    # Is first sale — detect exactly when first order arrives (across all paid statuses)
-    # Show celebration once: tracked via a flag; falls back to count-based check
-    total_orders = Order.query.filter(
+    # All orders for revenue + first-sale detection
+    all_orders = Order.query.filter(
         Order.vendor_id == user.id,
         Order.status.in_(['PAID', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'PENDING_DELIVERY'])
-    ).count()
+    ).all()
+    total_orders = len(all_orders)
+    total_revenue = sum(
+        float(o.total_amount) for o in all_orders
+        if o.status in ('COMPLETED', 'PAID', 'DELIVERED', 'SHIPPED')
+    )
     is_first_sale = (total_orders == 1)
+
+    # Products with views but no orders — nudge vendor to improve them
+    nudge_products = []
+    products = Product.query.filter_by(
+        storefront_id=sf.id if sf else -1,
+        is_active=True
+    ).filter(
+        db.or_(Product.is_deleted == False, Product.is_deleted.is_(None))
+    ).all() if sf else []
+
+    total_product_views = sum(p.view_count or 0 for p in products)
+
+    from app.models.order import OrderItem
+    for p in products:
+        views = p.view_count or 0
+        if views >= 3:
+            order_item_count = db.session.query(OrderItem).filter_by(product_id=p.id).count()
+            if order_item_count == 0:
+                nudge_products.append({
+                    "id": p.id,
+                    "name": p.name,
+                    "view_count": views,
+                    "price": str(p.price),
+                    "image": p.images[0] if p.images else None,
+                })
+
+    # Active sponsored listings
+    from app.models.admin import SponsoredListing
+    from datetime import datetime as _dt, timezone as _tz
+    _now = _dt.now(_tz.utc)
+    active_sponsored = SponsoredListing.query.filter(
+        SponsoredListing.vendor_id == user.id,
+        SponsoredListing.is_active == True,
+        SponsoredListing.end_date > _now
+    ).all() if sf else []
+    sponsored_product_ids = [s.product_id for s in active_sponsored]
 
     return jsonify({
         "store_view_count": store_view_count,
+        "total_product_views": total_product_views,
         "nudge_products": nudge_products,
         "is_first_sale": is_first_sale,
         "total_orders": total_orders,
+        "total_revenue": total_revenue,
+        "sponsored_product_ids": sponsored_product_ids,
+        "pro_verified": {
+            "is_pro_verified": bool(sf.is_pro_verified) if sf else False,
+            "expires_at": sf.pro_verified_expires_at.isoformat() if (sf and sf.pro_verified_expires_at) else None,
+            "verification_status": sf.verification_status if sf else "NOT_SUBMITTED",
+        },
     }), 200
 
 
@@ -1395,7 +1421,7 @@ def get_vendor_trust_profile():
 
 @vendor_bp.route('/dashboard-stats', methods=['GET'])
 @jwt_required()
-def get_vendor_dashboard_stats():
+def get_vendor_dashboard_stats_legacy():
     user_id = get_jwt_identity()
     user, sf = _require_vendor_storefront(user_id)
     if not user:
