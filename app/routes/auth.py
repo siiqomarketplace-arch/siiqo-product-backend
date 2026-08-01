@@ -210,6 +210,27 @@ def verify_email():
     user.otp_expiry = None
     db.session.commit()
 
+    # Send welcome email now that user is verified
+    try:
+        send_siiqo_email(
+            to_email=user.email,
+            subject="Welcome to Siiqo! Here's how to get started 🚀",
+            template_name="system_notice",
+            first_name=user.first_name or "there",
+            notice_text=(
+                f"Welcome to Siiqo, {user.first_name or 'there'}! 🎉\n\n"
+                "You're all set. Here's what you can do right now:\n\n"
+                "🛒 Browse the marketplace — find verified sellers near you\n"
+                "🏪 Set up your store — start selling in under 3 minutes\n"
+                "💳 Create a Pay Link — get paid on WhatsApp instantly\n\n"
+                "Your store link will be: siiqo.com/your-store-name\n\n"
+                "The entire platform is free to start. No credit card needed.\n\n"
+                "Let's go — your first sale is waiting."
+            ),
+        )
+    except Exception as _we:
+        logging.warning("[WELCOME EMAIL] Failed to send: %s", _we)
+
     tokens = _make_tokens(user)
     return jsonify({
         "message": "Email verified successfully. Welcome to Siiqo!",

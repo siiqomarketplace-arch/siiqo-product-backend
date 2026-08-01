@@ -1723,3 +1723,246 @@ def vendor_crypto_wallet_post():
     """Alias: POST /api/vendor/crypto-wallet → payments.save_vendor_crypto_wallet"""
     from app.routes.payments import save_vendor_crypto_wallet
     return save_vendor_crypto_wallet()
+
+
+# ===========================================================================
+# SUBSCRIPTION PLANS  — GET /payments/plans
+# Returns all available plans so the frontend can show pricing.
+# Ensures Lifetime plan exists in the DB on every call (idempotent upsert).
+# ===========================================================================
+
+PLAN_CATALOGUE = [
+    {
+        "name": "FREE",
+        "price_ngn": 0,
+        "billing": "forever",
+        "label": "Starter",
+        "tagline": "Get started for free",
+        "features": [
+            "1 storefront theme",
+            "Up to 5 products",
+            "3 active Pay Links",
+            "7-day analytics",
+            "Siiqo escrow on all orders",
+            "Standard trust badge",
+        ],
+        "transaction_fee_pct": 6.0,
+        "cta": "Start Free",
+        "highlight": False,
+    },
+    {
+        "name": "PRO_MONTHLY",
+        "price_ngn": 3000,
+        "billing": "monthly",
+        "label": "Pro",
+        "tagline": "For growing businesses",
+        "features": [
+            "Unlimited products & catalogs",
+            "All storefront themes + customization",
+            "Unlimited Pay Links",
+            "Full analytics (all time)",
+            "Invoice & receipt generator",
+            "CRM + customer database",
+            "Marketing card generator",
+            "3 campaign email blasts/month",
+            "Coupon creation & management",
+            "Priority marketplace placement",
+            "Telegram bot access",
+        ],
+        "transaction_fee_pct": 6.0,
+        "cta": "Start Pro — ₦3,000/mo",
+        "highlight": False,
+    },
+    {
+        "name": "PRO_ANNUAL",
+        "price_ngn": 24000,
+        "billing": "annual",
+        "label": "Pro Annual",
+        "tagline": "Save ₦12,000 vs monthly",
+        "features": [
+            "Everything in Pro Monthly",
+            "₦12,000 savings per year",
+            "Priority support (24h response)",
+        ],
+        "transaction_fee_pct": 6.0,
+        "cta": "Go Annual — ₦24,000/yr",
+        "highlight": True,
+    },
+    {
+        "name": "LIFETIME",
+        "price_ngn": 10000,
+        "billing": "lifetime",
+        "label": "Lifetime Access",
+        "tagline": "Pay once. Own forever.",
+        "features": [
+            "Everything in Pro, forever",
+            "No monthly or annual fees",
+            "Priority support (24h response)",
+            "Early access to new features",
+            "Exclusive 'Lifetime Member' badge",
+        ],
+        "transaction_fee_pct": 6.0,
+        "cta": "Get Lifetime — ₦10,000",
+        "highlight": False,
+    },
+]
+
+
+@bridge_bp.route('/payments/plans', methods=['GET'])
+def get_plans():
+    """Return all subscription plans. No auth required — used on pricing page."""
+    # Upsert plans so DB stays in sync with the catalogue
+    for plan_def in PLAN_CATALOGUE:
+        existing = SubscriptionPlan.query.filter_by(name=plan_def["name"]).first()
+        if not existing:
+            db.session.add(SubscriptionPlan(
+                name=plan_def["name"],
+                price_ngn=plan_def["price_ngn"],
+                features=plan_def["features"],
+                is_active=True,
+            ))
+        else:
+            existing.price_ngn = plan_def["price_ngn"]
+            existing.features = plan_def["features"]
+            existing.is_active = True
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+    return jsonify({"status": "success", "plans": PLAN_CATALOGUE}), 200
+
+
+@bridge_bp.route('/payments/initiate-pro-subscription', methods=['POST'])
+@jwt_required()
+def initiate_pro_subscription():
+    """Delegates to the admin.bridge subscription handler."""
+    from app.routes.admin import admin_bp
+    # This route already exists in admin.py — re-expose it at /payments prefix
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    data = request.get_json() or {}
+    billing_cycle = data.get("billing_cycle", "monthly")
+    plan_name = "PRO_ANNUAL" if billing_cycle == "annual" else "PRO_MONTHLY"
+
+    # For Lifetime, handle separately
+    if billing_cycle == "lifetime":
+        plan_name = "LIFETIME"
+
+    plan = SubscriptionPlan.query.filter_by(name=plan_name, is_active=True).first()
+    if not plan:
+        return jsonify({"message": f"Plan '{plan_name}' not found"}), 404
+
+    amount_kobo = int(float(plan.price_ngn) * 100)
+    import os as _os
+    key = _os.environ.get("PAYSTACK_SECRET_KEY", "")
+    if not key:
+        return jsonify({"message": "Payment gateway not configured"}), 503
+
+    import uuid as _uuid
+    ref = f"SUB-{plan_name}-{user.id}-{_uuid.uuid4().hex[:8].upper()}"
+    site_url = _os.environ.get("FRONTEND_URL", "https://siiqo.com").rstrip("/")
+    callback = f"{site_url}/payment/subscription-success?plan={plan_name}&ref={ref}"
+
+    import requests as _req
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    resp = _req.post(
+        "https://api.paystack.co/transaction/initialize",
+        json={
+            "email": user.email,
+            "amount": amount_kobo,
+            "reference": ref,
+            "callback_url": callback,
+            "metadata": {
+                "user_id": str(user.id),
+                "plan_name": plan_name,
+                "billing_cycle": billing_cycle,
+                "source": "siiqo_subscription",
+            },
+        },
+        headers=headers,
+        timeout=15,
+    )
+    result = resp.json()
+    if not result.get("status"):
+        return jsonify({"message": result.get("message", "Payment initiation failed")}), 400
+
+    return jsonify({
+        "status": "success",
+        "data": {"authorization_url": result["data"]["authorization_url"]},
+        "reference": ref,
+    }), 200
+
+
+@bridge_bp.route('/payments/subscription', methods=['GET'])
+@jwt_required()
+def get_subscription_status():
+    """Return the current vendor's subscription status."""
+    user_id = get_jwt_identity()
+    from datetime import datetime as _dt
+    now = _dt.utcnow()
+
+    active_sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == int(user_id),
+        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
+        VendorSubscription.end_date > now,
+    ).order_by(VendorSubscription.end_date.desc()).first()
+
+    if not active_sub:
+        return jsonify({
+            "plan": "FREE",
+            "status": "inactive",
+            "billing_cycle": None,
+            "end_date": None,
+            "can_upgrade": True,
+            "can_cancel": False,
+        }), 200
+
+    plan_name = active_sub.plan.name if active_sub.plan else "FREE"
+    if "ANNUAL" in plan_name:
+        billing_cycle = "annual"
+    elif "LIFETIME" in plan_name:
+        billing_cycle = "lifetime"
+    else:
+        billing_cycle = "monthly"
+
+    return jsonify({
+        "plan": "PRO" if "PRO" in plan_name or "LIFETIME" in plan_name else "FREE",
+        "plan_name": plan_name,
+        "status": active_sub.status,
+        "billing_cycle": billing_cycle,
+        "end_date": active_sub.end_date.isoformat() if active_sub.end_date else None,
+        "can_upgrade": billing_cycle == "monthly",
+        "can_cancel": active_sub.status == "ACTIVE" and billing_cycle != "lifetime",
+    }), 200
+
+
+@bridge_bp.route('/payments/subscription/cancel', methods=['POST'])
+@jwt_required()
+def cancel_subscription():
+    """Mark vendor subscription as CANCELLED_PENDING_EXPIRY."""
+    user_id = get_jwt_identity()
+    from datetime import datetime as _dt
+    now = _dt.utcnow()
+
+    sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == int(user_id),
+        VendorSubscription.status == 'ACTIVE',
+        VendorSubscription.end_date > now,
+    ).first()
+    if not sub:
+        return jsonify({"message": "No active subscription found"}), 404
+
+    plan_name = sub.plan.name if sub.plan else ""
+    if "LIFETIME" in plan_name:
+        return jsonify({"message": "Lifetime subscriptions cannot be cancelled"}), 400
+
+    sub.status = 'CANCELLED_PENDING_EXPIRY'
+    db.session.commit()
+    return jsonify({
+        "status": "success",
+        "message": "Subscription cancelled. You keep Pro access until your billing period ends.",
+    }), 200
