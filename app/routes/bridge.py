@@ -1167,6 +1167,59 @@ def paystack_webhook():
             )
             return jsonify({"status": "ok"}), 200
 
+        # ── PRO VERIFIED BADGE ────────────────────────────────────────────
+        # Pro Verified payments use reference prefix PRO-VER- and have
+        # metadata.type = 'pro_verified_subscription'
+        is_pro_verified_payment = (
+            reference.startswith('PRO-VER-')
+            or metadata.get('type') == 'pro_verified_subscription'
+        )
+
+        if is_pro_verified_payment and status == 'success':
+            storefront_id = metadata.get('storefront_id')
+            vendor_id     = metadata.get('vendor_id')
+            sf = None
+            if storefront_id:
+                from app.models.user import Storefront
+                sf = db.session.get(Storefront, int(storefront_id))
+            elif vendor_id:
+                from app.models.user import Storefront
+                sf = Storefront.query.filter_by(vendor_id=int(vendor_id)).first()
+            elif customer_email:
+                user_obj = User.query.filter_by(email=customer_email).first()
+                if user_obj:
+                    from app.models.user import Storefront
+                    sf = user_obj.storefront
+
+            if sf:
+                from dateutil.relativedelta import relativedelta
+                now_dt = _utcnow()
+                # Extend from existing expiry if still valid (allows early renewals)
+                base = sf.pro_verified_expires_at if (sf.pro_verified_expires_at and sf.pro_verified_expires_at > now_dt) else now_dt
+                sf.is_pro_verified        = True
+                sf.pro_verified_expires_at = base + relativedelta(years=1)
+                sf.verification_status    = 'VERIFIED'
+                db.session.commit()
+                logging.info(
+                    f'[PAYSTACK] Pro Verified activated for storefront {sf.id} '
+                    f'(vendor {sf.vendor_id}) — expires {sf.pro_verified_expires_at}'
+                )
+                # Notify vendor
+                from app.models.communication import Notification
+                db.session.add(Notification(
+                    user_id=sf.vendor_id,
+                    title="Pro Verified Badge Activated! ✅",
+                    message=(
+                        "Your store now has the Pro Verified badge. "
+                        "Buyers can see you are a verified seller on Siiqo."
+                    ),
+                    type="ACCOUNT",
+                ))
+                db.session.commit()
+            else:
+                logging.error(f'[PAYSTACK] Pro Verified payment {reference} — could not find storefront')
+            return jsonify({"status": "ok"}), 200
+
         # ── SUBSCRIPTION ───────────────────────────────────────────────────
         plan_code = (
             data.get('plan', {}).get('plan_code')
