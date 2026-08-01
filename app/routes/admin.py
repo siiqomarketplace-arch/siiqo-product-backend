@@ -278,11 +278,18 @@ def update_user_status(user_id):
 
     elif status == 'kyc_approved':
         # Stage 2: Admin approves submitted KYC (NIN/CAC). Grants the Verified badge.
+        # Also grants Pro Verified (is_pro_verified) at no charge — grandfathering
+        # vendors who verified before the paid Pro Verified system was introduced.
         user.is_verified = True
         user.is_active = True
         if user.storefront:
             user.storefront.is_verified = True
             user.storefront.verification_status = 'VERIFIED'
+            # Grandfather: give them Pro Verified badge for free (1 year)
+            from datetime import timedelta as _td
+            from datetime import datetime as _dt_kyc
+            user.storefront.is_pro_verified = True
+            user.storefront.pro_verified_expires_at = _dt_kyc.utcnow() + _td(days=365)
             try:
                 send_siiqo_email(
                     to_email=user.email,

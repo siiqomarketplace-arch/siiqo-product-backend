@@ -1753,7 +1753,7 @@ PLAN_CATALOGUE = [
         "tagline": "Get started for free",
         "features": [
             "1 storefront theme",
-            "Up to 5 products",
+            "Up to 10 products",
             "3 active Pay Links",
             "7-day analytics",
             "Siiqo escrow on all orders",

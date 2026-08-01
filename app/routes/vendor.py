@@ -573,6 +573,29 @@ def add_product():
     if not sf:
         return jsonify({"message": "Complete vendor onboarding first"}), 403
 
+    # ── FREE PLAN: 10-product lifetime limit ─────────────────────────────────
+    # Count ALL products ever created (including deleted/inactive) so vendors
+    # can't bypass the limit by deleting and re-listing.
+    from app.models.admin import VendorSubscription
+    from datetime import datetime as _dt_limit
+    _now_limit = _dt_limit.utcnow()
+    _active_sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == user.id,
+        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
+        VendorSubscription.end_date > _now_limit,
+    ).first()
+    _is_pro = _active_sub is not None
+
+    if not _is_pro:
+        _total_ever = Product.query.filter_by(storefront_id=sf.id).count()
+        if _total_ever >= 10:
+            return jsonify({
+                "message": "You've reached the 10-product limit on the free plan. Upgrade to Pro for unlimited listings and other premium features.",
+                "upgrade_required": True,
+                "code": "PRODUCT_LIMIT_REACHED",
+            }), 403
+    # ─────────────────────────────────────────────────────────────────────────
+
     data = request.form if request.form else (request.get_json() or {})
 
     # Accept both 'name' (AddProductModal) and 'product_name' (page.tsx handleSaveProduct)
