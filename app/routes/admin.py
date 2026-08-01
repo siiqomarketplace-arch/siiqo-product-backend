@@ -1968,3 +1968,123 @@ def admin_verify_pro_storefront(storefront_id):
         "message": f"Storefront #{sf.id} '{sf.store_name}' is now Pro Verified until {sf.pro_verified_expires_at.strftime('%Y-%m-%d')}.",
         "storefront": sf.to_public_dict()
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/storefronts/publish-all-approved
+# One-time action: publish + grant Pro Verified to all admin-approved storefronts.
+# Use this to activate all founding vendors at once.
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/storefronts/publish-all-approved', methods=['POST'])
+@jwt_required()
+def publish_all_approved_storefronts():
+    """
+    Bulk-activates all admin-approved storefronts that are not yet published.
+    For each storefront where is_verified=True:
+      - Sets is_published = True (makes store live on marketplace)
+      - Sets is_pro_verified = True (grants Pro Verified badge)
+      - Sets pro_verified_expires_at = now + 1 year
+      - Sends a founder notification email + in-app notification
+
+    Safe to call multiple times — already-published stores are skipped.
+    SuperAdmin only.
+    """
+    admin_id = get_jwt_identity()
+    if not _require_superadmin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from app.models.communication import Notification as _Notif
+    from app.utils.email import send_siiqo_email
+
+    now = _dt.now(_tz.utc)
+    pro_expiry = now + _td(days=365)
+
+    # Find all admin-approved storefronts
+    approved = Storefront.query.filter_by(is_verified=True).all()
+
+    published_count = 0
+    already_live_count = 0
+    email_sent_count = 0
+    errors = []
+
+    for sf in approved:
+        vendor = sf.vendor
+        if not vendor:
+            continue
+
+        was_already_live = sf.is_published
+
+        # Publish the store
+        sf.is_published = True
+
+        # Grant Pro Verified if not already active
+        if not sf.is_pro_verified or not sf.pro_verified_expires_at or sf.pro_verified_expires_at < now:
+            sf.is_pro_verified = True
+            sf.pro_verified_expires_at = pro_expiry
+
+        if not was_already_live:
+            published_count += 1
+            # Send in-app notification
+            db.session.add(_Notif(
+                user_id=vendor.id,
+                title="🎉 Your store is now LIVE!",
+                message=(
+                    f"Congratulations, {vendor.first_name or 'Vendor'}! "
+                    f"Your store '{sf.store_name}' is now live on Siiqo. "
+                    "As a founding vendor, you also have Pro Verified access for 1 year — at no charge."
+                ),
+                type="ACCOUNT",
+            ))
+            # Send email
+            try:
+                store_url = f"https://siiqo.com/{sf.store_slug}"
+                send_siiqo_email(
+                    to_email=vendor.email,
+                    subject="🎉 Your Siiqo Store Is Now Live — Founding Vendor Access",
+                    template_name="founder_store_live",
+                    first_name=vendor.first_name or "Vendor",
+                    store_name=sf.store_name,
+                    store_url=store_url,
+                )
+                email_sent_count += 1
+            except Exception as e:
+                errors.append(f"Email failed for {vendor.email}: {str(e)}")
+                logging.warning(f"[BULK PUBLISH] Email failed for storefront #{sf.id}: {e}")
+        else:
+            already_live_count += 1
+            # Still grant Pro Verified if they didn't have it
+            if not was_already_live:
+                pass  # notification already sent above
+            else:
+                # Grant Pro Verified silently if missing
+                pass
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"Database error: {str(e)}"}), 500
+
+    logging.info(
+        f"[BULK PUBLISH] Admin {admin_id} activated founders: "
+        f"published={published_count}, already_live={already_live_count}, "
+        f"emails_sent={email_sent_count}, errors={len(errors)}"
+    )
+
+    return jsonify({
+        "status": "success",
+        "summary": {
+            "total_approved_storefronts": len(approved),
+            "newly_published": published_count,
+            "already_live": already_live_count,
+            "emails_sent": email_sent_count,
+            "errors": errors,
+        },
+        "message": (
+            f"Done. {published_count} store(s) newly published and notified. "
+            f"{already_live_count} were already live. "
+            f"All approved vendors now have Pro Verified access for 1 year."
+        ),
+    }), 200
