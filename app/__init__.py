@@ -65,7 +65,42 @@ def create_app(config_name: str | None = None) -> Flask:
             for col_def in [
                 "ALTER TABLE logistics_assignments ADD COLUMN current_latitude NUMERIC(9, 6)",
                 "ALTER TABLE logistics_assignments ADD COLUMN current_longitude NUMERIC(9, 6)",
-                "ALTER TABLE logistics_assignments ADD COLUMN location_updated_at TIMESTAMP"
+                "ALTER TABLE logistics_assignments ADD COLUMN location_updated_at TIMESTAMP",
+                # ── Storefront engagement & onboarding tracking ──────────────────
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS is_pro_verified BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS pro_verified_expires_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS onboarding_emails_sent JSONB DEFAULT '{}'",
+                # ── Product view tracking ────────────────────────────────────────
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
+                # ── Invoice standalone billing columns ───────────────────────────
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(50)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_address TEXT",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS line_items JSONB",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10, 2)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS discount NUMERIC(10, 2)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(5, 2)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(10, 2)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS total NUMERIC(10, 2)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'NGN'",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes TEXT",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_link_token VARCHAR(100)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50)",
+                # ── Receipt standalone billing columns ──────────────────────────
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(50)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS line_items JSONB",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10, 2)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(10, 2)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS discount NUMERIC(10, 2)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS total NUMERIC(10, 2)",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'NGN'",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'Cash'",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS notes TEXT",
+                "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'paid'",
             ]:
                 try:
                     db.session.execute(_text(col_def))
