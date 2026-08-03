@@ -341,19 +341,18 @@ def pay_payment_link(link_id):
             from app.models.withdrawal import DayaPayment
             dp = DayaPayment(
                 order_id=new_order.id,
-                customer_id=str(customer_id),
-                funding_account_id=str(fa.get('id') or ''),
+                buyer_id=buyer_user.id,
+                payment_type=daya_type,
+                daya_funding_account_id=str(fa.get('id') or ''),
                 amount_ngn=float(amount),
-                amount_usd=amount_usd,
-                exchange_rate=rate,
+                rate=rate,
                 status='PENDING',
-                funding_type=daya_type,
                 bank_name=fa.get('bank_name') or fa.get('bankName'),
                 account_number=fa.get('account_number') or fa.get('accountNumber'),
                 account_name=fa.get('account_name') or fa.get('accountName'),
                 wallet_address=fa.get('address') or fa.get('walletAddress'),
                 network=fa.get('network'),
-                expires_at=None,
+                rate_expires_at=None,
             )
             db.session.add(dp)
             db.session.commit()
