@@ -317,46 +317,70 @@ def pay_payment_link(link_id):
         # Initiate Daya funding account
         try:
             from app.services import daya_service as _daya
-            daya_type = 'crypto_direct' if payment_method == 'crypto' else 'ngn_onramp'
-            rate_data = _daya.get_exchange_rate() or {}
-            rate = float(rate_data.get('data', {}).get('rate', 1500))
-            amount_usd = round(float(amount) / rate, 6)
+            import uuid as _uuid_mod
 
-            customer_data = _daya.create_or_get_customer(
+            # 1. Get a firm exchange rate
+            rate_data = _daya.get_rate(asset="USDT", side="BUY")
+            rate = float(rate_data.get("rate", 1500))
+            rate_id = rate_data.get("rate_id", "")
+            rate_expires_at = rate_data.get("expires_at")
+
+            # 2. Get or create Daya customer
+            customer_id = _daya.get_or_create_customer(
                 email=buyer_email,
                 first_name=buyer_user.first_name or buyer_name.split()[0],
                 last_name=buyer_user.last_name or (buyer_name.split()[1] if len(buyer_name.split()) > 1 else ''),
             )
-            customer_id = (customer_data.get('data') or {}).get('id') or (customer_data.get('data') or {}).get('customer_id')
 
-            funding_data = _daya.create_funding_account(
-                customer_id=str(customer_id),
-                amount_usd=amount_usd,
-                amount_ngn=float(amount),
-                order_id=str(new_order.id),
-                funding_type=daya_type,
-            )
-            fa = (funding_data.get('data') or {})
+            idempotency_key = f"paylink-{new_order.id}-{uuid.uuid4().hex[:8]}"
+
+            # 3. Create the funding account based on type
+            if daya_type == 'crypto_direct':
+                fa = _daya.create_crypto_funding_account(
+                    customer_id=str(customer_id),
+                    asset="USDT",
+                    network="TRC20",
+                    rate_id=rate_id,
+                    idempotency_key=idempotency_key,
+                )
+            else:
+                # NGN onramp — amount must be integer kobo equivalent
+                fa = _daya.create_ngn_funding_account(
+                    customer_id=str(customer_id),
+                    amount_ngn=int(float(amount)),
+                    rate_id=rate_id,
+                    idempotency_key=idempotency_key,
+                )
 
             from app.models.withdrawal import DayaPayment
+            from datetime import datetime as _dt_parse
+            expires_dt = None
+            if rate_expires_at:
+                try:
+                    expires_dt = _dt_parse.fromisoformat(str(rate_expires_at).replace('Z', '+00:00'))
+                except Exception:
+                    pass
+
             dp = DayaPayment(
                 order_id=new_order.id,
                 buyer_id=buyer_user.id,
                 payment_type=daya_type,
                 daya_funding_account_id=str(fa.get('id') or ''),
+                daya_rate_id=rate_id,
                 amount_ngn=float(amount),
                 rate=rate,
+                rate_expires_at=expires_dt,
                 status='PENDING',
                 bank_name=fa.get('bank_name') or fa.get('bankName'),
                 account_number=fa.get('account_number') or fa.get('accountNumber'),
                 account_name=fa.get('account_name') or fa.get('accountName'),
-                wallet_address=fa.get('address') or fa.get('walletAddress'),
-                network=fa.get('network'),
-                rate_expires_at=None,
+                wallet_address=fa.get('address') or fa.get('wallet_address') or fa.get('walletAddress'),
+                network=fa.get('chain') or fa.get('network'),
             )
             db.session.add(dp)
             db.session.commit()
 
+            amount_usd = round(float(amount) / rate, 6)
             return jsonify({
                 "success": True,
                 "payment_method": payment_method,
