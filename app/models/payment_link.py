@@ -13,6 +13,10 @@ class PaymentLink(db.Model):
     buyer_email = db.Column(db.String(120), nullable=True) # Pre-fill email for Invoice links
     status = db.Column(db.String(20), default='ACTIVE', nullable=False) # ACTIVE, PAID, EXPIRED
     slug = db.Column(db.String(100), unique=True, nullable=False)
+    # product_type: physical | digital | service — determines allowed payment methods
+    # physical → Daya only (bank transfer / crypto). NEVER Paystack.
+    # digital / service → Paystack (card) + Daya (bank transfer / crypto)
+    product_type = db.Column(db.String(20), default='service', nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     vendor = db.relationship('User', foreign_keys=[vendor_id])
@@ -28,5 +32,6 @@ class PaymentLink(db.Model):
             "buyer_email": self.buyer_email,
             "status": self.status,
             "slug": self.slug,
+            "product_type": self.product_type or "service",
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

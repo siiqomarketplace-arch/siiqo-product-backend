@@ -955,13 +955,27 @@ def get_partnerships():
             "id": p.id,
             "business_name": p.business_name,
             "service_type": p.service_type,
+            "partner_role": p.service_type,         # alias so frontend field names work
             "status": p.status,
             "state_of_operation": p.state_of_operation,
+            "experience_years": p.experience_years,
+            "portfolio_url": p.portfolio_url,
             "applied_at": p.applied_at.isoformat() if p.applied_at else None,
+            "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
+            # Bank payout details
+            "bank_name": p.account_name or "",
+            "account_number": p.account_number or "",
+            "account_name": p.account_name or "",
+            "bank_code": p.bank_code or "",
+            # Applicant contact — use both field name conventions so old + new frontend works
             "applicant": {
                 "name": p.user.full_name if p.user else "Unknown",
                 "email": p.user.email if p.user else "",
+                "phone": p.user.phone if p.user else "",
             },
+            "contact_email": p.user.email if p.user else "",
+            "contact_phone": p.user.phone if p.user else "",
+            "user_id": p.user.id if p.user else None,
         } for p in applications],
         "count": len(applications),
     }), 200

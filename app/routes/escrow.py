@@ -380,6 +380,27 @@ def initiate_escrow():
         if order.buyer_id != int(user_id):
             return jsonify({"message": "Unauthorized"}), 403
 
+    # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
+    # Paystack cannot hold escrow for physical products — vendor payout is via
+    # Daya using CBN bank codes, not Paystack recipient codes.
+    # Physical products MUST use CRYPTO (Daya) or POD. Block here at server level
+    # so this can never be bypassed regardless of what the frontend sends.
+    from app.models.order import OrderItem
+    from app.models.product import Product as _Prod
+    for order in orders:
+        for item in order.items:
+            p = db.session.get(_Prod, item.product_id) if item.product_id else item.product
+            p_type = (p.product_type if p else 'physical') or 'physical'
+            if p_type == 'physical':
+                return jsonify({
+                    "message": (
+                        "Paystack cannot be used for physical products. "
+                        "Please use Bank Transfer & Crypto (Daya) or Pay on Delivery instead."
+                    ),
+                    "code": "PAYSTACK_PHYSICAL_BLOCKED",
+                }), 400
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Validate bank accounts ONLY for Payscrow (physical orders)
     # Paystack handles digital/service orders and uses its own recipient API
     from app.models.withdrawal import VendorBankAccount

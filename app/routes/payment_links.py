@@ -48,6 +48,9 @@ def create_payment_link():
     amount_str = data.get('amount')
     link_type = (data.get('link_type') or 'PAY_LINK').upper()
     buyer_email = (data.get('buyer_email') or '').strip().lower()
+    product_type = (data.get('product_type') or 'service').lower()
+    if product_type not in ('physical', 'digital', 'service'):
+        product_type = 'service'
 
     if not title:
         return jsonify({"message": "Title is required"}), 400
@@ -83,6 +86,7 @@ def create_payment_link():
         buyer_email=buyer_email if buyer_email else None,
         status='ACTIVE',
         slug=slug,
+        product_type=product_type,
     )
 
     db.session.add(new_link)
@@ -182,6 +186,22 @@ def pay_payment_link(link_id):
     if not buyer_name or not buyer_email or not buyer_phone:
         return jsonify({"message": "buyer_name, buyer_email, and buyer_phone are required"}), 400
 
+    # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
+    # Pay Links for physical products must never route to Paystack.
+    # payment_method must be 'bank_transfer' or 'crypto' for physical links.
+    payment_method = (data.get('payment_method') or 'card').lower()
+    link_product_type = getattr(link, 'product_type', 'service') or 'service'
+
+    if link_product_type == 'physical' and payment_method == 'card':
+        return jsonify({
+            "message": (
+                "Card payment is not available for physical products. "
+                "Please use Bank Transfer or Crypto instead."
+            ),
+            "code": "PAYSTACK_PHYSICAL_BLOCKED",
+        }), 400
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Calculate final amount: use link amount, or custom amount if open link
     if link.amount:
         amount = Decimal(str(link.amount))
@@ -278,33 +298,116 @@ def pay_payment_link(link_id):
 
     # Initiate payment gateway transaction
     from app.services.escrow import get_escrow_provider
-    provider = get_escrow_provider()
 
-    result = provider.initiate_transaction([new_order], return_url=return_url)
-    if not result.get("success"):
-        db.session.rollback()
-        return jsonify({"message": result.get("error_message") or "Payment gateway initialization failed"}), 400
+    if payment_method in ('bank_transfer', 'crypto'):
+        # ── DAYA path ─────────────────────────────────────────────────────────
+        # Create order and escrow first, then initiate Daya funding account
+        new_order.payment_method = 'CRYPTO'
+        new_escrow = EscrowTransaction(
+            order_id=new_order.id,
+            transaction_number=f"ESC-{uuid.uuid4().hex[:12].upper()}",
+            status=EscrowStatus.PENDING_PAYMENT,
+            amount=float(amount),
+            fee_percent=fee_percent,
+            fee_amount=float(fee_amount),
+        )
+        db.session.add(new_escrow)
+        db.session.commit()
 
-    # Save local EscrowTransaction details
-    new_escrow = EscrowTransaction(
-        order_id=new_order.id,
-        transaction_number=result['transaction_number'],
-        status=EscrowStatus.PENDING_PAYMENT,
-        amount=float(amount),
-        fee_percent=fee_percent,
-        fee_amount=float(fee_amount),
-        payment_link=result['payment_link'],
-        payscrow_transaction_id=result['provider_transaction_id'],
-        payscrow_ref=result['provider_reference'],
-    )
-    db.session.add(new_escrow)
-    db.session.commit()
+        # Initiate Daya funding account
+        try:
+            from app.services import daya_service as _daya
+            daya_type = 'crypto_direct' if payment_method == 'crypto' else 'ngn_onramp'
+            rate_data = _daya.get_exchange_rate() or {}
+            rate = float(rate_data.get('data', {}).get('rate', 1500))
+            amount_usd = round(float(amount) / rate, 6)
 
-    return jsonify({
-        "success": True,
-        "paymentLink": result.get('payment_link'),
-        "transactionNumber": result.get('transaction_number'),
-        "amount": str(amount),
-        "status": EscrowStatus.PENDING_PAYMENT,
-        "order_id": new_order.id,
-    }), 200
+            customer_data = _daya.create_or_get_customer(
+                email=buyer_email,
+                first_name=buyer_user.first_name or buyer_name.split()[0],
+                last_name=buyer_user.last_name or (buyer_name.split()[1] if len(buyer_name.split()) > 1 else ''),
+            )
+            customer_id = (customer_data.get('data') or {}).get('id') or (customer_data.get('data') or {}).get('customer_id')
+
+            funding_data = _daya.create_funding_account(
+                customer_id=str(customer_id),
+                amount_usd=amount_usd,
+                amount_ngn=float(amount),
+                order_id=str(new_order.id),
+                funding_type=daya_type,
+            )
+            fa = (funding_data.get('data') or {})
+
+            from app.models.withdrawal import DayaPayment
+            dp = DayaPayment(
+                order_id=new_order.id,
+                customer_id=str(customer_id),
+                funding_account_id=str(fa.get('id') or ''),
+                amount_ngn=float(amount),
+                amount_usd=amount_usd,
+                exchange_rate=rate,
+                status='PENDING',
+                funding_type=daya_type,
+                bank_name=fa.get('bank_name') or fa.get('bankName'),
+                account_number=fa.get('account_number') or fa.get('accountNumber'),
+                account_name=fa.get('account_name') or fa.get('accountName'),
+                wallet_address=fa.get('address') or fa.get('walletAddress'),
+                network=fa.get('network'),
+                expires_at=None,
+            )
+            db.session.add(dp)
+            db.session.commit()
+
+            return jsonify({
+                "success": True,
+                "payment_method": payment_method,
+                "order_id": new_order.id,
+                "amount": str(amount),
+                "daya": {
+                    "bank_name": dp.bank_name,
+                    "account_number": dp.account_number,
+                    "account_name": dp.account_name,
+                    "wallet_address": dp.wallet_address,
+                    "network": dp.network,
+                    "amount_ngn": float(amount),
+                    "amount_usd": amount_usd,
+                    "funding_type": daya_type,
+                },
+                "status": EscrowStatus.PENDING_PAYMENT,
+            }), 200
+
+        except Exception as e:
+            logging.error(f"[PAYLINK DAYA] Failed to create Daya funding account: {e}")
+            db.session.rollback()
+            return jsonify({"message": f"Payment gateway error: {str(e)}"}), 503
+
+    else:
+        # ── PAYSTACK / CARD path (digital + service only) ──────────────────────
+        provider = get_escrow_provider()
+        result = provider.initiate_transaction([new_order], return_url=return_url)
+        if not result.get("success"):
+            db.session.rollback()
+            return jsonify({"message": result.get("error_message") or "Payment gateway initialization failed"}), 400
+
+        new_escrow = EscrowTransaction(
+            order_id=new_order.id,
+            transaction_number=result['transaction_number'],
+            status=EscrowStatus.PENDING_PAYMENT,
+            amount=float(amount),
+            fee_percent=fee_percent,
+            fee_amount=float(fee_amount),
+            payment_link=result['payment_link'],
+            payscrow_transaction_id=result['provider_transaction_id'],
+            payscrow_ref=result['provider_reference'],
+        )
+        db.session.add(new_escrow)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "paymentLink": result.get('payment_link'),
+            "transactionNumber": result.get('transaction_number'),
+            "amount": str(amount),
+            "status": EscrowStatus.PENDING_PAYMENT,
+            "order_id": new_order.id,
+        }), 200

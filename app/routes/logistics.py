@@ -25,9 +25,27 @@ def _utcnow():
 # ---------------------------------------------------------------------------
 
 @logistics_bp.route('/settings', methods=['GET', 'POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def vendor_logistics_settings():
+    # Allow buyer-side fetch with ?vendor_id=X (no auth needed)
+    vendor_id_param = request.args.get('vendor_id')
+    if vendor_id_param and request.method == 'GET':
+        try:
+            from app.models.user import Storefront
+            sf = Storefront.query.filter_by(vendor_id=int(vendor_id_param)).first()
+            if sf:
+                return jsonify({
+                    "enabled_logistics": sf.logistics_settings or [],
+                    "store_city": sf.city,
+                    "store_state": sf.state,
+                }), 200
+        except Exception:
+            pass
+        return jsonify({"enabled_logistics": [], "store_city": None, "store_state": None}), 200
+
     user_id = get_jwt_identity()
+    if not user_id:
+        return jsonify({"message": "Authentication required"}), 401
     user = db.session.get(User, int(user_id))
     if not user or not user.storefront:
         return jsonify({"message": "Vendor storefront required"}), 403
@@ -59,6 +77,8 @@ def vendor_logistics_settings():
 def get_active_partners():
     role_filter = (request.args.get('role') or 'LOGISTICS').upper()
     state_filter = (request.args.get('state') or '').strip()
+    # vendor_id param allows buyer-side logistics fetch without auth
+    vendor_id_param = request.args.get('vendor_id')
 
     partners = User.query.filter_by(role=UserRole.PARTNER, is_verified=True).all()
     partner_data = []
@@ -69,9 +89,14 @@ def get_active_partners():
 
         if role_filter and service_type != role_filter:
             continue
+
+        # Filter by buyer/vendor state if provided — match against partner's state_of_operation
+        # Previously used a hardcoded DISPATCH_ACTIVE_STATES list which excluded most of Nigeria.
+        # Now we match dynamically: if state_filter provided, check partner covers that state.
         if state_filter and app and app.state_of_operation:
             if state_filter.lower() not in app.state_of_operation.lower():
                 continue
+        # If no state_filter, show all approved partners for that role
 
         # Retrieve pricing settings or use sensible defaults
         pricing = app.pricing_settings if app and app.pricing_settings else {}

@@ -73,6 +73,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS onboarding_emails_sent JSONB DEFAULT '{}'",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
+                # ── Payment link product type ────────────────────────────────────
+                "ALTER TABLE payment_links ADD COLUMN IF NOT EXISTS product_type VARCHAR(20) DEFAULT 'service'",
                 # ── Invoice standalone billing columns ───────────────────────────
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255)",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255)",

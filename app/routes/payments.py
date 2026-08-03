@@ -596,6 +596,24 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             _payout_vendor_via_daya(order, escrow)
 
         if not is_digital and not is_service:
+            # Physical order — create or activate the LogisticsAssignment
+            from app.models.escrow import LogisticsAssignment
+            assignment = LogisticsAssignment.query.filter_by(order_id=order_id).first()
+            if assignment:
+                # Assignment was pre-created at checkout — activate it now
+                if assignment.status == 'PENDING':
+                    assignment.status = 'ASSIGNED'
+                    assignment.assigned_at = _utcnow()
+                    db.session.add(Notification(
+                        user_id=assignment.partner_id,
+                        title="New Delivery Assignment",
+                        message=(
+                            f"New delivery for Order #{order_id}. "
+                            f"Fee: ₦{float(assignment.delivery_fee):,.2f}."
+                        ),
+                        type="DELIVERY",
+                        order_id=order_id,
+                    ))
             db.session.add(Notification(
                 user_id=order.vendor_id,
                 title="Crypto Payment Received",
