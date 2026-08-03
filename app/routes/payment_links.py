@@ -301,6 +301,7 @@ def pay_payment_link(link_id):
 
     if payment_method in ('bank_transfer', 'crypto'):
         # ── DAYA path ─────────────────────────────────────────────────────────
+        daya_type = 'crypto_direct' if payment_method == 'crypto' else 'ngn_onramp'
         # Create order and escrow first, then initiate Daya funding account
         new_order.payment_method = 'CRYPTO'
         new_escrow = EscrowTransaction(
@@ -317,7 +318,6 @@ def pay_payment_link(link_id):
         # Initiate Daya funding account
         try:
             from app.services import daya_service as _daya
-            import uuid as _uuid_mod
 
             # 1. Get a firm exchange rate
             rate_data = _daya.get_rate(asset="USDT", side="BUY")
