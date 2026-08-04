@@ -313,10 +313,13 @@ def _build_initiate_response(dp: DayaPayment):
 # ===========================================================================
 
 @payments_bp.route("/daya/status", methods=["GET"])
-@jwt_required()
+@jwt_required(optional=True)
 def daya_status():
-    """Poll the Daya deposit status for an order."""
-    buyer_user_id = int(get_jwt_identity())
+    """Poll the Daya deposit status for an order.
+    Works with or without authentication — Pay Link buyers are guests (no token).
+    When authenticated, validates buyer ownership. When guest, uses order_id only.
+    """
+    buyer_user_id = get_jwt_identity()
     order_id_str  = request.args.get("order_id", "")
 
     try:
@@ -327,7 +330,9 @@ def daya_status():
     dp = DayaPayment.query.filter_by(order_id=order_id).first()
     if not dp:
         return jsonify({"message": "No crypto payment found for this order"}), 404
-    if dp.buyer_id != buyer_user_id:
+
+    # Only enforce ownership check when buyer is authenticated
+    if buyer_user_id and dp.buyer_id != int(buyer_user_id):
         return jsonify({"message": "Unauthorized"}), 403
 
     if dp.status in ("COMPLETED", "FAILED"):

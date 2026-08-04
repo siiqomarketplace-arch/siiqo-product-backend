@@ -381,11 +381,13 @@ def pay_payment_link(link_id):
             db.session.commit()
 
             amount_usd = round(float(amount) / rate, 6)
+            logging.info(f"[PAYLINK DAYA] Raw fa response: {fa}")
             return jsonify({
                 "success": True,
                 "payment_method": payment_method,
                 "order_id": new_order.id,
                 "amount": str(amount),
+                "_debug_fa": fa,
                 "daya": {
                     "bank_name": dp.bank_name,
                     "account_number": dp.account_number,
