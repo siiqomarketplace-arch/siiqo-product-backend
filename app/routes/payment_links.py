@@ -361,6 +361,9 @@ def pay_payment_link(link_id):
                 except Exception:
                     pass
 
+            # Bank/wallet details are nested under fa["instructions"][0]
+            instructions = fa.get("instructions", [{}])[0]
+
             dp = DayaPayment(
                 order_id=new_order.id,
                 buyer_id=buyer_user.id,
@@ -371,23 +374,21 @@ def pay_payment_link(link_id):
                 rate=rate,
                 rate_expires_at=expires_dt,
                 status='PENDING',
-                bank_name=fa.get('bank_name') or fa.get('bankName'),
-                account_number=fa.get('account_number') or fa.get('accountNumber'),
-                account_name=fa.get('account_name') or fa.get('accountName'),
-                wallet_address=fa.get('address') or fa.get('wallet_address') or fa.get('walletAddress'),
-                network=fa.get('chain') or fa.get('network'),
+                bank_name=instructions.get('bank_name'),
+                account_number=instructions.get('account_number'),
+                account_name=instructions.get('account_name'),
+                wallet_address=instructions.get('address') or instructions.get('wallet_address'),
+                network=instructions.get('network') or fa.get('chain') or fa.get('network'),
             )
             db.session.add(dp)
             db.session.commit()
 
             amount_usd = round(float(amount) / rate, 6)
-            logging.info(f"[PAYLINK DAYA] Raw fa response: {fa}")
             return jsonify({
                 "success": True,
                 "payment_method": payment_method,
                 "order_id": new_order.id,
                 "amount": str(amount),
-                "_debug_fa": fa,
                 "daya": {
                     "bank_name": dp.bank_name,
                     "account_number": dp.account_number,
