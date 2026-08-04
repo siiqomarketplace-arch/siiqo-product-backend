@@ -320,7 +320,9 @@ def pay_payment_link(link_id):
             from app.services import daya_service as _daya
 
             # 1. Get a firm exchange rate
-            rate_data = _daya.get_rate(asset="USDT", side="BUY")
+            # NGN onramp: BUY (NGN→USDT), crypto_direct: SELL (USDT→NGN)
+            rate_side = "SELL" if daya_type == 'crypto_direct' else "BUY"
+            rate_data = _daya.get_rate(asset="USDT", side=rate_side)
             rate = float(rate_data.get("rate", 1500))
             rate_id = rate_data.get("rate_id", "")
             rate_expires_at = rate_data.get("expires_at")
@@ -332,7 +334,7 @@ def pay_payment_link(link_id):
                 last_name=buyer_user.last_name or (buyer_name.split()[1] if len(buyer_name.split()) > 1 else ''),
             )
 
-            idempotency_key = f"paylink-{new_order.id}-{uuid.uuid4().hex[:8]}"
+            idempotency_key = f"paylink-{new_order.id}-{daya_type}"
 
             # 3. Create the funding account based on type
             if daya_type == 'crypto_direct':
@@ -344,13 +346,19 @@ def pay_payment_link(link_id):
                     idempotency_key=idempotency_key,
                 )
             else:
-                # NGN onramp — amount must be integer kobo equivalent
+                # NGN onramp — Daya returns the exact NGN amount buyer must send
                 fa = _daya.create_ngn_funding_account(
                     customer_id=str(customer_id),
                     amount_ngn=int(float(amount)),
                     rate_id=rate_id,
                     idempotency_key=idempotency_key,
                 )
+                # Use Daya's returned amount — may differ due to processing margin
+                daya_amount = fa.get("amount")
+                if daya_amount:
+                    daya_amount_ngn = float(daya_amount)
+                else:
+                    daya_amount_ngn = float(amount)
 
             from app.models.withdrawal import DayaPayment
             from datetime import datetime as _dt_parse
@@ -363,6 +371,11 @@ def pay_payment_link(link_id):
 
             # Bank/wallet details are nested under fa["instructions"][0]
             instructions = fa.get("instructions", [{}])[0]
+            # For crypto path, amount_ngn stays as the vendor set it
+            if daya_type == 'ngn_onramp':
+                final_amount_ngn = daya_amount_ngn
+            else:
+                final_amount_ngn = float(amount)
 
             dp = DayaPayment(
                 order_id=new_order.id,
@@ -370,7 +383,7 @@ def pay_payment_link(link_id):
                 payment_type=daya_type,
                 daya_funding_account_id=str(fa.get('id') or ''),
                 daya_rate_id=rate_id,
-                amount_ngn=float(amount),
+                amount_ngn=final_amount_ngn,
                 rate=rate,
                 rate_expires_at=expires_dt,
                 status='PENDING',
@@ -383,7 +396,7 @@ def pay_payment_link(link_id):
             db.session.add(dp)
             db.session.commit()
 
-            amount_usd = round(float(amount) / rate, 6)
+            amount_usd = round(final_amount_ngn / rate, 6)
             return jsonify({
                 "success": True,
                 "payment_method": payment_method,
@@ -395,7 +408,7 @@ def pay_payment_link(link_id):
                     "account_name": dp.account_name,
                     "wallet_address": dp.wallet_address,
                     "network": dp.network,
-                    "amount_ngn": float(amount),
+                    "amount_ngn": final_amount_ngn,
                     "amount_usd": amount_usd,
                     "funding_type": daya_type,
                 },
@@ -409,8 +422,16 @@ def pay_payment_link(link_id):
 
     else:
         # ── PAYSTACK / CARD path (digital + service only) ──────────────────────
+        new_order.payment_method = 'ESCROW'
+        # Use a PL- prefixed reference so the webhook can identify Pay Link orders
+        import uuid as _pl_uuid
+        pl_txn_ref = f"PL-{new_order.id}-{_pl_uuid.uuid4().hex[:8].upper()}"
         provider = get_escrow_provider()
-        result = provider.initiate_transaction([new_order], return_url=return_url)
+        result = provider.initiate_transaction(
+            [new_order],
+            existing_txn_number=pl_txn_ref,
+            return_url=return_url,
+        )
         if not result.get("success"):
             db.session.rollback()
             return jsonify({"message": result.get("error_message") or "Payment gateway initialization failed"}), 400

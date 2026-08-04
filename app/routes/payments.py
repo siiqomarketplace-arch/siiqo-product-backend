@@ -594,6 +594,60 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         if not is_digital:
             is_service = _deliver_service_products(order, escrow)
 
+        # ── Pay Link orders: product_id=None so _deliver_* return False.
+        # Detect product type from the linked PaymentLink instead.
+        if not is_digital and not is_service and order.payment_link_id:
+            from app.models.payment_link import PaymentLink as _PL
+            _link = db.session.get(_PL, order.payment_link_id)
+            _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
+            if _ltype == 'digital':
+                # Digital Pay Link — release immediately, credit vendor
+                fee_rate = 0.054 if (order.vendor and order.vendor.storefront and order.vendor.storefront.is_pro_verified) else 0.06
+                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                escrow.status = EscrowStatus.RELEASED
+                escrow.released_at = _utcnow()
+                order.status = 'COMPLETED'
+                if _link: _link.status = 'PAID'
+                _payout_vendor_via_daya(order, escrow)
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Payment Complete",
+                    message=f"Your payment for Order #{order_id} is confirmed. The vendor has been notified.",
+                    type="ORDER", order_id=order_id,
+                ))
+                db.session.add(Notification(
+                    user_id=order.vendor_id,
+                    title="Digital Sale Complete",
+                    message=f"Order #{order_id} paid. ₦{net_amount:,.2f} credited.",
+                    type="ESCROW", order_id=order_id,
+                ))
+                is_digital = True
+            elif _ltype == 'service':
+                # Service Pay Link — release immediately
+                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                escrow.status = EscrowStatus.RELEASED
+                escrow.released_at = _utcnow()
+                order.status = 'COMPLETED'
+                if _link: _link.status = 'PAID'
+                _payout_vendor_via_daya(order, escrow)
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Payment Complete",
+                    message=f"Your payment for Order #{order_id} is confirmed.",
+                    type="ORDER", order_id=order_id,
+                ))
+                db.session.add(Notification(
+                    user_id=order.vendor_id,
+                    title="Service Sale Complete",
+                    message=f"Order #{order_id} paid. ₦{net_amount:,.2f} credited.",
+                    type="ESCROW", order_id=order_id,
+                ))
+                is_service = True
+            # else: physical Pay Link — falls through to hold-in-escrow logic below
+            # Mark INVOICE as PAID regardless of product type once payment confirmed
+            if _link and _link.link_type == 'INVOICE' and not is_digital and not is_service:
+                _link.status = 'PAID'
+
         # ── Vendor payout via Daya for digital/service orders ─────────────
         # For physical orders, payout happens when buyer confirms delivery.
         # For digital/service, payout is immediate (same as Paystack flow).

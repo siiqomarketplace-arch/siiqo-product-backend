@@ -1042,6 +1042,63 @@ def paystack_webhook():
             and metadata.get('source') == 'marketplace_checkout'
         )
 
+        # ── PAY LINK CARD ORDER (PL- prefixed reference) ───────────────────
+        # Paystack card payments for Pay Links have reference starting with PL-{order_id}-
+        is_paylink_order = reference.startswith('PL-') and status == 'success'
+
+        if is_paylink_order:
+            from app.models.order import Order
+            from app.models.escrow import EscrowTransaction, EscrowStatus
+            from app.models.communication import Notification
+            from app.models.payment_link import PaymentLink
+
+            # Extract order_id from reference: PL-{order_id}-{hex}
+            try:
+                pl_order_id = int(reference.split('-')[1])
+            except (IndexError, ValueError):
+                pl_order_id = None
+
+            if pl_order_id:
+                pl_order = db.session.get(Order, pl_order_id)
+                if pl_order and pl_order.status == 'PENDING':
+                    pl_escrow = EscrowTransaction.query.filter_by(
+                        order_id=pl_order.id, status=EscrowStatus.PENDING_PAYMENT
+                    ).first()
+                    if pl_escrow:
+                        pl_escrow.status = EscrowStatus.IN_ESCROW
+                        pl_escrow.paid_at = _utcnow()
+                        pl_escrow.payscrow_transaction_id = reference
+                        pl_order.status = 'PAID'
+                        db.session.flush()
+
+                        link = db.session.get(PaymentLink, pl_order.payment_link_id) if pl_order.payment_link_id else None
+                        link_ptype = getattr(link, 'product_type', 'service') or 'service'
+
+                        if link_ptype in ('digital', 'service'):
+                            from app.routes.escrow import _deliver_digital_products, _deliver_service_products
+                            if not _deliver_digital_products(pl_order, pl_escrow):
+                                _deliver_service_products(pl_order, pl_escrow)
+                            if link and link.link_type == 'INVOICE':
+                                link.status = 'PAID'
+                        else:
+                            db.session.add(Notification(
+                                user_id=pl_order.vendor_id,
+                                title="Pay Link Order Paid",
+                                message=f"Order #{pl_order.id} via Pay Link has been paid. Prepare for delivery.",
+                                type="ESCROW", order_id=pl_order.id,
+                            ))
+                            db.session.add(Notification(
+                                user_id=pl_order.buyer_id,
+                                title="Payment Confirmed",
+                                message=f"Your payment for Order #{pl_order.id} is confirmed and held in escrow.",
+                                type="ORDER", order_id=pl_order.id,
+                            ))
+
+                        db.session.commit()
+                        logging.info(f"[PAYSTACK WEBHOOK] Pay Link order #{pl_order.id} activated ref={reference}")
+            return jsonify({"status": "ok"}), 200
+        # ───────────────────────────────────────────────────────────────────
+
         if is_marketplace_order and status == 'success' and reference:
             from app.models.order import Order
             from app.models.escrow import EscrowTransaction, EscrowStatus
