@@ -360,27 +360,88 @@ def delete_user_admin(user_id):
         from app.models.escrow import EscrowTransaction as ET
         from app.models.order import Order, OrderItem
         from app.models.trust import VendorTrustProfile, TrustScoreHistory
+        from app.models.withdrawal import VendorBankAccount, Withdrawal, PODPayment, VendorCryptoWallet, DayaPayment
+        from app.models.payment_link import PaymentLink
+        from app.models.social import Post, PostLike, PostComment, Follow, PostView, UserActivity
+        from app.models.communication import Notification, Message
+        from app.models.finance import Invoice, Receipt, Ledger, SalesRecord
+        from app.models.admin import VendorSubscription, SponsoredListing, Favorite
+        from app.models.partnerships import PartnerProfile, Referral, PartnerStaff
+        from app.models.community import Review
 
-        # 1. Delete trust score history and trust profile (NOT NULL vendor_id constraint)
-        TrustScoreHistory.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
-        VendorTrustProfile.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+        uid = user.id
 
-        # 2. Delete escrow transactions linked to user's orders
+        # ── 1. Trust ──────────────────────────────────────────────────
+        TrustScoreHistory.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        VendorTrustProfile.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+
+        # ── 2. Social ─────────────────────────────────────────────────
+        UserActivity.query.filter_by(user_id=uid).delete(synchronize_session=False)
+        Follow.query.filter(
+            (Follow.follower_id == uid) | (Follow.following_id == uid)
+        ).delete(synchronize_session=False)
+        PostView.query.filter_by(user_id=uid).delete(synchronize_session=False)
+        PostLike.query.filter_by(user_id=uid).delete(synchronize_session=False)
+        PostComment.query.filter_by(user_id=uid).delete(synchronize_session=False)
+        Post.query.filter_by(user_id=uid).delete(synchronize_session=False)
+
+        # ── 3. Notifications & Messages ───────────────────────────────
+        Notification.query.filter_by(user_id=uid).delete(synchronize_session=False)
+        Message.query.filter(
+            (Message.sender_id == uid) | (Message.receiver_id == uid)
+        ).delete(synchronize_session=False)
+
+        # ── 4. Reviews ────────────────────────────────────────────────
+        Review.query.filter(
+            (Review.vendor_id == uid) | (Review.buyer_id == uid)
+        ).delete(synchronize_session=False)
+
+        # ── 5. Finance ────────────────────────────────────────────────
+        Invoice.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        Receipt.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        Ledger.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        SalesRecord.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+
+        # ── 6. Payment links ──────────────────────────────────────────
+        PaymentLink.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+
+        # ── 7. Withdrawals & bank accounts ────────────────────────────
+        Withdrawal.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        VendorBankAccount.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        VendorCryptoWallet.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        DayaPayment.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+
+        # ── 8. Subscriptions & sponsored listings & favorites ─────────
+        VendorSubscription.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        SponsoredListing.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        Favorite.query.filter_by(user_id=uid).delete(synchronize_session=False)
+
+        # ── 9. Partnerships & referrals ───────────────────────────────
+        Referral.query.filter(
+            (Referral.referrer_id == uid) | (Referral.referred_id == uid)
+        ).delete(synchronize_session=False)
+        try:
+            PartnerStaff.query.filter_by(partner_id=uid).delete(synchronize_session=False)
+            PartnerProfile.query.filter_by(user_id=uid).delete(synchronize_session=False)
+        except Exception:
+            pass
+
+        # ── 10. Orders & escrow ───────────────────────────────────────
         orders = Order.query.filter(
-            (Order.buyer_id == user.id) | (Order.vendor_id == user.id)
+            (Order.buyer_id == uid) | (Order.vendor_id == uid)
         ).all()
         for order in orders:
             ET.query.filter_by(order_id=order.id).delete(synchronize_session=False)
             OrderItem.query.filter_by(order_id=order.id).delete(synchronize_session=False)
             db.session.delete(order)
 
-        # 3. Delete products and storefront
+        # ── 11. Products & storefront ─────────────────────────────────
         if user.storefront:
             from app.models.product import Product
             Product.query.filter_by(storefront_id=user.storefront.id).delete(synchronize_session=False)
             db.session.delete(user.storefront)
 
-        # 4. Delete the user
+        # ── 12. Delete user ───────────────────────────────────────────
         db.session.delete(user)
         db.session.commit()
         return jsonify({"message": f"User {user.email} and all data deleted."}), 200
