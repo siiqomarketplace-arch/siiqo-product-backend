@@ -364,7 +364,7 @@ def delete_user_admin(user_id):
         from app.models.payment_link import PaymentLink
         from app.models.social import Post, PostLike, PostComment, Follow, PostView, UserActivity
         from app.models.communication import Notification, Message
-        from app.models.finance import Invoice, Receipt, Ledger, SalesRecord
+        from app.models.finance import Invoice, Receipt, Ledger
         from app.models.admin import VendorSubscription, SponsoredListing, Favorite
         from app.models.partnerships import PartnerProfile, Referral, PartnerStaff
         from app.models.community import Review
@@ -400,7 +400,6 @@ def delete_user_admin(user_id):
         Invoice.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
         Receipt.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
         Ledger.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        SalesRecord.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
 
         # ── 6. Payment links ──────────────────────────────────────────
         PaymentLink.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
