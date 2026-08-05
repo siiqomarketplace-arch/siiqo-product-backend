@@ -366,7 +366,7 @@ def delete_user_admin(user_id):
         from app.models.communication import Notification, Message
         from app.models.finance import Invoice, Receipt, Ledger
         from app.models.admin import VendorSubscription, SponsoredListing, Favorite
-        from app.models.partnerships import PartnerProfile, Referral, PartnerStaff
+        from app.models.partnerships import PartnerApplication, Referral, PartnerStaff
         from app.models.community import Review
 
         uid = user.id
@@ -419,11 +419,8 @@ def delete_user_admin(user_id):
         Referral.query.filter(
             (Referral.referrer_id == uid) | (Referral.referred_id == uid)
         ).delete(synchronize_session=False)
-        try:
-            PartnerStaff.query.filter_by(partner_id=uid).delete(synchronize_session=False)
-            PartnerProfile.query.filter_by(user_id=uid).delete(synchronize_session=False)
-        except Exception:
-            pass
+        PartnerStaff.query.filter_by(partner_id=uid).delete(synchronize_session=False)
+        PartnerApplication.query.filter_by(user_id=uid).delete(synchronize_session=False)
 
         # ── 10. Orders & escrow ───────────────────────────────────────
         orders = Order.query.filter(
