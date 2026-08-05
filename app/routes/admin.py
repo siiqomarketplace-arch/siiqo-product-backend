@@ -408,7 +408,7 @@ def delete_user_admin(user_id):
         Withdrawal.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
         VendorBankAccount.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
         VendorCryptoWallet.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        DayaPayment.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+        DayaPayment.query.filter_by(buyer_id=uid).delete(synchronize_session=False)
 
         # ── 8. Subscriptions & sponsored listings & favorites ─────────
         VendorSubscription.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
