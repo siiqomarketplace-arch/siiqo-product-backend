@@ -339,6 +339,11 @@ def onboard_vendor():
         website=data.get('website'),
         cac_reg=data.get('cac_reg'),
         account_type=data.get('account_type', 'INDIVIDUAL'),
+        # Auto-publish so vendor's store is immediately visible to them.
+        # Admin approval (is_verified) is still required before the store
+        # appears on the public marketplace — but the vendor can browse
+        # their own store and share Pay Links right away.
+        is_published=True,
     )
 
     if 'nin' in data:
