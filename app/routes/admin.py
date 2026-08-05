@@ -359,8 +359,13 @@ def delete_user_admin(user_id):
     try:
         from app.models.escrow import EscrowTransaction as ET
         from app.models.order import Order, OrderItem
+        from app.models.trust import VendorTrustProfile, TrustScoreHistory
 
-        # Delete escrow transactions linked to user's orders
+        # 1. Delete trust score history and trust profile (NOT NULL vendor_id constraint)
+        TrustScoreHistory.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+        VendorTrustProfile.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+
+        # 2. Delete escrow transactions linked to user's orders
         orders = Order.query.filter(
             (Order.buyer_id == user.id) | (Order.vendor_id == user.id)
         ).all()
@@ -369,12 +374,13 @@ def delete_user_admin(user_id):
             OrderItem.query.filter_by(order_id=order.id).delete(synchronize_session=False)
             db.session.delete(order)
 
-        # Delete products
+        # 3. Delete products and storefront
         if user.storefront:
             from app.models.product import Product
             Product.query.filter_by(storefront_id=user.storefront.id).delete(synchronize_session=False)
             db.session.delete(user.storefront)
 
+        # 4. Delete the user
         db.session.delete(user)
         db.session.commit()
         return jsonify({"message": f"User {user.email} and all data deleted."}), 200
