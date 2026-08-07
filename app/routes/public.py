@@ -430,9 +430,11 @@ def get_articles():
             "title": a.title,
             "slug": a.slug,
             "category": a.category,
-            "excerpt": a.excerpt or (a.content[:150] + "..." if len(a.content) > 150 else a.content),
+            "excerpt": a.excerpt or (a.content[:150] + "..." if a.content and len(a.content) > 150 else (a.content or "")),
             "cover_image": a.cover_image,
             "created_at": a.created_at.isoformat() if a.created_at else None,
+            # Calculate read time from full content so cards show accurate time
+            "read_time": max(1, round(len((a.content or "").split()) / 200)) if a.content else None,
         } for a in paginated.items],
         "total": paginated.total,
         "pages": paginated.pages,
