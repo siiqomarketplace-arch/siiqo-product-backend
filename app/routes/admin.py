@@ -1185,10 +1185,10 @@ def handle_blog():
     return jsonify({"message": "Article created.", "id": new_article.id, "slug": new_article.slug}), 201
 
 
-@admin_bp.route('/blog/<int:article_id>', methods=['PATCH', 'DELETE'])
+@admin_bp.route('/blog/<int:article_id>', methods=['GET', 'PATCH', 'DELETE'])
 @jwt_required()
 def manage_blog_article(article_id):
-    """Edit or delete a specific blog article by ID."""
+    """Get, edit, or delete a specific blog article by ID."""
     admin_id = get_jwt_identity()
     parsed_id = _parse_admin_id(admin_id)
     if not _require_superadmin(parsed_id):
@@ -1197,6 +1197,23 @@ def manage_blog_article(article_id):
     article = db.session.get(Article, article_id)
     if not article:
         return jsonify({"message": "Article not found"}), 404
+
+    if request.method == 'GET':
+        # Return full article details for editing
+        return jsonify({
+            "id": article.id,
+            "title": article.title,
+            "slug": article.slug,
+            "content": article.content,
+            "category": article.category,
+            "excerpt": article.excerpt,
+            "cover_image": article.cover_image,
+            "is_published": article.is_published,
+            "status": "published" if article.is_published else "draft",
+            "meta_title": article.meta_title,
+            "meta_description": article.meta_description,
+            "created_at": article.created_at.isoformat() if article.created_at else None,
+        }), 200
 
     if request.method == 'DELETE':
         db.session.delete(article)
