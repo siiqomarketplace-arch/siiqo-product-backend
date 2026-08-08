@@ -11,6 +11,45 @@ from app.middleware.security import limiter
 grants_migration_bp = Blueprint('grants_migration', __name__)
 
 
+@grants_migration_bp.route('/debug-grants', methods=['GET'])
+@limiter.limit("10 per minute")
+def debug_grants():
+    """
+    Debug endpoint to check grants visibility
+    """
+    try:
+        from app.models.grant import Grant
+        from sqlalchemy import text
+        
+        # Method 1: ORM query
+        orm_count = Grant.query.count()
+        orm_published = Grant.query.filter_by(is_published=True).count()
+        
+        # Method 2: Raw SQL
+        raw_result = db.session.execute(text("SELECT COUNT(*) FROM grants"))
+        raw_count = raw_result.scalar()
+        
+        # Method 3: Get all grants
+        all_grants = Grant.query.all()
+        grants_list = [{'id': g.id, 'name': g.name, 'is_published': g.is_published} for g in all_grants]
+        
+        return jsonify({
+            'orm_total_count': orm_count,
+            'orm_published_count': orm_published,
+            'raw_sql_count': raw_count,
+            'grants_sample': grants_list[:5],
+            'session_id': id(db.session),
+            'message': 'Debug info - grants visibility check'
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
 @grants_migration_bp.route('/init-grants-orm', methods=['POST'])
 @limiter.limit("5 per hour")
 def init_grants_orm():
