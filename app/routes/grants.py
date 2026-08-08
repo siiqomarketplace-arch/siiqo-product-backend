@@ -7,11 +7,23 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.extensions import db, limiter
 from app.models.grant import Grant
 from app.models.admin import AdminUser
+from app.models.audit import AdminAuditLog
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import or_, and_, func
-from app.middleware.admin_auth import admin_required, audit_log
 
 grants_bp = Blueprint('grants', __name__, url_prefix='/api/grants')
+
+
+def _parse_admin_id(identity: str) -> int:
+    """Extract numeric ID from 'admin:123' or plain '123'."""
+    if isinstance(identity, str) and identity.startswith('admin:'):
+        return int(identity.split(':', 1)[1])
+    return int(identity)
+
+
+def _get_admin(admin_id) -> AdminUser | None:
+    """Get admin user by ID"""
+    return db.session.get(AdminUser, int(admin_id))
 
 
 def utcnow():
@@ -314,10 +326,18 @@ def get_grant_stats():
 # ---------------------------------------------------------------------------
 
 @grants_bp.route('', methods=['POST'])
-@admin_required
+@jwt_required()
+@limiter.limit("30 per minute")
 def create_grant():
     """Create a new grant (admin only)"""
-    admin_id = get_jwt_identity()
+    identity = get_jwt_identity()
+    admin_id = _parse_admin_id(identity)
+    
+    # Check admin authorization
+    admin = _get_admin(admin_id)
+    if not admin:
+        return jsonify({'message': 'Unauthorized - Admin access required'}), 403
+    
     data = request.get_json() or {}
     
     # Validate required fields
@@ -362,8 +382,16 @@ def create_grant():
     db.session.add(grant)
     db.session.commit()
     
-    # Audit log
-    audit_log(admin_id, 'CREATE', 'grant', grant.id, f'Created grant: {grant.name}')
+    # Audit log using AdminAuditLog model
+    from flask_limiter.util import get_remote_address
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='GRANT_CREATE',
+        resource_type='Grant',
+        resource_id=grant.id,
+        details={'grant_name': grant.name, 'grant_slug': grant.slug},
+        ip_address=get_remote_address()
+    )
     
     return jsonify({
         'message': 'Grant created successfully',
@@ -372,10 +400,18 @@ def create_grant():
 
 
 @grants_bp.route('/<int:grant_id>', methods=['PUT'])
-@admin_required
+@jwt_required()
+@limiter.limit("30 per minute")
 def update_grant(grant_id):
     """Update a grant (admin only)"""
-    admin_id = get_jwt_identity()
+    identity = get_jwt_identity()
+    admin_id = _parse_admin_id(identity)
+    
+    # Check admin authorization
+    admin = _get_admin(admin_id)
+    if not admin:
+        return jsonify({'message': 'Unauthorized - Admin access required'}), 403
+    
     grant = Grant.query.get(grant_id)
     
     if not grant:
@@ -428,8 +464,16 @@ def update_grant(grant_id):
     
     db.session.commit()
     
-    # Audit log
-    audit_log(admin_id, 'UPDATE', 'grant', grant.id, f'Updated grant: {grant.name}')
+    # Audit log using AdminAuditLog model
+    from flask_limiter.util import get_remote_address
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='GRANT_UPDATE',
+        resource_type='Grant',
+        resource_id=grant.id,
+        details={'grant_name': grant.name, 'grant_slug': grant.slug},
+        ip_address=get_remote_address()
+    )
     
     return jsonify({
         'message': 'Grant updated successfully',
@@ -438,10 +482,18 @@ def update_grant(grant_id):
 
 
 @grants_bp.route('/<int:grant_id>', methods=['DELETE'])
-@admin_required
+@jwt_required()
+@limiter.limit("30 per minute")
 def delete_grant(grant_id):
     """Delete a grant (admin only)"""
-    admin_id = get_jwt_identity()
+    identity = get_jwt_identity()
+    admin_id = _parse_admin_id(identity)
+    
+    # Check admin authorization
+    admin = _get_admin(admin_id)
+    if not admin:
+        return jsonify({'message': 'Unauthorized - Admin access required'}), 403
+    
     grant = Grant.query.get(grant_id)
     
     if not grant:
@@ -451,8 +503,16 @@ def delete_grant(grant_id):
     db.session.delete(grant)
     db.session.commit()
     
-    # Audit log
-    audit_log(admin_id, 'DELETE', 'grant', grant_id, f'Deleted grant: {grant_name}')
+    # Audit log using AdminAuditLog model
+    from flask_limiter.util import get_remote_address
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='GRANT_DELETE',
+        resource_type='Grant',
+        resource_id=grant_id,
+        details={'grant_name': grant_name},
+        ip_address=get_remote_address()
+    )
     
     return jsonify({'message': 'Grant deleted successfully'}), 200
 
