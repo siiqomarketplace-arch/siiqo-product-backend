@@ -11,6 +11,56 @@ from app.middleware.security import limiter
 grants_migration_bp = Blueprint('grants_migration', __name__)
 
 
+@grants_migration_bp.route('/fix-published-status', methods=['POST'])
+@limiter.limit("5 per hour")
+def fix_published_status():
+    """
+    Fix is_published status for existing grants
+    Sets is_published=True for all grants where it's NULL
+    """
+    try:
+        from app.models.grant import Grant
+        from sqlalchemy import text
+        
+        # Find grants with NULL is_published
+        grants_to_fix = Grant.query.filter(Grant.is_published == None).all()
+        
+        if not grants_to_fix:
+            return jsonify({
+                'message': 'No grants need fixing - all have is_published set',
+                'fixed_count': 0
+            }), 200
+        
+        # Fix each grant
+        for grant in grants_to_fix:
+            grant.is_published = True
+        
+        db.session.commit()
+        
+        # Verify
+        still_null = Grant.query.filter(Grant.is_published == None).count()
+        published_count = Grant.query.filter_by(is_published=True).count()
+        
+        logging.info(f"[FIX] Set is_published=True for {len(grants_to_fix)} grants")
+        
+        return jsonify({
+            'message': 'Fixed is_published status',
+            'fixed_count': len(grants_to_fix),
+            'published_grants_now': published_count,
+            'still_null': still_null
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[FIX ERROR] {str(e)}")
+        import traceback
+        return jsonify({
+            'message': 'Fix failed',
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
 @grants_migration_bp.route('/debug-grants', methods=['GET'])
 @limiter.limit("10 per minute")
 def debug_grants():
@@ -106,6 +156,7 @@ The Tony Elumelu Foundation (TEF) Entrepreneurship Programme is Africa's largest
                 'status': 'open',
                 'official_url': 'https://www.tonyelumelufoundation.org/apply',
                 'featured': True,
+                'is_published': True,  # CRITICAL: Must be explicitly True
                 'meta_title': 'Tony Elumelu $5,000 Grant 2026 - Apply for TEF Entrepreneurship Programme',
                 'meta_description': 'Apply for the Tony Elumelu Foundation $5,000 grant. Get seed funding, training & mentorship for your African startup. Deadline: March 31, 2026.'
             },
@@ -144,6 +195,7 @@ The Bank of Industry (BOI) Youth Entrepreneurship Support (YES) Programme provid
                 'status': 'open',
                 'official_url': 'https://www.boi.ng/youth-entrepreneurship/',
                 'featured': True,
+                'is_published': True,  # CRITICAL: Must be explicitly True
                 'meta_title': 'BOI Youth Grant 2026 - Up to ₦5M for Nigerian Youth Entrepreneurs',
                 'meta_description': 'Apply for Bank of Industry YES Programme. Get up to ₦5 million at 9% interest for your business. For Nigerian youth aged 18-35.'
             },
@@ -181,6 +233,7 @@ The Small and Medium Enterprises Development Agency of Nigeria (SMEDAN) provides
                 'status': 'upcoming',
                 'official_url': 'https://www.smedan.gov.ng/women-fund',
                 'featured': False,
+                'is_published': True,  # CRITICAL: Must be explicitly True
                 'meta_title': 'SMEDAN Women Business Grant 2026 - Up to ₦500,000 for Nigerian Women',
                 'meta_description': 'Free business grant for Nigerian women entrepreneurs. Get ₦50,000 to ₦500,000 from SMEDAN. No repayment required. Apply by September 2026.'
             }
