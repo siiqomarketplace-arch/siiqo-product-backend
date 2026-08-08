@@ -14,6 +14,7 @@ from .withdrawal import VendorBankAccount, Withdrawal, PODPayment, VendorCryptoW
 from .negotiation import NegotiationRequest, NegotiationHistory
 from .payment_link import PaymentLink
 from .trust import VendorTrustProfile, TrustScoreHistory
+from .grant import Grant
 
 __all__ = [
     'User', 'Storefront', 'UserRole',
@@ -33,4 +34,5 @@ __all__ = [
     'NegotiationRequest', 'NegotiationHistory',
     'PaymentLink',
     'VendorTrustProfile', 'TrustScoreHistory',
+    'Grant',
 ]
