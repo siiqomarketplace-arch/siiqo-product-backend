@@ -2426,9 +2426,9 @@ def run_grants_migration_once():
 # PUBLIC TEST ENDPOINT FOR GRANTS MIGRATION (NO AUTH - REMOVE AFTER USE!)
 # ---------------------------------------------------------------------------
 
-@admin_bp.route('/init-grants-table-public', methods=['POST'])
-@limiter.limit("3 per hour")
-def init_grants_table_public():
+@admin_bp.route('/init-grants-orm-direct', methods=['POST'])
+@limiter.limit("5 per hour")
+def init_grants_orm_direct():
     """
     TEMPORARY PUBLIC ENDPOINT - NO AUTH REQUIRED
     Use this to initialize grants table if admin login doesn't work

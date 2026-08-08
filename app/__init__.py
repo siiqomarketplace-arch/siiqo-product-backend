@@ -270,6 +270,7 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.payment_links import payment_links_bp
     from app.routes.payments import payments_bp
     from app.routes.grants import grants_bp
+    from app.routes.grants_migration import grants_migration_bp
 
     app.register_blueprint(auth_bp,         url_prefix='/api/auth')
     app.register_blueprint(public_bp,       url_prefix='/api/marketplace')
@@ -288,6 +289,8 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(payments_bp,     url_prefix='/api/payments')
     # Grants and funding opportunities
     app.register_blueprint(grants_bp,       url_prefix='/api/grants')
+    # Temporary grants migration endpoint
+    app.register_blueprint(grants_migration_bp, url_prefix='/api/admin')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
 
