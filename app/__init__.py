@@ -116,6 +116,56 @@ def create_app(config_name: str | None = None) -> Flask:
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] Database schema update failed: {_e}")
 
+        # ── Grants Table Auto-Initialization ─────────────────────────────────
+        # One-time grants table creation with sample data. Safe to run on every
+        # boot — checks if table exists first and skips if already populated.
+        try:
+            from sqlalchemy import text as _text
+            import logging as _log
+            
+            # Check if grants table exists
+            _result = db.session.execute(_text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'grants'
+                )
+            """))
+            _grants_table_exists = _result.scalar()
+            
+            if not _grants_table_exists:
+                _log.getLogger(__name__).info("[STARTUP] Grants table not found, creating...")
+                
+                # Read and execute SQL migration file
+                import os as _os
+                _sql_file = _os.path.join(_os.path.dirname(__file__), '..', 'migrations', 'create_grants_table.sql')
+                
+                if _os.path.exists(_sql_file):
+                    with open(_sql_file, 'r', encoding='utf-8') as _f:
+                        _sql_content = _f.read()
+                    
+                    db.session.execute(_text(_sql_content))
+                    db.session.commit()
+                    
+                    # Verify grants were created
+                    _verify = db.session.execute(_text("SELECT COUNT(*) FROM grants"))
+                    _count = _verify.scalar()
+                    _log.getLogger(__name__).info(f"[STARTUP] ✓ Grants table created with {_count} sample grants")
+                else:
+                    _log.getLogger(__name__).warning(f"[STARTUP] Grants migration SQL file not found: {_sql_file}")
+            else:
+                # Table exists, check if it has data
+                _verify = db.session.execute(_text("SELECT COUNT(*) FROM grants"))
+                _count = _verify.scalar()
+                if _count == 0:
+                    _log.getLogger(__name__).info("[STARTUP] Grants table exists but is empty (no sample data loaded)")
+                else:
+                    _log.getLogger(__name__).info(f"[STARTUP] Grants table verified ({_count} grants)")
+                    
+        except Exception as _e:
+            db.session.rollback()
+            import logging as _log
+            _log.getLogger(__name__).warning(f"[STARTUP] Grants table initialization skipped: {_e}")
+
     # -----------------------------------------------------------------------
     # Basic Logging Configuration
     # -----------------------------------------------------------------------
