@@ -86,7 +86,8 @@ INSERT INTO grants (
     official_url,
     featured,
     meta_title,
-    meta_description
+    meta_description,
+    last_verified
 ) VALUES 
 (
     'tony-elumelu-foundation-entrepreneurship-programme-2026',
@@ -118,7 +119,8 @@ The Tony Elumelu Foundation (TEF) Entrepreneurship Programme is Africa''s larges
     'https://www.tonyelumelufoundation.org/apply',
     TRUE,
     'Tony Elumelu Grant 2026 - $5,000 for African Entrepreneurs | Apply Now',
-    'Get $5,000 seed funding, training, and mentorship from Tony Elumelu Foundation. Open to all African entrepreneurs aged 18-35. Deadline: March 31, 2026.'
+    'Get $5,000 seed funding, training, and mentorship from Tony Elumelu Foundation. Open to all African entrepreneurs aged 18-35. Deadline: March 31, 2026.',
+    NOW()
 ),
 (
     'bank-of-industry-youth-entrepreneurship-support-programme',
@@ -156,7 +158,8 @@ The Bank of Industry (BOI) Youth Entrepreneurship Support (YES) Programme provid
     'https://www.boi.ng/youth-entrepreneurship/',
     TRUE,
     'BOI Youth Grant 2026 - Up to ₦5M for Nigerian Youth Entrepreneurs',
-    'Apply for Bank of Industry YES Programme. Get up to ₦5 million at 9% interest for your business. For Nigerian youth aged 18-35.'
+    'Apply for Bank of Industry YES Programme. Get up to ₦5 million at 9% interest for your business. For Nigerian youth aged 18-35.',
+    NOW()
 ),
 (
     'smedan-women-business-fund-2026',
@@ -193,7 +196,8 @@ The Small and Medium Enterprises Development Agency of Nigeria (SMEDAN) provides
     'https://www.smedan.gov.ng/women-fund',
     FALSE,
     'SMEDAN Women Business Grant 2026 - Up to ₦500,000 for Nigerian Women',
-    'Free business grant for Nigerian women entrepreneurs. Get ₦50,000 to ₦500,000 from SMEDAN. No repayment required. Apply by September 2026.'
+    'Free business grant for Nigerian women entrepreneurs. Get ₦50,000 to ₦500,000 from SMEDAN. No repayment required. Apply by September 2026.',
+    NOW()
 );
 
 -- Verification query
