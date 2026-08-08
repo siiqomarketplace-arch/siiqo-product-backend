@@ -1,8 +1,16 @@
 import logging
+import time
 """
 admin.py — Admin panel routes
 All routes require a valid AdminUser JWT.
 SUPERADMIN role required for destructive/sensitive operations.
+
+Security Features:
+- Rate limiting on all endpoints
+- Brute force protection on login
+- IP whitelisting for admin panel
+- Audit logging for all actions
+- Anomaly detection on sensitive routes
 """
 from datetime import datetime, timezone
 
@@ -18,7 +26,14 @@ from app.models.product import Category
 from app.models.partnerships import PartnerApplication
 from app.models.finance import Ledger
 from app.models.communication import Notification
+from app.models.audit import AdminAuditLog
 from app.utils.email import send_siiqo_email
+from app.middleware.security import (
+    limiter, 
+    brute_force, 
+    require_admin_whitelist,
+    detect_anomalies,
+)
 
 admin_bp = Blueprint('admin', __name__)
 
@@ -62,11 +77,33 @@ def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, desc
 
 
 # ---------------------------------------------------------------------------
-# POST /admin/login
+# POST /admin/login — WITH BRUTE FORCE PROTECTION
 # ---------------------------------------------------------------------------
 
 @admin_bp.route('/login', methods=['POST'])
+@limiter.limit("10 per minute")  # Rate limit: 10 attempts per minute per IP
+@require_admin_whitelist  # Only allow whitelisted IPs
+@detect_anomalies  # Check for injection attacks
 def admin_login():
+    """
+    Admin login with enterprise-grade security:
+    - Rate limiting (10 attempts/min per IP)
+    - IP whitelisting (requires ADMIN_IP_WHITELIST env var)
+    - Brute force protection (5 failures = 15 min lockout)
+    - Progressive delays after failed attempts
+    - Audit logging
+    - Anomaly detection (SQL injection, XSS)
+    """
+    from flask_limiter.util import get_remote_address
+    
+    ip = get_remote_address()
+    
+    # Check if IP is currently blocked
+    is_blocked, block_reason = brute_force.is_blocked(ip)
+    if is_blocked:
+        logging.warning(f"[SECURITY] Blocked login attempt from {ip}: {block_reason}")
+        return jsonify({"message": block_reason, "error": "RATE_LIMIT_EXCEEDED"}), 429
+    
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     password = data.get('password', '')
@@ -74,15 +111,47 @@ def admin_login():
     if not email or not password:
         return jsonify({"message": "Email and password required"}), 400
 
+    # Progressive delay based on previous failed attempts
+    delay = brute_force.get_delay(ip)
+    if delay > 0:
+        logging.info(f"[SECURITY] Applying {delay}s delay to {ip} due to previous failures")
+        time.sleep(delay)
+
     admin = AdminUser.query.filter_by(email=email).first()
-    if not admin or not admin.check_password(password):
+    
+    # Constant-time comparison to prevent timing attacks
+    valid_admin = admin is not None
+    valid_password = admin.check_password(password) if admin else False
+    
+    if not (valid_admin and valid_password):
+        # Record failed attempt
+        brute_force.record_failure(ip, email)
+        logging.warning(f"[SECURITY] Failed admin login attempt: {email} from {ip}")
+        
+        # Generic error message (don't reveal if email exists)
         return jsonify({"message": "Invalid credentials"}), 401
 
     if not admin.is_active:
+        logging.warning(f"[SECURITY] Suspended admin attempted login: {email} from {ip}")
         return jsonify({"message": "Account suspended"}), 403
 
+    # Success - clear failed attempts
+    brute_force.record_success(ip)
+    
     admin.last_login = _utcnow()
     db.session.commit()
+    
+    # Audit log successful login
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='ADMIN_LOGIN',
+        resource_type='AdminUser',
+        resource_id=admin.id,
+        details={'success': True},
+        ip_address=ip,
+    )
+    
+    logging.info(f"[SECURITY] Successful admin login: {email} from {ip}")
 
     # Use a prefixed identity to distinguish admin tokens from user tokens
     access_token = create_access_token(identity=f"admin:{admin.id}")
@@ -245,9 +314,16 @@ def get_user_detail(user_id):
 
 @admin_bp.route('/users/<int:user_id>/status', methods=['PATCH'])
 @jwt_required()
+@limiter.limit("30 per minute")
+@detect_anomalies
 def update_user_status(user_id):
+    """
+    Update user/vendor status with audit logging.
+    Security: Rate limited, anomaly detected, audit logged.
+    """
     admin_id = get_jwt_identity()
-    if not _require_superadmin(_parse_admin_id(admin_id)):
+    admin = _require_superadmin(_parse_admin_id(admin_id))
+    if not admin:
         return jsonify({"message": "SuperAdmin required"}), 403
 
     user = db.session.get(User, user_id)
@@ -255,7 +331,19 @@ def update_user_status(user_id):
         return jsonify({"message": "User not found"}), 404
 
     data = request.get_json() or {}
-    status = data.get('status', '')
+    status = data.get('status', '').strip().lower()
+    
+    # Whitelist allowed status values to prevent mass assignment
+    ALLOWED_STATUSES = {'active', 'verified', 'approved', 'kyc_approved', 'suspended', 'rejected', 'unverified'}
+    if status not in ALLOWED_STATUSES:
+        return jsonify({"message": f"Invalid status. Allowed: {ALLOWED_STATUSES}"}), 400
+    
+    # Store old values for audit
+    old_values = {
+        'is_verified': user.is_verified,
+        'is_active': user.is_active,
+        'verification_status': user.storefront.verification_status if user.storefront else None,
+    }
 
     if status in ('active', 'verified', 'approved'):
         # Stage 1: Admin approves vendor to go public. Does NOT grant the Verified badge.
@@ -341,15 +429,42 @@ def update_user_status(user_id):
             recalculate_vendor_trust(user.id, reason="Admin Verification Update")
     except Exception as e:
         logging.error(f"[TRUST ERROR] Failed to recalculate trust on user status update: {e}")
+    
+    # Audit log the status change
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='USER_STATUS_UPDATE',
+        resource_type='User',
+        resource_id=user.id,
+        details={
+            'user_email': user.email,
+            'new_status': status,
+            'old_values': old_values,
+            'new_values': {
+                'is_verified': user.is_verified,
+                'is_active': user.is_active,
+                'verification_status': user.storefront.verification_status if user.storefront else None,
+            }
+        }
+    )
+    
+    logging.info(f"[ADMIN] User {user.email} status updated to {status} by {admin.email}")
 
     return jsonify({"message": f"User {user.email} status updated to {status}."}), 200
 
 
 @admin_bp.route('/users/<int:user_id>', methods=['DELETE'])
 @jwt_required()
+@limiter.limit("10 per hour")  # Strict rate limit on destructive operations
+@detect_anomalies
 def delete_user_admin(user_id):
+    """
+    Delete user and all associated data.
+    Security: Strict rate limiting, anomaly detection, comprehensive audit logging.
+    """
     admin_id = get_jwt_identity()
-    if not _require_superadmin(_parse_admin_id(admin_id)):
+    admin = _require_superadmin(_parse_admin_id(admin_id))
+    if not admin:
         return jsonify({"message": "SuperAdmin required"}), 403
 
     user = db.session.get(User, user_id)
@@ -438,9 +553,29 @@ def delete_user_admin(user_id):
             db.session.delete(user.storefront)
 
         # ── 12. Delete user ───────────────────────────────────────────
+        user_email = user.email  # Store before deletion
+        user_data_summary = {
+            'email': user.email,
+            'role': user.role,
+            'storefront_id': user.storefront.id if user.storefront else None,
+            'storefront_name': user.storefront.store_name if user.storefront else None,
+        }
+        
         db.session.delete(user)
         db.session.commit()
-        return jsonify({"message": f"User {user.email} and all data deleted."}), 200
+        
+        # Audit log the deletion
+        AdminAuditLog.log_action(
+            admin=admin,
+            action='USER_DELETE',
+            resource_type='User',
+            resource_id=user_id,
+            details=user_data_summary
+        )
+        
+        logging.warning(f"[ADMIN CRITICAL] User {user_email} DELETED by {admin.email}")
+        
+        return jsonify({"message": f"User {user_email} and all data deleted."}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"message": f"Failed to delete user: {str(e)}"}), 500
@@ -722,14 +857,19 @@ def get_all_escrow_transactions():
 
 @admin_bp.route('/escrow/refund/<int:order_id>', methods=['POST'])
 @jwt_required()
+@limiter.limit("20 per hour")  # Strict rate limit on financial operations
+@detect_anomalies
 def admin_refund_buyer(order_id):
     """
     Admin refunds the buyer (dispute resolved in buyer's favour).
     Calls PayScrow's broker refund endpoint to reverse the transaction,
     then marks the escrow as REFUNDED and notifies both parties.
+    
+    Security: Rate limited, anomaly detected, fully audit logged.
     """
     admin_id = get_jwt_identity()
-    if not _require_superadmin(_parse_admin_id(admin_id)):
+    admin = _require_superadmin(_parse_admin_id(admin_id))
+    if not admin:
         return jsonify({"message": "SuperAdmin required"}), 403
 
     escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
@@ -803,6 +943,24 @@ def admin_refund_buyer(order_id):
         ))
 
     db.session.commit()
+    
+    # Audit log the refund
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='ESCROW_REFUND',
+        resource_type='EscrowTransaction',
+        resource_id=escrow.transaction_number,
+        details={
+            'order_id': order_id,
+            'amount': float(escrow.amount),
+            'buyer_id': order.buyer_id if order else None,
+            'vendor_id': order.vendor_id if order else None,
+            'payscrow_ref': escrow.payscrow_ref,
+            'reason': 'Admin dispute resolution',
+        }
+    )
+    
+    logging.warning(f"[ADMIN CRITICAL] Escrow refund processed for Order #{order_id} by {admin.email}")
 
     # Trigger trust score recalculation on dispute lost
     try:

@@ -129,6 +129,18 @@ def create_app(config_name: str | None = None) -> Flask:
     jwt.init_app(app)
     cors.init_app(app, resources={r"/api/*": {"origins": app.config['CORS_ORIGINS']}})
     limiter.init_app(app)
+    
+    # -----------------------------------------------------------------------
+    # Security Middleware — Applied to ALL responses
+    # -----------------------------------------------------------------------
+    from app.middleware.security import add_security_headers
+    
+    @app.after_request
+    def apply_security_headers(response):
+        """Add security headers to every response."""
+        return add_security_headers(response)
+    
+    logger.info("Security middleware activated — headers, rate limiting, anomaly detection enabled")
 
     # -----------------------------------------------------------------------
     # JWT error handlers

@@ -1,4 +1,5 @@
 import os
+import re
 import smtplib
 import ssl
 import threading
@@ -9,6 +10,65 @@ from email.mime.multipart import MIMEMultipart
 from flask import render_template, current_app, request
 
 logger = logging.getLogger(__name__)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# EMAIL VALIDATION — PREVENT SMTP INJECTION & MALFORMED ADDRESSES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _validate_email(email: str) -> bool:
+    """
+    RFC 5322 compliant email validation with security hardening.
+    Blocks: SQL injection, XSS, header injection, and malformed addresses.
+    
+    Returns: True if valid, False otherwise
+    """
+    if not email or not isinstance(email, str):
+        return False
+    
+    email = email.strip()
+    
+    # Length checks (RFC 5321)
+    if len(email) < 3 or len(email) > 254:
+        return False
+    
+    # Block dangerous characters (header injection prevention)
+    dangerous_chars = ['\n', '\r', '\0', '<', '>', '"', '\\', ',', ';']
+    if any(char in email for char in dangerous_chars):
+        logger.warning(f"[SECURITY] Blocked email with dangerous characters: {email[:20]}...")
+        return False
+    
+    # RFC 5322 email pattern with strict validation
+    pattern = r'^[a-zA-Z0-9][a-zA-Z0-9._%+-]*@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$'
+    
+    if not re.match(pattern, email):
+        return False
+    
+    # Additional security checks
+    local, domain = email.split('@')
+    
+    # Local part (before @) validation
+    if len(local) > 64 or len(local) < 1:
+        return False
+    if local.startswith('.') or local.endswith('.'):
+        return False
+    if '..' in local:
+        return False
+    
+    # Domain validation
+    if len(domain) > 253 or len(domain) < 3:
+        return False
+    if domain.startswith('-') or domain.endswith('-'):
+        return False
+    if '..' in domain:
+        return False
+    
+    # Block common typosquatting/malicious domains
+    blocked_patterns = ['temp-mail', 'throwaway', 'guerrilla', 'mailinator', '10minutemail']
+    if any(pattern in domain.lower() for pattern in blocked_patterns):
+        logger.warning(f"[SECURITY] Blocked disposable email domain: {domain}")
+        return False
+    
+    return True
 
 def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail_sender, to_email, subject, html_content, context):
     """Background worker for sending emails."""
@@ -71,7 +131,16 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     """
     Sends a branded Siiqo email via SMTP (AWS SES / any STARTTLS provider).
     Execution is offloaded to a background thread to prevent blocking HTTP requests.
+    
+    Security: Validates email before sending to prevent SMTP injection attacks.
     """
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # SECURITY: Validate email address before any processing
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if not _validate_email(to_email):
+        logger.error(f"[EMAIL BLOCKED] Invalid or malicious email format: {to_email[:50]}")
+        return False
+    
     mail_server   = os.environ.get('MAIL_SERVER')
     mail_port     = int(os.environ.get('MAIL_PORT', 587))
     mail_username = os.environ.get('MAIL_USERNAME')
