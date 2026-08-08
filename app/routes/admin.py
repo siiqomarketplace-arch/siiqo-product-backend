@@ -2340,3 +2340,83 @@ def publish_all_approved_storefronts():
             f"All approved vendors now have Pro Verified access for 1 year."
         ),
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# ONE-TIME MIGRATION ENDPOINT (TEMPORARY - Remove after running)
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/run-grants-migration', methods=['POST'])
+@jwt_required()
+@limiter.limit("1 per hour")
+def run_grants_migration_once():
+    """
+    ONE-TIME USE ONLY: Run grants table migration
+    This endpoint should be removed after successful migration
+    """
+    admin_id = get_jwt_identity()
+    admin = _require_superadmin(_parse_admin_id(admin_id))
+    if not admin:
+        return jsonify({"message": "SuperAdmin required"}), 403
+    
+    try:
+        from sqlalchemy import text
+        
+        # Read SQL migration file
+        sql_file = 'migrations/create_grants_table.sql'
+        logging.info(f"[MIGRATION] Reading {sql_file}")
+        
+        with open(sql_file, 'r', encoding='utf-8') as f:
+            sql_content = f.read()
+        
+        # Execute migration
+        logging.info("[MIGRATION] Executing grants table creation...")
+        db.session.execute(text(sql_content))
+        db.session.commit()
+        
+        # Verify
+        result = db.session.execute(text("""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE status = 'open') as open,
+                   COUNT(*) FILTER (WHERE featured = TRUE) as featured
+            FROM grants
+        """))
+        
+        row = result.fetchone()
+        
+        # Audit log
+        AdminAuditLog.log_action(
+            admin=admin,
+            action='DATABASE_MIGRATION',
+            resource_type='Grant',
+            resource_id=0,
+            details={
+                'migration': 'create_grants_table',
+                'total_grants': row[0],
+                'open_grants': row[1],
+                'featured_grants': row[2]
+            }
+        )
+        
+        logging.info(f"[MIGRATION SUCCESS] Grants table created with {row[0]} initial records")
+        
+        return jsonify({
+            'message': 'Grants table migration completed successfully',
+            'grants_created': row[0],
+            'open_grants': row[1],
+            'featured_grants': row[2],
+            'warning': 'Please remove this endpoint from production code'
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[MIGRATION ERROR] {str(e)}")
+        return jsonify({
+            'message': 'Migration failed',
+            'error': str(e),
+            'troubleshooting': [
+                'Check if grants table already exists',
+                'Verify admin_users table exists (foreign key dependency)',
+                'Check PostgreSQL logs for details'
+            ]
+        }), 500
