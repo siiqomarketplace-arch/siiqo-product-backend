@@ -20,6 +20,7 @@ class Article(db.Model):
 
     cover_image = db.Column(db.String(255), nullable=True)
     category = db.Column(db.String(100), nullable=True)
+    subcategory = db.Column(db.String(100), nullable=True)  # For Grants: Youth, Women, Startups, etc.
     is_published = db.Column(db.Boolean, default=False)
 
     # SEO
