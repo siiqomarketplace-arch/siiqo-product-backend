@@ -414,13 +414,10 @@ def get_articles():
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 10)), 50)
     category = request.args.get('category')
-    subcategory = request.args.get('subcategory')  # NEW: for grants subcategories
     
     query = Article.query.filter_by(is_published=True)
     if category:
         query = query.filter_by(category=category)
-    if subcategory:
-        query = query.filter_by(subcategory=subcategory)
         
     paginated = (
         query
@@ -433,7 +430,6 @@ def get_articles():
             "title": a.title,
             "slug": a.slug,
             "category": a.category,
-            "subcategory": a.subcategory,  # NEW: include subcategory in response
             "excerpt": a.excerpt or (a.content[:150] + "..." if a.content and len(a.content) > 150 else (a.content or "")),
             "cover_image": a.cover_image,
             "created_at": a.created_at.isoformat() if a.created_at else None,
