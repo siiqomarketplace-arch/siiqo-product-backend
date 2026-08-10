@@ -2507,3 +2507,125 @@ def init_grants_orm_direct():
             'error': str(e),
             'sql_file_path': sql_file if 'sql_file' in locals() else 'unknown'
         }), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/delete-bot-accounts — Delete fake bot accounts
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/delete-bot-accounts', methods=['POST'])
+@jwt_required()
+@limiter.limit("5 per hour")
+def delete_bot_accounts():
+    """
+    Delete bot accounts from the database.
+    
+    Bot detection criteria:
+    - First/last name matches pattern: Dv7284677, Pr4695973, Ol2449129
+    - Email domain: @siiqo.app (internal domain)
+    
+    POST /api/admin/delete-bot-accounts
+    Body: { "confirm": true }  # Safety confirmation
+    
+    Returns:
+        - List of deleted accounts
+        - Count of deletions
+    """
+    import re
+    
+    admin_id = get_jwt_identity()
+    admin = _get_admin(admin_id)
+    
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 401
+    
+    data = request.get_json() or {}
+    confirm = data.get('confirm', False)
+    
+    # Bot detection patterns
+    BOT_PATTERNS = [
+        r'^[A-Z][a-z]\d{6,8}$',  # Dv7284677, Pr4695973
+        r'^[A-Z]{2}\d{7,9}$',    # Ol2449129
+    ]
+    
+    try:
+        # Find bot accounts
+        users = User.query.filter(User.email.like('%@siiqo.app')).all()
+        
+        bot_accounts = []
+        for user in users:
+            is_bot = False
+            
+            # Check if name matches bot pattern
+            for pattern in BOT_PATTERNS:
+                if (user.first_name and re.match(pattern, user.first_name)) or \
+                   (user.last_name and re.match(pattern, user.last_name)):
+                    is_bot = True
+                    break
+            
+            if is_bot:
+                bot_accounts.append({
+                    'id': user.id,
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'created_at': user.created_at.isoformat() if user.created_at else None,
+                })
+        
+        if not confirm:
+            # Preview mode - just show what would be deleted
+            return jsonify({
+                "message": f"Found {len(bot_accounts)} bot accounts",
+                "bot_accounts": bot_accounts[:50],  # Show first 50
+                "total_found": len(bot_accounts),
+                "note": "Set 'confirm: true' to delete these accounts"
+            }), 200
+        
+        # Confirmation received - delete bot accounts
+        deleted_ids = []
+        for bot in bot_accounts:
+            user_id = bot['id']
+            user = db.session.get(User, user_id)
+            
+            if user:
+                # Delete related data first
+                # Delete referrals
+                from app.models.partnerships import Referral
+                Referral.query.filter(
+                    (Referral.referrer_id == user_id) | (Referral.referred_id == user_id)
+                ).delete()
+                
+                # Delete notifications
+                Notification.query.filter_by(user_id=user_id).delete()
+                
+                # Delete the user
+                db.session.delete(user)
+                deleted_ids.append(user_id)
+        
+        db.session.commit()
+        
+        # Log the action
+        logging.info(
+            f"[ADMIN] {admin.email} deleted {len(deleted_ids)} bot accounts | "
+            f"IDs: {deleted_ids[:10]}{'...' if len(deleted_ids) > 10 else ''}"
+        )
+        
+        # Create audit log
+        db.session.add(AdminAuditLog(
+            admin_id=admin.id,
+            action='DELETE_BOT_ACCOUNTS',
+            details=f"Deleted {len(deleted_ids)} bot accounts",
+            ip_address=request.remote_addr,
+        ))
+        db.session.commit()
+        
+        return jsonify({
+            "message": f"Successfully deleted {len(deleted_ids)} bot accounts",
+            "deleted_count": len(deleted_ids),
+            "deleted_accounts": bot_accounts[:20],  # Show first 20 deleted
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[ADMIN] Error deleting bot accounts: {e}")
+        return jsonify({"message": f"Error deleting bot accounts: {str(e)}"}), 500
