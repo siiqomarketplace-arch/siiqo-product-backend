@@ -19,6 +19,7 @@ from app.extensions import db, limiter
 from app.models.user import User, UserRole
 from app.utils.upload import save_uploaded_file
 from app.utils.email import send_siiqo_email
+from app.middleware.bot_protection import bot_protection, ip_throttle
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -57,6 +58,8 @@ def _user_payload(user: User) -> dict:
 
 @auth_bp.route('/register', methods=['POST'])
 @limiter.limit("5 per minute")
+@ip_throttle(max_attempts=3, window_minutes=60)
+@bot_protection
 def register():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
