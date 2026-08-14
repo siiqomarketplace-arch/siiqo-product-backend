@@ -1,0 +1,69 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Siiqo - Someone Downloaded Your Product!</title>
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px; color: #334155; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #E0921C; }
+        .content { padding: 40px; text-align: center; }
+        .content h2 { color: #0f172a; margin-top: 0; font-size: 24px; font-weight: 800; }
+        .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 24px; }
+        .stat-box { background: linear-gradient(135deg, #0b1b3b 0%, #1e3a6e 100%); border-radius: 12px; padding: 24px; margin: 24px 0; color: #fff; text-align: center; }
+        .stat-box .number { font-size: 40px; font-weight: 900; color: #E0921C; line-height: 1; }
+        .stat-box .label { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+        .info-box { background: #f8fafc; border: 2px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 16px 0; text-align: left; }
+        .info-box .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f5f9; }
+        .info-box .row:last-child { border-bottom: none; }
+        .info-box .key { font-size: 13px; color: #94a3b8; font-weight: 600; }
+        .info-box .val { font-size: 13px; color: #0f172a; font-weight: 700; }
+        .btn { display: inline-block; background-color: #E0921C; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 10px; font-weight: 700; font-size: 15px; margin-top: 16px; }
+        .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+        .footer a { color: #E0921C; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="https://siiqo.com" target="_blank" style="text-decoration: none;">
+                <img src="{{ logo_url }}" alt="Siiqo" height="40" style="vertical-align: middle; border: 0;">
+                <span style="color: #ffffff; font-size: 26px; font-weight: 900; font-family: sans-serif; letter-spacing: -1px; display: inline-block; vertical-align: middle; margin-left: 8px;">Siiqo</span>
+            </a>
+        </div>
+        <div class="content">
+            <div style="font-size: 52px; margin-bottom: 16px;">📥</div>
+            <h2>Someone Downloaded Your Product!</h2>
+            <p>Hi {{ vendor_name }},<br><br>
+            Great news! A buyer just claimed and downloaded your free product on Siiqo. Here are the details:</p>
+
+            <div class="info-box">
+                <div class="row">
+                    <span class="key">Product</span>
+                    <span class="val">{{ product_name }}</span>
+                </div>
+                <div class="row">
+                    <span class="key">Buyer</span>
+                    <span class="val">{{ buyer_name }}</span>
+                </div>
+                <div class="row">
+                    <span class="key">Order Reference</span>
+                    <span class="val">#{{ order_id }}</span>
+                </div>
+                <div class="row">
+                    <span class="key">Date & Time</span>
+                    <span class="val">{{ claimed_at }}</span>
+                </div>
+            </div>
+
+            <p style="font-size: 14px; color: #64748b;">Free downloads help build your audience and reviews. Keep creating great content on Siiqo!</p>
+
+            <a href="https://siiqo.com/vendor/dashboard" class="btn">View Your Dashboard</a>
+        </div>
+        <div class="footer">
+            <p>© 2025 Siiqo Marketplace · <a href="https://siiqo.com">siiqo.com</a></p>
+            <p>Questions? <a href="mailto:support@siiqo.com">support@siiqo.com</a></p>
+        </div>
+    </div>
+</body>
+</html>

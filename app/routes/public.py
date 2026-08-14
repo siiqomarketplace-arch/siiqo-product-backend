@@ -694,10 +694,15 @@ def claim_free_product(product_id):
     ).first()
     
     if existing_order:
+        file_url = product.file_url or product.booking_link
         return jsonify({
             'message': 'You already claimed this product',
             'order_id': existing_order.id,
-            'access_url': product.file_url if product.product_type == 'digital' else product.booking_link
+            'download_url': file_url,
+            'booking_url': product.booking_link or product.file_url,
+            'file_url': file_url,
+            'access_type': 'booking' if product.product_type == 'service' else 'download',
+            'access_url': file_url,
         }), 200
     
     # Create free order
@@ -731,9 +736,48 @@ def claim_free_product(product_id):
     db.session.add(notification)
     
     db.session.commit()
-    
+
     logging.info(f"Free product claimed: {product.id} by user {user.id}")
-    
+
+    file_url = product.file_url or product.booking_link
+    booking_url = product.booking_link or product.file_url
+
+    # ── Send emails (background threads, never block response) ────────────────
+    try:
+        from app.utils.email import send_siiqo_email
+        from datetime import datetime, timezone
+
+        buyer_name = user.full_name or user.email.split('@')[0] if user.email else 'there'
+        claimed_at = datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
+
+        # 1. Email to buyer with download link
+        send_siiqo_email(
+            to_email=user.email,
+            subject=f'📥 Your Free Download is Ready — {product.name}',
+            template_name='free_download_buyer',
+            buyer_name=buyer_name,
+            product_name=product.name,
+            vendor_name=product.storefront.store_name if product.storefront else None,
+            order_id=order.id,
+            download_url=file_url,
+        )
+
+        # 2. Email to vendor notifying them of the download
+        vendor = product.storefront.vendor if product.storefront else None
+        if vendor and vendor.email:
+            send_siiqo_email(
+                to_email=vendor.email,
+                subject=f'📥 Someone Downloaded Your Free Product — {product.name}',
+                template_name='free_download_vendor',
+                vendor_name=product.storefront.store_name or vendor.full_name or 'Vendor',
+                product_name=product.name,
+                buyer_name=buyer_name,
+                order_id=order.id,
+                claimed_at=claimed_at,
+            )
+    except Exception as email_err:
+        logging.warning(f"[CLAIM_FREE] Email dispatch failed (non-fatal): {email_err}")
+
     # Return access information
     response = {
         'message': 'Free product claimed successfully!',
@@ -741,20 +785,12 @@ def claim_free_product(product_id):
         'product': {
             'id': product.id,
             'name': product.name,
-            'type': product.product_type
-        }
+            'type': product.product_type,
+        },
+        'download_url': file_url,
+        'booking_url': booking_url,
+        'file_url': file_url,
+        'access_type': 'booking' if product.product_type == 'service' else 'download',
     }
-    
-    file_url = product.file_url or product.booking_link
-    booking_url = product.booking_link or product.file_url
 
-    response['download_url'] = file_url
-    response['booking_url'] = booking_url
-    response['file_url'] = file_url
-
-    if product.product_type == 'service':
-        response['access_type'] = 'booking'
-    else:
-        response['access_type'] = 'download'
-    
     return jsonify(response), 201

@@ -1,0 +1,66 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Siiqo - Your Free Download is Ready!</title>
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f0fdf4; margin: 0; padding: 40px 20px; color: #334155; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #E0921C; }
+        .content { padding: 40px; text-align: center; }
+        .content h2 { color: #0f172a; margin-top: 0; font-size: 24px; font-weight: 800; }
+        .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 24px; }
+        .product-box { background: #f8fafc; border: 2px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 24px 0; text-align: left; }
+        .product-box .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 4px; }
+        .product-box .value { font-size: 16px; font-weight: 700; color: #0f172a; }
+        .btn-download { display: inline-block; background: linear-gradient(135deg, #059669, #10b981); color: #ffffff; text-decoration: none; padding: 16px 36px; border-radius: 12px; font-weight: 800; font-size: 16px; margin: 8px 0 24px; }
+        .note { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 14px 18px; font-size: 13px; color: #92400e; text-align: left; margin-top: 16px; }
+        .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+        .footer a { color: #E0921C; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="https://siiqo.com" target="_blank" style="text-decoration: none;">
+                <img src="{{ logo_url }}" alt="Siiqo" height="40" style="vertical-align: middle; border: 0;">
+                <span style="color: #ffffff; font-size: 26px; font-weight: 900; font-family: sans-serif; letter-spacing: -1px; display: inline-block; vertical-align: middle; margin-left: 8px;">Siiqo</span>
+            </a>
+        </div>
+        <div class="content">
+            <div style="font-size: 52px; margin-bottom: 16px;">🎉</div>
+            <h2>Your Free Download is Ready!</h2>
+            <p>Hi {{ buyer_name }},<br><br>
+            You have successfully claimed your free item on Siiqo. Click the button below to access or download your asset instantly.</p>
+
+            <div class="product-box">
+                <div class="label">Product</div>
+                <div class="value">{{ product_name }}</div>
+                {% if vendor_name %}
+                <div class="label" style="margin-top: 12px;">From</div>
+                <div class="value" style="font-size: 14px; color: #475569;">{{ vendor_name }}</div>
+                {% endif %}
+                <div class="label" style="margin-top: 12px;">Order Reference</div>
+                <div class="value" style="font-size: 14px; color: #64748b;">#{{ order_id }}</div>
+            </div>
+
+            {% if download_url %}
+            <a href="{{ download_url }}" class="btn-download" target="_blank">
+                📥 Access / Download Asset Now
+            </a>
+            {% else %}
+            <p style="color: #059669; font-weight: 700;">✅ Item claimed! Check your Siiqo order history to access your download.</p>
+            {% endif %}
+
+            <div class="note">
+                💡 <strong>Tip:</strong> Save this email — your download link is always accessible here. You can also find it in your
+                <a href="https://siiqo.com/user-profile" style="color: #d97706; font-weight: 700;">Siiqo profile → Order History</a>.
+            </div>
+        </div>
+        <div class="footer">
+            <p>© 2025 Siiqo Marketplace · <a href="https://siiqo.com">siiqo.com</a></p>
+            <p>Questions? <a href="mailto:support@siiqo.com">support@siiqo.com</a></p>
+        </div>
+    </div>
+</body>
+</html>
