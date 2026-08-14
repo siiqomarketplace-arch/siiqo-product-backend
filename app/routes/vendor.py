@@ -655,12 +655,27 @@ def add_product():
         if cat:
             category_id = cat.id
 
+    # Handle digital file upload if provided
+    file_url_val = data.get('file_url')
+    booking_link_val = data.get('booking_link')
+    digital_file = request.files.get('digital_file') or request.files.get('file')
+    if digital_file and digital_file.filename:
+        try:
+            uploaded_url = save_uploaded_file(digital_file, subfolder='digital_products', is_digital=True)
+            if uploaded_url:
+                if p_type == 'service':
+                    booking_link_val = uploaded_url
+                else:
+                    file_url_val = uploaded_url
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+
     # Validate type-specific required fields
     p_type = data.get('product_type', 'physical')
-    if p_type == 'digital' and not data.get('file_url', '').strip():
-        return jsonify({"message": "A Download Link (file_url) is required for digital products."}), 400
-    if p_type == 'service' and not data.get('booking_link', '').strip():
-        return jsonify({"message": "A Booking Link (booking_link) is required for service products."}), 400
+    if p_type == 'digital' and not (file_url_val or '').strip():
+        return jsonify({"message": "A Digital File upload or Download Link (file_url) is required for digital products."}), 400
+    if p_type == 'service' and not (booking_link_val or '').strip():
+        return jsonify({"message": "A Booking Link or Intake Document (booking_link) is required for service products."}), 400
 
     new_product = Product(
         storefront_id=sf.id,
@@ -676,8 +691,8 @@ def add_product():
         is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
         floor_price=float(data['floor_price']) if data.get('floor_price') else None,
         product_type=data.get('product_type', 'physical'),
-        file_url=data.get('file_url'),
-        booking_link=data.get('booking_link'),
+        file_url=file_url_val,
+        booking_link=booking_link_val,
         sku=data.get('sku'),
         weight=float(data['weight']) if data.get('weight') else None,
         seo_title=data.get('seo_title') or data.get('seoTitle'),
@@ -848,8 +863,22 @@ def edit_product(product_id):
             Category.name.ilike(data['category'].strip()) |
             Category.slug.ilike(data['category'].strip())
         ).first()
-        if cat:
-            product.category_id = cat.id
+    if 'file_url' in data:
+        product.file_url = data['file_url']
+    if 'booking_link' in data:
+        product.booking_link = data['booking_link']
+
+    digital_file = request.files.get('digital_file') or request.files.get('file')
+    if digital_file and digital_file.filename:
+        try:
+            uploaded_url = save_uploaded_file(digital_file, subfolder='digital_products', is_digital=True)
+            if uploaded_url:
+                if product.product_type == 'service':
+                    product.booking_link = uploaded_url
+                else:
+                    product.file_url = uploaded_url
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
 
     # Handle multiple image files
     saved_images = []

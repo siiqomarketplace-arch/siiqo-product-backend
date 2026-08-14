@@ -7,28 +7,38 @@ from werkzeug.utils import secure_filename
 from flask import current_app
 
 # Allowed extensions to prevent malicious uploads
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'avif'}
+ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'avif'}
+ALLOWED_DIGITAL_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'avif', 'pdf', 'zip', 'rar', '7z', 'mp3', 'mp4', 'mov', 'epub', 'docx', 'xlsx', 'txt', 'svg'}
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def allowed_file(filename, is_digital=False):
+    exts = ALLOWED_DIGITAL_EXTENSIONS if is_digital else ALLOWED_IMAGE_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in exts
 
-def save_uploaded_file(file_obj, subfolder="general"):
+def save_uploaded_file(file_obj, subfolder="general", is_digital=False):
     """
     Saves an uploaded file to AWS S3 if credentials exist, otherwise falls back to local storage.
+    Supports digital product assets (PDF, ZIP, MP3, MP4, etc.) up to 50MB when is_digital=True or subfolder='digital_products'.
     """
     if not file_obj or not file_obj.filename:
         return None
 
-    # Read content into memory to check size (max 10MB per file)
-    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    if subfolder == "digital_products":
+        is_digital = True
+
+    # Check file size (50MB for digital products, 10MB for images)
+    MAX_FILE_SIZE = (50 * 1024 * 1024) if is_digital else (10 * 1024 * 1024)
     file_obj.seek(0, 2)  # Seek to end
     file_size = file_obj.tell()
     file_obj.seek(0)  # Reset to beginning
     if file_size > MAX_FILE_SIZE:
-        raise ValueError(f"File is too large ({file_size // (1024*1024)}MB). Maximum allowed size is 10MB.")
+        limit_mb = 50 if is_digital else 10
+        raise ValueError(f"File is too large ({file_size // (1024*1024)}MB). Maximum allowed size is {limit_mb}MB.")
         
-    if not allowed_file(file_obj.filename):
-        raise ValueError("Invalid file type. Only image files are allowed.")
+    if not allowed_file(file_obj.filename, is_digital=is_digital):
+        if is_digital:
+            raise ValueError("Invalid file format. Allowed: PDF, ZIP, MP3, MP4, EPUB, DOCX, XLSX, TXT, images.")
+        else:
+            raise ValueError("Invalid file type. Only image files (PNG, JPG, WEBP) are allowed.")
         
     ext = file_obj.filename.rsplit('.', 1)[1].lower()
     unique_filename = f"{uuid.uuid4().hex}.{ext}"
