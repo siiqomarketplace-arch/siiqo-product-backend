@@ -43,6 +43,13 @@ def run_migration():
             else:
                 print("ℹ️ Column show_on_marketplace already exists.")
                 
+            # Update any existing active events to be published and visible by default
+            print("🔄 Ensuring active events are marked as published...")
+            db.session.execute(text("""
+                UPDATE events 
+                SET is_published = TRUE, show_on_storefront = TRUE, show_on_marketplace = TRUE 
+                WHERE is_active = TRUE AND is_deleted = FALSE;
+            """))
             db.session.commit()
             print("✅ Events visibility migration completed successfully!")
             
