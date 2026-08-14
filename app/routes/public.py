@@ -733,8 +733,27 @@ def claim_free_product(product_id):
         type='ORDER',
         order_id=order.id
     )
-    db.session.add(notification)
-    
+    # Update/create CRM CustomerProfile for the vendor so free claims are tracked
+    try:
+        from app.models.crm import CustomerProfile
+        from app.utils.datetime_utils import _utcnow
+        vid = product.storefront.vendor_id
+        profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user.id).first()
+        if profile:
+            profile.total_orders = (profile.total_orders or 0) + 1
+            profile.last_purchase_date = _utcnow()
+        else:
+            db.session.add(CustomerProfile(
+                vendor_id=vid,
+                buyer_id=user.id,
+                total_spent=0,
+                total_orders=1,
+                segment='NEW',
+                last_purchase_date=_utcnow(),
+            ))
+    except Exception as _crm_err:
+        logging.warning(f"[CLAIM_FREE] CRM CustomerProfile update failed: {_crm_err}")
+
     db.session.commit()
 
     logging.info(f"Free product claimed: {product.id} by user {user.id}")

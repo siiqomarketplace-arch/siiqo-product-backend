@@ -1296,6 +1296,23 @@ def get_customers():
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
 
+    # ── Subscription Gate: Pro required for CRM Customer Data ──────────────
+    from app.models.admin import VendorSubscription
+    from datetime import datetime as _dt_crm
+    _now_crm = _dt_crm.utcnow()
+    active_sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == user.id,
+        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
+        VendorSubscription.end_date > _now_crm
+    ).first()
+
+    if not active_sub:
+        return jsonify({
+            "message": "Pro subscription required to access CRM customer records and marketing tools.",
+            "upgrade_required": True,
+            "code": "SUBSCRIPTION_REQUIRED"
+        }), 403
+
     page = request.args.get('page', type=int)
     limit = request.args.get('limit', type=int)
 
