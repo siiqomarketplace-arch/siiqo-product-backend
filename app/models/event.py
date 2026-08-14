@@ -52,6 +52,8 @@ class Event(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     is_published = db.Column(db.Boolean, default=False)
     is_deleted = db.Column(db.Boolean, default=False)
+    show_on_storefront = db.Column(db.Boolean, default=True)
+    show_on_marketplace = db.Column(db.Boolean, default=True)
     
     # Analytics
     view_count = db.Column(db.Integer, default=0)
@@ -134,6 +136,8 @@ class Event(db.Model):
             'is_sold_out': self.is_sold_out,
             'is_active': self.is_active,
             'is_published': self.is_published,
+            'show_on_storefront': self.show_on_storefront if self.show_on_storefront is not None else True,
+            'show_on_marketplace': self.show_on_marketplace if self.show_on_marketplace is not None else True,
             'view_count': self.view_count,
             'meta_title': self.meta_title,
             'meta_description': self.meta_description,

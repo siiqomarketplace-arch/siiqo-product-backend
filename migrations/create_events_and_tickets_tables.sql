@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS events (
     is_active BOOLEAN DEFAULT TRUE,
     is_published BOOLEAN DEFAULT FALSE,
     is_deleted BOOLEAN DEFAULT FALSE,
+    show_on_storefront BOOLEAN DEFAULT TRUE,
+    show_on_marketplace BOOLEAN DEFAULT TRUE,
     
     -- Analytics
     view_count INTEGER DEFAULT 0,
@@ -159,6 +161,10 @@ CREATE INDEX IF NOT EXISTS idx_ticket_purchases_email ON ticket_purchases(buyer_
 
 -- Add is_free column to products table (for free digital products/services)
 ALTER TABLE products ADD COLUMN IF NOT EXISTS is_free BOOLEAN DEFAULT FALSE;
+
+-- Ensure events table visibility columns exist
+ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_storefront BOOLEAN DEFAULT TRUE;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_marketplace BOOLEAN DEFAULT TRUE;
 
 -- Create index for free products
 CREATE INDEX IF NOT EXISTS idx_products_is_free ON products(is_free);

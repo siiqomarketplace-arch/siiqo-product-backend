@@ -6,7 +6,32 @@ Adds tables for events, ticket types, and ticket purchases
 
 import os
 import sys
-from sqlalchemy import create_engine, text
+
+# Try loading .env automatically
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # Manual .env fallback if python-dotenv is not installed
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if os.path.exists(env_path):
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+# Safely import SQLAlchemy
+try:
+    from sqlalchemy import create_engine, text
+except ImportError:
+    print("❌ Error: 'sqlalchemy' module is not installed in this Python environment.")
+    print("👉 To fix, run:")
+    print("   pip install -r requirements.txt")
+    print("   OR")
+    print("   pip install sqlalchemy psycopg2-binary python-slugify python-dotenv")
+    sys.exit(1)
 
 def run_migration():
     """Execute the events and ticketing migration"""
@@ -74,16 +99,26 @@ def run_migration():
                         # Ignore "already exists" errors
                         if 'already exists' not in str(e).lower():
                             print(f"⚠️  Warning: {e}")
+            
+            # Ensure visibility columns are added to events table if missing
+            try:
+                conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_storefront BOOLEAN DEFAULT TRUE;"))
+                conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_marketplace BOOLEAN DEFAULT TRUE;"))
+                conn.commit()
+            except Exception as vis_err:
+                print(f"⚠️  Visibility columns note: {vis_err}")
         
         print("✅ Migration completed successfully!")
         print()
-        print("📊 Created tables:")
+        print("📊 Created/Verified tables:")
         print("   • events - Event listings with online/in-person support")
         print("   • ticket_types - Multiple ticket types per event (VIP, Regular, etc.)")
         print("   • ticket_purchases - Individual ticket records with QR codes")
         print()
-        print("🆕 Added to products table:")
+        print("🆕 Added to products & events tables:")
         print("   • is_free - Mark digital products/services as free")
+        print("   • show_on_storefront - Storefront event visibility")
+        print("   • show_on_marketplace - Marketplace event visibility")
         print()
         
         # Verify tables were created

@@ -105,6 +105,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'paid'",
                 # ── Events & Ticketing ───────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_free BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_storefront BOOLEAN DEFAULT TRUE",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_marketplace BOOLEAN DEFAULT TRUE",
                 """CREATE TABLE IF NOT EXISTS events (
                     id SERIAL PRIMARY KEY,
                     storefront_id INTEGER REFERENCES storefronts(id),
@@ -133,6 +135,8 @@ def create_app(config_name: str | None = None) -> Flask:
                     is_active BOOLEAN DEFAULT TRUE,
                     is_published BOOLEAN DEFAULT FALSE,
                     is_deleted BOOLEAN DEFAULT FALSE,
+                    show_on_storefront BOOLEAN DEFAULT TRUE,
+                    show_on_marketplace BOOLEAN DEFAULT TRUE,
                     view_count INTEGER DEFAULT 0,
                     meta_title VARCHAR(255),
                     meta_description TEXT,

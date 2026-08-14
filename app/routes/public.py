@@ -310,6 +310,25 @@ def get_storefront_details(slug):
         for cat, prods in by_category.items()
     ]
 
+    # Fetch published active events for this storefront (where show_on_storefront is True)
+    events_data = []
+    try:
+        from app.models.event import Event
+        events = Event.query.filter(
+            Event.storefront_id == s.id,
+            Event.is_active == True,
+            Event.is_published == True,
+            Event.is_deleted == False
+        ).all()
+        # Filter show_on_storefront (default True)
+        events_data = [
+            e.to_dict(include_ticket_types=True) 
+            for e in events 
+            if getattr(e, 'show_on_storefront', True) is not False
+        ]
+    except Exception as ev_err:
+        logger.error(f"Error fetching storefront events: {ev_err}")
+
     return jsonify({
         "status": "success",
         "store_info": {
@@ -317,6 +336,7 @@ def get_storefront_details(slug):
             "whatsapp_link": f"https://wa.me/{s.phone}" if s.phone else None,
         },
         "catalogs": catalogs,
+        "events": events_data,
         "product_count": len(products),
     }), 200
 

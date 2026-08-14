@@ -266,6 +266,8 @@ def create_event():
             total_capacity=data.get('total_capacity'),
             is_active=True,
             is_published=data.get('is_published', False),
+            show_on_storefront=data.get('show_on_storefront', True),
+            show_on_marketplace=data.get('show_on_marketplace', True),
             meta_title=data.get('meta_title'),
             meta_description=data.get('meta_description'),
             terms_and_conditions=data.get('terms_and_conditions'),
@@ -342,6 +344,7 @@ def update_event(event_id):
             'timezone', 'event_type', 'event_format', 'venue_name', 'venue_address',
             'city', 'state', 'country', 'latitude', 'longitude', 'meeting_url',
             'meeting_password', 'total_capacity', 'is_active', 'is_published',
+            'show_on_storefront', 'show_on_marketplace',
             'cover_image', 'images', 'meta_title', 'meta_description',
             'terms_and_conditions', 'contact_email', 'contact_phone'
         ]
