@@ -220,18 +220,26 @@ def create_event():
         if not user or not storefront:
             return jsonify({'message': 'Vendor access required'}), 403
         
-        data = request.get_json()
+        data = request.form if request.form else (request.get_json() or {})
         
-        # Validate required fields
-        required = ['title', 'description', 'start_date', 'end_date', 'event_type']
-        for field in required:
-            if not data.get(field):
-                return jsonify({'message': f'Missing required field: {field}'}), 400
+        # Support aliases for field names sent by frontend
+        title = (data.get('title') or '').strip()
+        description = (data.get('description') or '').strip()
+        start_date_raw = data.get('start_date') or data.get('start_datetime')
+        end_date_raw = data.get('end_date') or data.get('end_datetime')
+        event_type = data.get('event_type') or 'in-person'
+        
+        if not title:
+            return jsonify({'message': 'Event title is required'}), 400
+        if not description:
+            return jsonify({'message': 'Event description is required'}), 400
+        if not start_date_raw or not end_date_raw:
+            return jsonify({'message': 'Start and end dates are required'}), 400
         
         # Parse dates
         try:
-            start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00'))
-            end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00'))
+            start_date = datetime.fromisoformat(str(start_date_raw).replace('Z', '+00:00'))
+            end_date = datetime.fromisoformat(str(end_date_raw).replace('Z', '+00:00'))
         except ValueError:
             return jsonify({'message': 'Invalid date format. Use ISO 8601'}), 400
         
@@ -240,43 +248,52 @@ def create_event():
             return jsonify({'message': 'End date must be after start date'}), 400
         
         # Generate unique slug
-        slug = _generate_unique_slug(data['title'])
+        slug = _generate_unique_slug(title)
+        
+        raw_cap = data.get('total_capacity') or data.get('capacity')
+        total_capacity = int(raw_cap) if raw_cap and str(raw_cap).isdigit() else None
         
         # Create event
         event = Event(
             storefront_id=storefront.id,
             vendor_id=user.id,
-            title=data['title'],
+            title=title,
             slug=slug,
-            description=data['description'],
+            description=description,
             start_date=start_date,
             end_date=end_date,
             timezone=data.get('timezone', 'Africa/Lagos'),
-            event_type=data['event_type'],
-            event_format=data.get('event_format', 'in-person'),
+            event_type=event_type,
+            event_format=data.get('event_format', 'in-person' if event_type != 'online' else 'online'),
             venue_name=data.get('venue_name'),
-            venue_address=data.get('venue_address'),
+            venue_address=data.get('venue_address') or data.get('location'),
             city=data.get('city'),
             state=data.get('state'),
             country=data.get('country', 'Nigeria'),
-            latitude=data.get('latitude'),
-            longitude=data.get('longitude'),
-            meeting_url=data.get('meeting_url'),
+            latitude=float(data['latitude']) if data.get('latitude') else None,
+            longitude=float(data['longitude']) if data.get('longitude') else None,
+            meeting_url=data.get('meeting_url') or data.get('online_link'),
             meeting_password=data.get('meeting_password'),
-            total_capacity=data.get('total_capacity'),
+            total_capacity=total_capacity,
             is_active=True,
-            is_published=data.get('is_published', False),
-            show_on_storefront=data.get('show_on_storefront', True),
-            show_on_marketplace=data.get('show_on_marketplace', True),
-            meta_title=data.get('meta_title'),
-            meta_description=data.get('meta_description'),
+            is_published=str(data.get('is_published', 'false')).lower() in ('true', '1', 'yes') or data.get('status') == 'published',
+            show_on_storefront=str(data.get('show_on_storefront', 'true')).lower() in ('true', '1', 'yes'),
+            show_on_marketplace=str(data.get('show_on_marketplace', 'true')).lower() in ('true', '1', 'yes'),
+            meta_title=data.get('meta_title') or data.get('seo_title'),
+            meta_description=data.get('meta_description') or data.get('seo_description'),
             terms_and_conditions=data.get('terms_and_conditions'),
             contact_email=data.get('contact_email'),
             contact_phone=data.get('contact_phone'),
         )
         
-        # Handle cover image upload if provided
-        if data.get('cover_image'):
+        # Handle cover image upload (File or URL string)
+        cover_file = request.files.get('cover_image')
+        if cover_file and cover_file.filename:
+            try:
+                event.cover_image = save_uploaded_file(cover_file, subfolder='events')
+            except ValueError as e:
+                return jsonify({'message': str(e)}), 400
+        elif data.get('cover_image') and isinstance(data['cover_image'], str):
             event.cover_image = data['cover_image']
         
         # Handle multiple images if provided
