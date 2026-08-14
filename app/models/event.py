@@ -1,0 +1,378 @@
+from app.extensions import db
+from datetime import datetime
+import secrets
+import string
+
+def generate_ticket_code(length=12):
+    """Generate a unique ticket code (e.g., EVT-ABC123XYZ456)"""
+    chars = string.ascii_uppercase + string.digits
+    code = ''.join(secrets.choice(chars) for _ in range(length))
+    return f"EVT-{code[:6]}-{code[6:]}"
+
+class Event(db.Model):
+    """Events created by vendors - concerts, workshops, webinars, meetups, etc."""
+    __tablename__ = 'events'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    storefront_id = db.Column(db.Integer, db.ForeignKey('storefronts.id'), nullable=False)
+    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    
+    # Basic event information
+    title = db.Column(db.String(255), nullable=False)
+    slug = db.Column(db.String(300), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=False)
+    cover_image = db.Column(db.String(500), nullable=True)
+    images = db.Column(db.JSON, default=list)  # Additional event images
+    
+    # Event timing
+    start_date = db.Column(db.DateTime, nullable=False)
+    end_date = db.Column(db.DateTime, nullable=False)
+    timezone = db.Column(db.String(50), default='Africa/Lagos')
+    
+    # Event type and format
+    event_type = db.Column(db.String(50), nullable=False)  # concert, workshop, webinar, conference, meetup, etc.
+    event_format = db.Column(db.String(20), default='in-person')  # in-person, online, hybrid
+    
+    # Location (for in-person and hybrid events)
+    venue_name = db.Column(db.String(255), nullable=True)
+    venue_address = db.Column(db.String(500), nullable=True)
+    city = db.Column(db.String(100), nullable=True)
+    state = db.Column(db.String(100), nullable=True)
+    country = db.Column(db.String(100), default='Nigeria')
+    latitude = db.Column(db.Float, nullable=True)
+    longitude = db.Column(db.Float, nullable=True)
+    
+    # Online event details (for online and hybrid events)
+    meeting_url = db.Column(db.String(500), nullable=True)  # Zoom, Google Meet, etc.
+    meeting_password = db.Column(db.String(100), nullable=True)
+    
+    # Capacity and status
+    total_capacity = db.Column(db.Integer, nullable=True)  # NULL = unlimited
+    tickets_sold = db.Column(db.Integer, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+    is_published = db.Column(db.Boolean, default=False)
+    is_deleted = db.Column(db.Boolean, default=False)
+    
+    # Analytics
+    view_count = db.Column(db.Integer, default=0)
+    
+    # SEO
+    meta_title = db.Column(db.String(255), nullable=True)
+    meta_description = db.Column(db.Text, nullable=True)
+    
+    # Additional details
+    terms_and_conditions = db.Column(db.Text, nullable=True)
+    contact_email = db.Column(db.String(255), nullable=True)
+    contact_phone = db.Column(db.String(20), nullable=True)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    storefront = db.relationship('Storefront', backref='events')
+    vendor = db.relationship('User', foreign_keys=[vendor_id])
+    ticket_types = db.relationship('TicketType', back_populates='event', cascade="all, delete-orphan")
+    ticket_purchases = db.relationship('TicketPurchase', back_populates='event', cascade="all, delete-orphan")
+    
+    @property
+    def is_sold_out(self):
+        """Check if event is sold out"""
+        if self.total_capacity is None:
+            return False
+        return self.tickets_sold >= self.total_capacity
+    
+    @property
+    def tickets_remaining(self):
+        """Get number of tickets remaining"""
+        if self.total_capacity is None:
+            return None  # Unlimited
+        return max(0, self.total_capacity - self.tickets_sold)
+    
+    @property
+    def has_free_tickets(self):
+        """Check if event has any free ticket types"""
+        return any(tt.is_free for tt in self.ticket_types if tt.is_active)
+    
+    @property
+    def has_paid_tickets(self):
+        """Check if event has any paid ticket types"""
+        return any(not tt.is_free for tt in self.ticket_types if tt.is_active)
+    
+    @property
+    def min_ticket_price(self):
+        """Get minimum ticket price (for paid tickets)"""
+        paid_tickets = [tt.price for tt in self.ticket_types if tt.is_active and not tt.is_free]
+        return min(paid_tickets) if paid_tickets else 0
+    
+    def to_dict(self, include_ticket_types=True):
+        """Convert event to dictionary"""
+        data = {
+            'id': self.id,
+            'storefront_id': self.storefront_id,
+            'vendor_id': self.vendor_id,
+            'title': self.title,
+            'slug': self.slug,
+            'description': self.description,
+            'cover_image': self.cover_image,
+            'images': self.images or [],
+            'start_date': self.start_date.isoformat() if self.start_date else None,
+            'end_date': self.end_date.isoformat() if self.end_date else None,
+            'timezone': self.timezone,
+            'event_type': self.event_type,
+            'event_format': self.event_format,
+            'venue_name': self.venue_name,
+            'venue_address': self.venue_address,
+            'city': self.city,
+            'state': self.state,
+            'country': self.country,
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'meeting_url': self.meeting_url if self.is_published else None,  # Only show to ticket holders
+            'total_capacity': self.total_capacity,
+            'tickets_sold': self.tickets_sold,
+            'tickets_remaining': self.tickets_remaining,
+            'is_sold_out': self.is_sold_out,
+            'is_active': self.is_active,
+            'is_published': self.is_published,
+            'view_count': self.view_count,
+            'meta_title': self.meta_title,
+            'meta_description': self.meta_description,
+            'contact_email': self.contact_email,
+            'contact_phone': self.contact_phone,
+            'has_free_tickets': self.has_free_tickets,
+            'has_paid_tickets': self.has_paid_tickets,
+            'min_ticket_price': float(self.min_ticket_price) if self.min_ticket_price else 0,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        
+        if include_ticket_types:
+            data['ticket_types'] = [tt.to_dict() for tt in self.ticket_types if tt.is_active]
+        
+        return data
+
+
+class TicketType(db.Model):
+    """Different ticket types for an event (VIP, Regular, Early Bird, etc.)"""
+    __tablename__ = 'ticket_types'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('events.id'), nullable=False)
+    
+    name = db.Column(db.String(100), nullable=False)  # e.g., "VIP", "Regular", "Early Bird"
+    description = db.Column(db.Text, nullable=True)
+    
+    # Pricing
+    is_free = db.Column(db.Boolean, default=False)
+    price = db.Column(db.Numeric(10, 2), default=0.00)
+    
+    # Availability
+    quantity_available = db.Column(db.Integer, nullable=True)  # NULL = unlimited
+    quantity_sold = db.Column(db.Integer, default=0)
+    min_per_order = db.Column(db.Integer, default=1)
+    max_per_order = db.Column(db.Integer, default=10)
+    
+    # Sales period
+    sale_start_date = db.Column(db.DateTime, nullable=True)  # NULL = available immediately
+    sale_end_date = db.Column(db.DateTime, nullable=True)  # NULL = until event starts
+    
+    # Status
+    is_active = db.Column(db.Boolean, default=True)
+    
+    # Benefits/perks (stored as JSON array)
+    benefits = db.Column(db.JSON, default=list)  # e.g., ["Front row seat", "Meet & greet", "Free drink"]
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    event = db.relationship('Event', back_populates='ticket_types')
+    purchases = db.relationship('TicketPurchase', back_populates='ticket_type', cascade="all, delete-orphan")
+    
+    @property
+    def is_sold_out(self):
+        """Check if this ticket type is sold out"""
+        if self.quantity_available is None:
+            return False
+        return self.quantity_sold >= self.quantity_available
+    
+    @property
+    def tickets_remaining(self):
+        """Get number of tickets remaining for this type"""
+        if self.quantity_available is None:
+            return None  # Unlimited
+        return max(0, self.quantity_available - self.quantity_sold)
+    
+    @property
+    def is_on_sale(self):
+        """Check if this ticket type is currently on sale"""
+        now = datetime.utcnow()
+        
+        # Check if sales have started
+        if self.sale_start_date and now < self.sale_start_date:
+            return False
+        
+        # Check if sales have ended
+        if self.sale_end_date and now > self.sale_end_date:
+            return False
+        
+        return True
+    
+    def to_dict(self):
+        """Convert ticket type to dictionary"""
+        return {
+            'id': self.id,
+            'event_id': self.event_id,
+            'name': self.name,
+            'description': self.description,
+            'is_free': self.is_free,
+            'price': float(self.price) if self.price else 0.00,
+            'quantity_available': self.quantity_available,
+            'quantity_sold': self.quantity_sold,
+            'tickets_remaining': self.tickets_remaining,
+            'is_sold_out': self.is_sold_out,
+            'min_per_order': self.min_per_order,
+            'max_per_order': self.max_per_order,
+            'sale_start_date': self.sale_start_date.isoformat() if self.sale_start_date else None,
+            'sale_end_date': self.sale_end_date.isoformat() if self.sale_end_date else None,
+            'is_on_sale': self.is_on_sale,
+            'is_active': self.is_active,
+            'benefits': self.benefits or [],
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class TicketPurchase(db.Model):
+    """Individual ticket purchase record with unique ticket code"""
+    __tablename__ = 'ticket_purchases'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('events.id'), nullable=False)
+    ticket_type_id = db.Column(db.Integer, db.ForeignKey('ticket_types.id'), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)  # NULL for free tickets
+    
+    # Unique ticket identification
+    ticket_code = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    qr_code_url = db.Column(db.String(500), nullable=True)  # URL to QR code image
+    
+    # Buyer information (captured at purchase)
+    buyer_name = db.Column(db.String(255), nullable=False)
+    buyer_email = db.Column(db.String(255), nullable=False)
+    buyer_phone = db.Column(db.String(20), nullable=True)
+    
+    # Purchase details
+    price_paid = db.Column(db.Numeric(10, 2), default=0.00)
+    quantity = db.Column(db.Integer, default=1)  # Usually 1, but can be multiple
+    
+    # Ticket status
+    status = db.Column(db.String(20), default='ACTIVE')  # ACTIVE, USED, CANCELLED, REFUNDED
+    is_checked_in = db.Column(db.Boolean, default=False)
+    checked_in_at = db.Column(db.DateTime, nullable=True)
+    checked_in_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Staff/vendor who checked in
+    
+    # Transfer tracking (if tickets can be transferred)
+    original_buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    transferred_at = db.Column(db.DateTime, nullable=True)
+    
+    # PDF ticket URL (generated after purchase)
+    pdf_ticket_url = db.Column(db.String(500), nullable=True)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    event = db.relationship('Event', back_populates='ticket_purchases')
+    ticket_type = db.relationship('TicketType', back_populates='purchases')
+    buyer = db.relationship('User', foreign_keys=[buyer_id], backref='ticket_purchases')
+    order = db.relationship('Order', backref='ticket_purchases')
+    checked_in_by_user = db.relationship('User', foreign_keys=[checked_in_by])
+    original_buyer = db.relationship('User', foreign_keys=[original_buyer_id])
+    
+    def __init__(self, **kwargs):
+        """Generate unique ticket code on creation"""
+        super(TicketPurchase, self).__init__(**kwargs)
+        if not self.ticket_code:
+            self.ticket_code = self.generate_unique_code()
+    
+    @staticmethod
+    def generate_unique_code():
+        """Generate a unique ticket code"""
+        while True:
+            code = generate_ticket_code()
+            existing = TicketPurchase.query.filter_by(ticket_code=code).first()
+            if not existing:
+                return code
+    
+    @property
+    def is_valid(self):
+        """Check if ticket is valid for use"""
+        return self.status == 'ACTIVE' and not self.is_checked_in
+    
+    @property
+    def can_be_checked_in(self):
+        """Check if ticket can be checked in"""
+        if self.status != 'ACTIVE':
+            return False
+        if self.is_checked_in:
+            return False
+        
+        # Check if event has started (optional - can check in before event)
+        # now = datetime.utcnow()
+        # if now < self.event.start_date:
+        #     return False
+        
+        return True
+    
+    def to_dict(self, include_sensitive=False):
+        """Convert ticket purchase to dictionary"""
+        data = {
+            'id': self.id,
+            'event_id': self.event_id,
+            'ticket_type_id': self.ticket_type_id,
+            'buyer_id': self.buyer_id,
+            'order_id': self.order_id,
+            'ticket_code': self.ticket_code,
+            'qr_code_url': self.qr_code_url,
+            'buyer_name': self.buyer_name,
+            'buyer_email': self.buyer_email,
+            'buyer_phone': self.buyer_phone,
+            'price_paid': float(self.price_paid) if self.price_paid else 0.00,
+            'quantity': self.quantity,
+            'status': self.status,
+            'is_checked_in': self.is_checked_in,
+            'checked_in_at': self.checked_in_at.isoformat() if self.checked_in_at else None,
+            'is_valid': self.is_valid,
+            'can_be_checked_in': self.can_be_checked_in,
+            'pdf_ticket_url': self.pdf_ticket_url,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+        
+        # Include event and ticket type details for convenience
+        if self.event:
+            data['event'] = {
+                'id': self.event.id,
+                'title': self.event.title,
+                'start_date': self.event.start_date.isoformat() if self.event.start_date else None,
+                'end_date': self.event.end_date.isoformat() if self.event.end_date else None,
+                'venue_name': self.event.venue_name,
+                'venue_address': self.event.venue_address,
+                'city': self.event.city,
+                'event_format': self.event.event_format,
+                'cover_image': self.event.cover_image,
+            }
+            
+            # Include meeting URL only for ticket holders
+            if include_sensitive and self.event.meeting_url:
+                data['event']['meeting_url'] = self.event.meeting_url
+                data['event']['meeting_password'] = self.event.meeting_password
+        
+        if self.ticket_type:
+            data['ticket_type'] = {
+                'id': self.ticket_type.id,
+                'name': self.ticket_type.name,
+                'description': self.ticket_type.description,
+                'benefits': self.ticket_type.benefits or [],
+            }
+        
+        return data

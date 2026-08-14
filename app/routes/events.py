@@ -1,0 +1,1148 @@
+"""
+events.py — Events and Ticketing Routes
+Handles: event creation, ticket types, ticket purchases, check-ins, validation
+"""
+import logging
+import re
+from datetime import datetime
+from decimal import Decimal
+from slugify import slugify
+
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity, jwt_required
+from sqlalchemy import or_, and_
+from sqlalchemy.orm import joinedload
+
+from app.extensions import db
+from app.models.user import User, Storefront, UserRole
+from app.models.event import Event, TicketType, TicketPurchase
+from app.models.order import Order, OrderItem
+from app.utils.upload import save_uploaded_file
+
+events_bp = Blueprint('events', __name__)
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------------------------
+
+def _require_vendor_storefront(user_id):
+    """Returns (user, storefront) or (None, None) if not a vendor."""
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return None, None
+    
+    # Check if user is vendor or admin
+    if user.role not in [UserRole.VENDOR, UserRole.ADMIN]:
+        if user.storefront is not None:
+            user.role = UserRole.VENDOR
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        else:
+            return None, None
+    
+    if not user.storefront:
+        return user, None
+    
+    return user, user.storefront
+
+
+def _generate_unique_slug(title, event_id=None):
+    """Generate a unique slug for an event"""
+    base_slug = slugify(title)
+    slug = base_slug
+    counter = 1
+    
+    while True:
+        query = Event.query.filter_by(slug=slug)
+        if event_id:
+            query = query.filter(Event.id != event_id)
+        
+        if not query.first():
+            return slug
+        
+        slug = f"{base_slug}-{counter}"
+        counter += 1
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC EVENT ROUTES
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/events', methods=['GET'])
+def list_events():
+    """
+    List all published events with filters
+    Query params:
+    - city, state, country: location filters
+    - event_type: filter by type (concert, workshop, etc.)
+    - event_format: in-person, online, hybrid
+    - is_free: true/false (events with free tickets)
+    - upcoming: true (only future events)
+    - page, per_page: pagination
+    """
+    try:
+        # Filters
+        city = request.args.get('city')
+        state = request.args.get('state')
+        country = request.args.get('country')
+        event_type = request.args.get('event_type')
+        event_format = request.args.get('event_format')
+        is_free = request.args.get('is_free', '').lower() == 'true'
+        upcoming = request.args.get('upcoming', 'true').lower() == 'true'
+        
+        # Pagination
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        
+        # Base query - only published and active events
+        query = Event.query.filter_by(
+            is_published=True,
+            is_active=True,
+            is_deleted=False
+        )
+        
+        # Apply filters
+        if upcoming:
+            query = query.filter(Event.end_date >= datetime.utcnow())
+        
+        if city:
+            query = query.filter(Event.city.ilike(f'%{city}%'))
+        
+        if state:
+            query = query.filter(Event.state.ilike(f'%{state}%'))
+        
+        if country:
+            query = query.filter(Event.country.ilike(f'%{country}%'))
+        
+        if event_type:
+            query = query.filter(Event.event_type == event_type)
+        
+        if event_format:
+            query = query.filter(Event.event_format == event_format)
+        
+        # Order by start date
+        query = query.order_by(Event.start_date.asc())
+        
+        # Paginate
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        # Filter by free tickets if requested
+        events = []
+        for event in pagination.items:
+            if is_free and not event.has_free_tickets:
+                continue
+            events.append(event.to_dict())
+        
+        return jsonify({
+            'events': events,
+            'page': page,
+            'per_page': per_page,
+            'total': pagination.total,
+            'pages': pagination.pages
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error listing events: {e}")
+        return jsonify({'message': 'Failed to list events'}), 500
+
+
+@events_bp.route('/events/<slug>', methods=['GET'])
+def get_event(slug):
+    """Get event details by slug"""
+    try:
+        event = Event.query.filter_by(
+            slug=slug,
+            is_published=True,
+            is_active=True,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        # Increment view count
+        event.view_count = (event.view_count or 0) + 1
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        
+        return jsonify(event.to_dict(include_ticket_types=True)), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting event: {e}")
+        return jsonify({'message': 'Failed to get event'}), 500
+
+
+# ---------------------------------------------------------------------------
+# VENDOR EVENT MANAGEMENT ROUTES
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/vendor/events', methods=['GET'])
+@jwt_required()
+def get_vendor_events():
+    """Get all events for the authenticated vendor"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        # Get all events for this vendor
+        events = Event.query.filter_by(
+            vendor_id=user.id,
+            is_deleted=False
+        ).order_by(Event.created_at.desc()).all()
+        
+        return jsonify({
+            'events': [event.to_dict(include_ticket_types=True) for event in events]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting vendor events: {e}")
+        return jsonify({'message': 'Failed to get events'}), 500
+
+
+@events_bp.route('/vendor/events', methods=['POST'])
+@jwt_required()
+def create_event():
+    """Create a new event"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        required = ['title', 'description', 'start_date', 'end_date', 'event_type']
+        for field in required:
+            if not data.get(field):
+                return jsonify({'message': f'Missing required field: {field}'}), 400
+        
+        # Parse dates
+        try:
+            start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00'))
+            end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00'))
+        except ValueError:
+            return jsonify({'message': 'Invalid date format. Use ISO 8601'}), 400
+        
+        # Validate dates
+        if end_date <= start_date:
+            return jsonify({'message': 'End date must be after start date'}), 400
+        
+        # Generate unique slug
+        slug = _generate_unique_slug(data['title'])
+        
+        # Create event
+        event = Event(
+            storefront_id=storefront.id,
+            vendor_id=user.id,
+            title=data['title'],
+            slug=slug,
+            description=data['description'],
+            start_date=start_date,
+            end_date=end_date,
+            timezone=data.get('timezone', 'Africa/Lagos'),
+            event_type=data['event_type'],
+            event_format=data.get('event_format', 'in-person'),
+            venue_name=data.get('venue_name'),
+            venue_address=data.get('venue_address'),
+            city=data.get('city'),
+            state=data.get('state'),
+            country=data.get('country', 'Nigeria'),
+            latitude=data.get('latitude'),
+            longitude=data.get('longitude'),
+            meeting_url=data.get('meeting_url'),
+            meeting_password=data.get('meeting_password'),
+            total_capacity=data.get('total_capacity'),
+            is_active=True,
+            is_published=data.get('is_published', False),
+            meta_title=data.get('meta_title'),
+            meta_description=data.get('meta_description'),
+            terms_and_conditions=data.get('terms_and_conditions'),
+            contact_email=data.get('contact_email'),
+            contact_phone=data.get('contact_phone'),
+        )
+        
+        # Handle cover image upload if provided
+        if data.get('cover_image'):
+            event.cover_image = data['cover_image']
+        
+        # Handle multiple images if provided
+        if data.get('images'):
+            event.images = data['images']
+        
+        db.session.add(event)
+        db.session.commit()
+        
+        logger.info(f"Event created: {event.id} by vendor {user.id}")
+        
+        return jsonify({
+            'message': 'Event created successfully',
+            'event': event.to_dict(include_ticket_types=True)
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating event: {e}")
+        return jsonify({'message': 'Failed to create event'}), 500
+
+
+@events_bp.route('/vendor/events/<int:event_id>', methods=['PUT'])
+@jwt_required()
+def update_event(event_id):
+    """Update an existing event"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        data = request.get_json()
+        
+        # Update fields
+        if 'title' in data and data['title'] != event.title:
+            event.title = data['title']
+            event.slug = _generate_unique_slug(data['title'], event_id)
+        
+        if 'description' in data:
+            event.description = data['description']
+        
+        if 'start_date' in data:
+            event.start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00'))
+        
+        if 'end_date' in data:
+            event.end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00'))
+        
+        # Validate dates
+        if event.end_date <= event.start_date:
+            return jsonify({'message': 'End date must be after start date'}), 400
+        
+        # Update other fields
+        updatable_fields = [
+            'timezone', 'event_type', 'event_format', 'venue_name', 'venue_address',
+            'city', 'state', 'country', 'latitude', 'longitude', 'meeting_url',
+            'meeting_password', 'total_capacity', 'is_active', 'is_published',
+            'cover_image', 'images', 'meta_title', 'meta_description',
+            'terms_and_conditions', 'contact_email', 'contact_phone'
+        ]
+        
+        for field in updatable_fields:
+            if field in data:
+                setattr(event, field, data[field])
+        
+        db.session.commit()
+        
+        logger.info(f"Event updated: {event.id} by vendor {user.id}")
+        
+        return jsonify({
+            'message': 'Event updated successfully',
+            'event': event.to_dict(include_ticket_types=True)
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating event: {e}")
+        return jsonify({'message': 'Failed to update event'}), 500
+
+
+@events_bp.route('/vendor/events/<int:event_id>', methods=['DELETE'])
+@jwt_required()
+def delete_event(event_id):
+    """Soft delete an event"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        # Check if there are any ticket purchases
+        has_purchases = TicketPurchase.query.filter_by(event_id=event.id).count() > 0
+        
+        if has_purchases:
+            return jsonify({
+                'message': 'Cannot delete event with ticket purchases. Unpublish instead.'
+            }), 400
+        
+        # Soft delete
+        event.is_deleted = True
+        event.is_published = False
+        db.session.commit()
+        
+        logger.info(f"Event deleted: {event.id} by vendor {user.id}")
+        
+        return jsonify({'message': 'Event deleted successfully'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting event: {e}")
+        return jsonify({'message': 'Failed to delete event'}), 500
+
+
+# ---------------------------------------------------------------------------
+# TICKET TYPE MANAGEMENT ROUTES
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/vendor/events/<int:event_id>/ticket-types', methods=['POST'])
+@jwt_required()
+def create_ticket_type(event_id):
+    """Create a ticket type for an event"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('name'):
+            return jsonify({'message': 'Ticket name is required'}), 400
+        
+        is_free = data.get('is_free', False)
+        price = Decimal(data.get('price', 0))
+        
+        if not is_free and price <= 0:
+            return jsonify({'message': 'Paid tickets must have price > 0'}), 400
+        
+        # Create ticket type
+        ticket_type = TicketType(
+            event_id=event.id,
+            name=data['name'],
+            description=data.get('description'),
+            is_free=is_free,
+            price=0 if is_free else price,
+            quantity_available=data.get('quantity_available'),
+            min_per_order=data.get('min_per_order', 1),
+            max_per_order=data.get('max_per_order', 10),
+            sale_start_date=datetime.fromisoformat(data['sale_start_date'].replace('Z', '+00:00')) if data.get('sale_start_date') else None,
+            sale_end_date=datetime.fromisoformat(data['sale_end_date'].replace('Z', '+00:00')) if data.get('sale_end_date') else None,
+            is_active=data.get('is_active', True),
+            benefits=data.get('benefits', [])
+        )
+        
+        db.session.add(ticket_type)
+        db.session.commit()
+        
+        logger.info(f"Ticket type created: {ticket_type.id} for event {event.id}")
+        
+        return jsonify({
+            'message': 'Ticket type created successfully',
+            'ticket_type': ticket_type.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating ticket type: {e}")
+        return jsonify({'message': 'Failed to create ticket type'}), 500
+
+
+@events_bp.route('/vendor/events/<int:event_id>/ticket-types/<int:ticket_type_id>', methods=['PUT'])
+@jwt_required()
+def update_ticket_type(event_id, ticket_type_id):
+    """Update a ticket type"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        ticket_type = TicketType.query.filter_by(
+            id=ticket_type_id,
+            event_id=event.id
+        ).first()
+        
+        if not ticket_type:
+            return jsonify({'message': 'Ticket type not found'}), 404
+        
+        data = request.get_json()
+        
+        # Update fields
+        updatable_fields = [
+            'name', 'description', 'is_free', 'price', 'quantity_available',
+            'min_per_order', 'max_per_order', 'is_active', 'benefits'
+        ]
+        
+        for field in updatable_fields:
+            if field in data:
+                if field == 'price':
+                    setattr(ticket_type, field, Decimal(data[field]))
+                else:
+                    setattr(ticket_type, field, data[field])
+        
+        if 'sale_start_date' in data and data['sale_start_date']:
+            ticket_type.sale_start_date = datetime.fromisoformat(data['sale_start_date'].replace('Z', '+00:00'))
+        
+        if 'sale_end_date' in data and data['sale_end_date']:
+            ticket_type.sale_end_date = datetime.fromisoformat(data['sale_end_date'].replace('Z', '+00:00'))
+        
+        db.session.commit()
+        
+        logger.info(f"Ticket type updated: {ticket_type.id}")
+        
+        return jsonify({
+            'message': 'Ticket type updated successfully',
+            'ticket_type': ticket_type.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating ticket type: {e}")
+        return jsonify({'message': 'Failed to update ticket type'}), 500
+
+
+@events_bp.route('/vendor/events/<int:event_id>/ticket-types/<int:ticket_type_id>', methods=['DELETE'])
+@jwt_required()
+def delete_ticket_type(event_id, ticket_type_id):
+    """Delete a ticket type (only if no purchases)"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        ticket_type = TicketType.query.filter_by(
+            id=ticket_type_id,
+            event_id=event.id
+        ).first()
+        
+        if not ticket_type:
+            return jsonify({'message': 'Ticket type not found'}), 404
+        
+        # Check if there are any purchases
+        has_purchases = TicketPurchase.query.filter_by(ticket_type_id=ticket_type.id).count() > 0
+        
+        if has_purchases:
+            return jsonify({
+                'message': 'Cannot delete ticket type with purchases. Deactivate instead.'
+            }), 400
+        
+        db.session.delete(ticket_type)
+        db.session.commit()
+        
+        logger.info(f"Ticket type deleted: {ticket_type_id}")
+        
+        return jsonify({'message': 'Ticket type deleted successfully'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting ticket type: {e}")
+        return jsonify({'message': 'Failed to delete ticket type'}), 500
+
+
+# ---------------------------------------------------------------------------
+# VENDOR EVENT ANALYTICS
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/vendor/events/<int:event_id>/analytics', methods=['GET'])
+@jwt_required()
+def get_event_analytics(event_id):
+    """Get analytics for an event"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        # Get ticket purchases statistics
+        purchases = TicketPurchase.query.filter_by(event_id=event.id).all()
+        
+        total_tickets_sold = len(purchases)
+        total_revenue = sum(float(p.price_paid) for p in purchases)
+        free_tickets_issued = sum(1 for p in purchases if p.price_paid == 0)
+        paid_tickets_sold = total_tickets_sold - free_tickets_issued
+        
+        # Tickets by type
+        tickets_by_type = {}
+        revenue_by_type = {}
+        
+        for tt in event.ticket_types:
+            type_purchases = [p for p in purchases if p.ticket_type_id == tt.id]
+            tickets_by_type[tt.name] = len(type_purchases)
+            revenue_by_type[tt.name] = sum(float(p.price_paid) for p in type_purchases)
+        
+        # Check-in statistics
+        checked_in_count = sum(1 for p in purchases if p.is_checked_in)
+        
+        return jsonify({
+            'event': event.to_dict(include_ticket_types=True),
+            'analytics': {
+                'total_tickets_sold': total_tickets_sold,
+                'free_tickets_issued': free_tickets_issued,
+                'paid_tickets_sold': paid_tickets_sold,
+                'total_revenue': total_revenue,
+                'tickets_by_type': tickets_by_type,
+                'revenue_by_type': revenue_by_type,
+                'checked_in_count': checked_in_count,
+                'check_in_rate': (checked_in_count / total_tickets_sold * 100) if total_tickets_sold > 0 else 0,
+                'view_count': event.view_count or 0,
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting event analytics: {e}")
+        return jsonify({'message': 'Failed to get analytics'}), 500
+
+
+# ---------------------------------------------------------------------------
+# VENDOR TICKET MANAGEMENT
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/vendor/events/<int:event_id>/tickets', methods=['GET'])
+@jwt_required()
+def get_event_tickets(event_id):
+    """Get all ticket purchases for an event"""
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        event = Event.query.filter_by(
+            id=event_id,
+            vendor_id=user.id,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        # Get all ticket purchases
+        purchases = TicketPurchase.query.filter_by(
+            event_id=event.id
+        ).order_by(TicketPurchase.created_at.desc()).all()
+        
+        return jsonify({
+            'tickets': [p.to_dict() for p in purchases]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting event tickets: {e}")
+        return jsonify({'message': 'Failed to get tickets'}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# TICKET PURCHASING ROUTES (PUBLIC/BUYER)
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/events/<slug>/purchase-tickets', methods=['POST'])
+@jwt_required()
+def purchase_tickets(slug):
+    """
+    Purchase tickets for an event
+    For free tickets: creates ticket immediately
+    For paid tickets: creates order and tickets after payment
+    """
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+        
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+        
+        event = Event.query.filter_by(
+            slug=slug,
+            is_published=True,
+            is_active=True,
+            is_deleted=False
+        ).first()
+        
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('ticket_type_id') or not data.get('quantity'):
+            return jsonify({'message': 'ticket_type_id and quantity are required'}), 400
+        
+        ticket_type = TicketType.query.filter_by(
+            id=data['ticket_type_id'],
+            event_id=event.id,
+            is_active=True
+        ).first()
+        
+        if not ticket_type:
+            return jsonify({'message': 'Ticket type not found or not available'}), 404
+        
+        quantity = int(data['quantity'])
+        
+        # Validate quantity
+        if quantity < ticket_type.min_per_order:
+            return jsonify({'message': f'Minimum {ticket_type.min_per_order} tickets required'}), 400
+        
+        if quantity > ticket_type.max_per_order:
+            return jsonify({'message': f'Maximum {ticket_type.max_per_order} tickets allowed'}), 400
+        
+        # Check if ticket type is on sale
+        if not ticket_type.is_on_sale:
+            return jsonify({'message': 'Tickets not available for sale at this time'}), 400
+        
+        # Check if sold out
+        if ticket_type.is_sold_out:
+            return jsonify({'message': 'This ticket type is sold out'}), 400
+        
+        # Check if enough tickets available
+        if ticket_type.quantity_available is not None:
+            if ticket_type.tickets_remaining < quantity:
+                return jsonify({
+                    'message': f'Only {ticket_type.tickets_remaining} tickets remaining'
+                }), 400
+        
+        # Check event capacity
+        if event.total_capacity is not None:
+            if event.tickets_remaining < quantity:
+                return jsonify({
+                    'message': f'Only {event.tickets_remaining} tickets remaining for this event'
+                }), 400
+        
+        # Buyer information
+        buyer_name = data.get('buyer_name', user.full_name)
+        buyer_email = data.get('buyer_email', user.email)
+        buyer_phone = data.get('buyer_phone', user.phone)
+        
+        if not buyer_name or not buyer_email:
+            return jsonify({'message': 'Buyer name and email are required'}), 400
+        
+        # Calculate total price
+        total_price = float(ticket_type.price) * quantity
+        
+        # FREE TICKETS - Create immediately
+        if ticket_type.is_free or total_price == 0:
+            tickets = []
+            
+            for i in range(quantity):
+                ticket = TicketPurchase(
+                    event_id=event.id,
+                    ticket_type_id=ticket_type.id,
+                    buyer_id=user.id,
+                    buyer_name=buyer_name,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    price_paid=0,
+                    quantity=1,
+                    status='ACTIVE'
+                )
+                db.session.add(ticket)
+                tickets.append(ticket)
+            
+            # Update sold counts
+            ticket_type.quantity_sold = (ticket_type.quantity_sold or 0) + quantity
+            event.tickets_sold = (event.tickets_sold or 0) + quantity
+            
+            db.session.commit()
+            
+            logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to user {user.id}")
+            
+            return jsonify({
+                'message': 'Free tickets issued successfully',
+                'tickets': [t.to_dict(include_sensitive=True) for t in tickets],
+                'is_free': True
+            }), 201
+        
+        # PAID TICKETS - Create order and return payment info
+        else:
+            # Create order for payment
+            order = Order(
+                buyer_id=user.id,
+                vendor_id=event.vendor_id,
+                total_amount=Decimal(str(total_price)),
+                status='PENDING',
+                payment_method='ESCROW'
+            )
+            db.session.add(order)
+            db.session.flush()  # Get order ID
+            
+            # Create order item (we'll use product_id=None for tickets)
+            order_item = OrderItem(
+                order_id=order.id,
+                product_id=None,  # Not a product
+                price_at_purchase=ticket_type.price,
+                quantity=quantity
+            )
+            db.session.add(order_item)
+            
+            # Create ticket purchases in PENDING status
+            tickets = []
+            for i in range(quantity):
+                ticket = TicketPurchase(
+                    event_id=event.id,
+                    ticket_type_id=ticket_type.id,
+                    buyer_id=user.id,
+                    order_id=order.id,
+                    buyer_name=buyer_name,
+                    buyer_email=buyer_email,
+                    buyer_phone=buyer_phone,
+                    price_paid=ticket_type.price,
+                    quantity=1,
+                    status='PENDING'  # Will be activated after payment
+                )
+                db.session.add(ticket)
+                tickets.append(ticket)
+            
+            db.session.commit()
+            
+            logger.info(f"Paid ticket order created: {order.id} for event {event.id}")
+            
+            return jsonify({
+                'message': 'Order created. Complete payment to receive tickets.',
+                'order_id': order.id,
+                'total_amount': float(total_price),
+                'payment_required': True,
+                'is_free': False
+            }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error purchasing tickets: {e}")
+        return jsonify({'message': 'Failed to purchase tickets'}), 500
+
+
+@events_bp.route('/user/tickets', methods=['GET'])
+@jwt_required()
+def get_user_tickets():
+    """Get all tickets for the authenticated user"""
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+        
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+        
+        # Get all ticket purchases for this user
+        purchases = TicketPurchase.query.filter_by(
+            buyer_id=user.id
+        ).order_by(TicketPurchase.created_at.desc()).all()
+        
+        return jsonify({
+            'tickets': [p.to_dict(include_sensitive=True) for p in purchases]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user tickets: {e}")
+        return jsonify({'message': 'Failed to get tickets'}), 500
+
+
+@events_bp.route('/user/tickets/<ticket_code>', methods=['GET'])
+@jwt_required()
+def get_ticket_details(ticket_code):
+    """Get details of a specific ticket"""
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+        
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+        
+        ticket = TicketPurchase.query.filter_by(
+            ticket_code=ticket_code,
+            buyer_id=user.id
+        ).first()
+        
+        if not ticket:
+            return jsonify({'message': 'Ticket not found'}), 404
+        
+        return jsonify(ticket.to_dict(include_sensitive=True)), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting ticket details: {e}")
+        return jsonify({'message': 'Failed to get ticket'}), 500
+
+
+# ---------------------------------------------------------------------------
+# TICKET VALIDATION AND CHECK-IN ROUTES
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/vendor/tickets/<ticket_code>/validate', methods=['GET'])
+@jwt_required()
+def validate_ticket(ticket_code):
+    """
+    Validate a ticket code (without checking in)
+    Used by vendors to verify ticket authenticity
+    """
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        ticket = TicketPurchase.query.filter_by(
+            ticket_code=ticket_code.upper()
+        ).first()
+        
+        if not ticket:
+            return jsonify({
+                'valid': False,
+                'message': 'Ticket not found'
+            }), 404
+        
+        # Check if this vendor owns the event
+        if ticket.event.vendor_id != user.id:
+            return jsonify({
+                'valid': False,
+                'message': 'Ticket is not for your event'
+            }), 403
+        
+        # Check ticket status
+        if ticket.status != 'ACTIVE':
+            return jsonify({
+                'valid': False,
+                'message': f'Ticket status: {ticket.status}',
+                'ticket': ticket.to_dict()
+            }), 200
+        
+        if ticket.is_checked_in:
+            return jsonify({
+                'valid': False,
+                'message': 'Ticket already used',
+                'checked_in_at': ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
+                'ticket': ticket.to_dict()
+            }), 200
+        
+        # Ticket is valid
+        return jsonify({
+            'valid': True,
+            'message': 'Ticket is valid',
+            'ticket': ticket.to_dict(),
+            'can_check_in': ticket.can_be_checked_in
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error validating ticket: {e}")
+        return jsonify({'message': 'Failed to validate ticket'}), 500
+
+
+@events_bp.route('/vendor/tickets/<ticket_code>/check-in', methods=['POST'])
+@jwt_required()
+def check_in_ticket(ticket_code):
+    """
+    Check in a ticket at the event
+    Marks ticket as used
+    """
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        ticket = TicketPurchase.query.filter_by(
+            ticket_code=ticket_code.upper()
+        ).first()
+        
+        if not ticket:
+            return jsonify({
+                'success': False,
+                'message': 'Ticket not found'
+            }), 404
+        
+        # Check if this vendor owns the event
+        if ticket.event.vendor_id != user.id:
+            return jsonify({
+                'success': False,
+                'message': 'Ticket is not for your event'
+            }), 403
+        
+        # Check if can be checked in
+        if not ticket.can_be_checked_in:
+            if ticket.is_checked_in:
+                return jsonify({
+                    'success': False,
+                    'message': 'Ticket already checked in',
+                    'checked_in_at': ticket.checked_in_at.isoformat() if ticket.checked_in_at else None
+                }), 400
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Ticket cannot be checked in. Status: {ticket.status}'
+                }), 400
+        
+        # Check in the ticket
+        ticket.is_checked_in = True
+        ticket.checked_in_at = datetime.utcnow()
+        ticket.checked_in_by = user.id
+        
+        db.session.commit()
+        
+        logger.info(f"Ticket checked in: {ticket.ticket_code} by vendor {user.id}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Ticket checked in successfully',
+            'ticket': ticket.to_dict(),
+            'checked_in_at': ticket.checked_in_at.isoformat()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error checking in ticket: {e}")
+        return jsonify({'message': 'Failed to check in ticket'}), 500
+
+
+@events_bp.route('/vendor/tickets/<ticket_code>/undo-check-in', methods=['POST'])
+@jwt_required()
+def undo_check_in(ticket_code):
+    """
+    Undo a ticket check-in (in case of mistake)
+    """
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+        
+        ticket = TicketPurchase.query.filter_by(
+            ticket_code=ticket_code.upper()
+        ).first()
+        
+        if not ticket:
+            return jsonify({'message': 'Ticket not found'}), 404
+        
+        # Check if this vendor owns the event
+        if ticket.event.vendor_id != user.id:
+            return jsonify({'message': 'Ticket is not for your event'}), 403
+        
+        if not ticket.is_checked_in:
+            return jsonify({'message': 'Ticket is not checked in'}), 400
+        
+        # Undo check-in
+        ticket.is_checked_in = False
+        ticket.checked_in_at = None
+        ticket.checked_in_by = None
+        
+        db.session.commit()
+        
+        logger.info(f"Ticket check-in undone: {ticket.ticket_code} by vendor {user.id}")
+        
+        return jsonify({
+            'message': 'Check-in undone successfully',
+            'ticket': ticket.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error undoing check-in: {e}")
+        return jsonify({'message': 'Failed to undo check-in'}), 500
+
+
+# ---------------------------------------------------------------------------
+# EVENT SEARCH AND DISCOVERY
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/events/search', methods=['GET'])
+def search_events():
+    """
+    Search events by keyword
+    Query params:
+    - q: search query (searches title, description, venue)
+    - page, per_page: pagination
+    """
+    try:
+        query_text = request.args.get('q', '').strip()
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        
+        if not query_text:
+            return jsonify({'message': 'Search query required'}), 400
+        
+        # Search in title, description, and venue
+        search_filter = or_(
+            Event.title.ilike(f'%{query_text}%'),
+            Event.description.ilike(f'%{query_text}%'),
+            Event.venue_name.ilike(f'%{query_text}%'),
+            Event.city.ilike(f'%{query_text}%')
+        )
+        
+        query = Event.query.filter(
+            Event.is_published == True,
+            Event.is_active == True,
+            Event.is_deleted == False,
+            Event.end_date >= datetime.utcnow(),
+            search_filter
+        ).order_by(Event.start_date.asc())
+        
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        return jsonify({
+            'events': [event.to_dict() for event in pagination.items],
+            'page': page,
+            'per_page': per_page,
+            'total': pagination.total,
+            'pages': pagination.pages
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error searching events: {e}")
+        return jsonify({'message': 'Failed to search events'}), 500

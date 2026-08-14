@@ -15,6 +15,7 @@ from .negotiation import NegotiationRequest, NegotiationHistory
 from .payment_link import PaymentLink
 from .trust import VendorTrustProfile, TrustScoreHistory
 from .grant import Grant
+from .event import Event, TicketType, TicketPurchase
 
 __all__ = [
     'User', 'Storefront', 'UserRole',
@@ -35,4 +36,5 @@ __all__ = [
     'PaymentLink',
     'VendorTrustProfile', 'TrustScoreHistory',
     'Grant',
+    'Event', 'TicketType', 'TicketPurchase',
 ]

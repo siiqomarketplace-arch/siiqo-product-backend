@@ -65,6 +65,7 @@ class Product(db.Model):
 
     # ── Product type & digital/service fields ────────────────────────
     product_type  = db.Column(db.String(20), default='physical')   # physical | digital | service
+    is_free       = db.Column(db.Boolean, default=False)           # TRUE for free digital products/services
     file_url      = db.Column(db.String(500), nullable=True)       # download link for digital
     booking_link  = db.Column(db.String(500), nullable=True)       # booking URL for services
 

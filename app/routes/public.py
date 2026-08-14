@@ -571,3 +571,161 @@ def get_vendor_trust_breakdown(vendor_id):
             "id_verified": bool(vendor.nin),
         },
     }), 200
+
+
+
+# ---------------------------------------------------------------------------
+# DIGITAL PRODUCT DOWNLOADS
+# ---------------------------------------------------------------------------
+
+@public_bp.route('/orders/<int:order_id>/downloads', methods=['GET'])
+def get_order_downloads(order_id):
+    """
+    Get download links for digital products in a completed order
+    No auth required - order ID acts as access token
+    """
+    from app.models.order import Order
+    from flask_jwt_extended import jwt_required, get_jwt_identity
+    
+    # Optional auth - if user is logged in, verify they own the order
+    try:
+        from flask_jwt_extended import verify_jwt_in_request
+        verify_jwt_in_request(optional=True)
+        user_id = get_jwt_identity()
+        
+        if user_id:
+            order = Order.query.filter_by(id=order_id, buyer_id=int(user_id)).first()
+        else:
+            order = Order.query.filter_by(id=order_id).first()
+    except:
+        order = Order.query.filter_by(id=order_id).first()
+    
+    if not order:
+        return jsonify({'message': 'Order not found'}), 404
+    
+    # Only show downloads for completed/delivered orders
+    if order.status not in ['DELIVERED', 'COMPLETED']:
+        return jsonify({'message': 'Order not completed yet'}), 400
+    
+    # Get digital products from order
+    downloads = []
+    for item in order.items:
+        if item.product and item.product.product_type == 'digital' and item.product.file_url:
+            downloads.append({
+                'product_id': item.product.id,
+                'product_name': item.product.name,
+                'download_url': item.product.file_url,
+                'image': item.product.images[0] if item.product.images else None
+            })
+    
+    if not downloads:
+        return jsonify({'message': 'No digital products in this order'}), 404
+    
+    return jsonify({
+        'order_id': order.id,
+        'downloads': downloads
+    }), 200
+
+
+@public_bp.route('/products/<int:product_id>/claim-free', methods=['POST'])
+def claim_free_product(product_id):
+    """
+    Claim a free digital product or service
+    Creates order and immediately provides access
+    Requires authentication
+    """
+    from flask_jwt_extended import jwt_required, get_jwt_identity
+    from app.models.order import Order, OrderItem
+    from app.models.communication import Notification
+    from datetime import datetime
+    
+    try:
+        from flask_jwt_extended import verify_jwt_in_request
+        verify_jwt_in_request()
+        user_id = get_jwt_identity()
+    except:
+        return jsonify({'message': 'Authentication required to claim free products'}), 401
+    
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+    
+    product = Product.query.filter_by(
+        id=product_id,
+        is_active=True,
+        is_free=True
+    ).first()
+    
+    if not product:
+        return jsonify({'message': 'Free product not found'}), 404
+    
+    if product.product_type not in ['digital', 'service']:
+        return jsonify({'message': 'Only digital products and services can be claimed for free'}), 400
+    
+    # Check if user already claimed this product
+    existing_order = Order.query.join(OrderItem).filter(
+        Order.buyer_id == user.id,
+        OrderItem.product_id == product.id,
+        Order.total_amount == 0
+    ).first()
+    
+    if existing_order:
+        return jsonify({
+            'message': 'You already claimed this product',
+            'order_id': existing_order.id,
+            'access_url': product.file_url if product.product_type == 'digital' else product.booking_link
+        }), 200
+    
+    # Create free order
+    order = Order(
+        buyer_id=user.id,
+        vendor_id=product.storefront.vendor_id,
+        total_amount=0,
+        status='COMPLETED',  # Free products are instantly completed
+        payment_method='FREE'
+    )
+    db.session.add(order)
+    db.session.flush()
+    
+    # Create order item
+    order_item = OrderItem(
+        order_id=order.id,
+        product_id=product.id,
+        price_at_purchase=0,
+        quantity=1
+    )
+    db.session.add(order_item)
+    
+    # Send notification to buyer
+    notification = Notification(
+        user_id=user.id,
+        title=f'Free {product.product_type.title()} Claimed! 🎉',
+        message=f'You now have access to: {product.name}',
+        type='ORDER',
+        order_id=order.id
+    )
+    db.session.add(notification)
+    
+    db.session.commit()
+    
+    logging.info(f"Free product claimed: {product.id} by user {user.id}")
+    
+    # Return access information
+    response = {
+        'message': 'Free product claimed successfully!',
+        'order_id': order.id,
+        'product': {
+            'id': product.id,
+            'name': product.name,
+            'type': product.product_type
+        }
+    }
+    
+    if product.product_type == 'digital':
+        response['download_url'] = product.file_url
+        response['access_type'] = 'download'
+    elif product.product_type == 'service':
+        response['booking_url'] = product.booking_link
+        response['access_type'] = 'booking'
+    
+    return jsonify(response), 201
