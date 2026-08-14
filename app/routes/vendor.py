@@ -655,6 +655,9 @@ def add_product():
         if cat:
             category_id = cat.id
 
+    # Validate type-specific required fields & resolve product type
+    p_type = data.get('product_type', 'physical')
+
     # Handle digital file upload if provided
     file_url_val = data.get('file_url')
     booking_link_val = data.get('booking_link')
@@ -669,9 +672,6 @@ def add_product():
                     file_url_val = uploaded_url
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
-
-    # Validate type-specific required fields
-    p_type = data.get('product_type', 'physical')
     if p_type == 'digital' and not (file_url_val or '').strip():
         return jsonify({"message": "A Digital File upload or Download Link (file_url) is required for digital products."}), 400
     if p_type == 'service' and not (booking_link_val or '').strip():

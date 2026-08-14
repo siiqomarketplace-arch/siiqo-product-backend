@@ -739,15 +739,27 @@ def claim_free_product(product_id):
 
     logging.info(f"Free product claimed: {product.id} by user {user.id}")
 
-    file_url = product.file_url or product.booking_link
-    booking_url = product.booking_link or product.file_url
+    raw_file_url = product.file_url or product.booking_link
+    raw_booking_url = product.booking_link or product.file_url
+
+    def _make_abs(u):
+        if not u:
+            return u
+        if u.startswith('/static/'):
+            # Convert /static/uploads/... to absolute URL
+            base = request.host_url.rstrip('/')
+            return f"{base}{u}"
+        return u
+
+    file_url = _make_abs(raw_file_url)
+    booking_url = _make_abs(raw_booking_url)
 
     # ── Send emails (background threads, never block response) ────────────────
     try:
         from app.utils.email import send_siiqo_email
         from datetime import datetime, timezone
 
-        buyer_name = user.full_name or user.email.split('@')[0] if user.email else 'there'
+        buyer_name = user.full_name or (user.email.split('@')[0] if user.email else 'there')
         claimed_at = datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
 
         # 1. Email to buyer with download link
