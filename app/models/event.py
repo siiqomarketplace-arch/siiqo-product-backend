@@ -376,3 +376,45 @@ class TicketPurchase(db.Model):
             }
         
         return data
+
+
+class EventReview(db.Model):
+    """Reviews and ratings left by attendees after an event."""
+    __tablename__ = 'event_reviews'
+
+    id         = db.Column(db.Integer, primary_key=True)
+    event_id   = db.Column(db.Integer, db.ForeignKey('events.id', ondelete='CASCADE'), nullable=False, index=True)
+    reviewer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+
+    rating     = db.Column(db.Integer, nullable=False)   # 1-5
+    comment    = db.Column(db.Text, nullable=True)
+
+    # Ensure one review per user per event
+    __table_args__ = (
+        db.UniqueConstraint('event_id', 'reviewer_id', name='uq_event_review_user'),
+    )
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    event    = db.relationship('Event', backref=db.backref('reviews', lazy='dynamic'))
+    reviewer = db.relationship('User', foreign_keys=[reviewer_id])
+
+    def to_dict(self):
+        reviewer_name = ''
+        if self.reviewer:
+            reviewer_name = (
+                self.reviewer.business_name
+                or f"{self.reviewer.first_name or ''} {self.reviewer.last_name or ''}".strip()
+                or self.reviewer.email.split('@')[0]
+            )
+        return {
+            'id':            self.id,
+            'event_id':      self.event_id,
+            'reviewer_id':   self.reviewer_id,
+            'reviewer_name': reviewer_name,
+            'rating':        self.rating,
+            'comment':       self.comment,
+            'created_at':    self.created_at.isoformat() if self.created_at else None,
+        }

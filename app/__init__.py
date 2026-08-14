@@ -103,6 +103,92 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'Cash'",
                 "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS notes TEXT",
                 "ALTER TABLE receipts ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'paid'",
+                # ── Events & Ticketing ───────────────────────────────────────────
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_free BOOLEAN DEFAULT FALSE",
+                """CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    storefront_id INTEGER REFERENCES storefronts(id),
+                    vendor_id INTEGER REFERENCES users(id),
+                    title VARCHAR(255) NOT NULL,
+                    slug VARCHAR(300) UNIQUE NOT NULL,
+                    description TEXT NOT NULL,
+                    cover_image VARCHAR(500),
+                    images JSONB DEFAULT '[]',
+                    start_date TIMESTAMP,
+                    end_date TIMESTAMP,
+                    timezone VARCHAR(50) DEFAULT 'Africa/Lagos',
+                    event_type VARCHAR(50),
+                    event_format VARCHAR(20) DEFAULT 'in-person',
+                    venue_name VARCHAR(255),
+                    venue_address VARCHAR(500),
+                    city VARCHAR(100),
+                    state VARCHAR(100),
+                    country VARCHAR(100) DEFAULT 'Nigeria',
+                    latitude FLOAT,
+                    longitude FLOAT,
+                    meeting_url VARCHAR(500),
+                    meeting_password VARCHAR(100),
+                    total_capacity INTEGER,
+                    tickets_sold INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    is_deleted BOOLEAN DEFAULT FALSE,
+                    view_count INTEGER DEFAULT 0,
+                    meta_title VARCHAR(255),
+                    meta_description TEXT,
+                    terms_and_conditions TEXT,
+                    contact_email VARCHAR(255),
+                    contact_phone VARCHAR(20),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS ticket_types (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+                    name VARCHAR(100) NOT NULL,
+                    description TEXT,
+                    price NUMERIC(10,2) DEFAULT 0,
+                    quantity_available INTEGER,
+                    quantity_sold INTEGER DEFAULT 0,
+                    is_free BOOLEAN DEFAULT FALSE,
+                    benefits JSONB DEFAULT '[]',
+                    sale_start TIMESTAMP,
+                    sale_end TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS ticket_purchases (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+                    ticket_type_id INTEGER REFERENCES ticket_types(id),
+                    buyer_id INTEGER REFERENCES users(id),
+                    order_id INTEGER REFERENCES orders(id),
+                    ticket_code VARCHAR(20) UNIQUE NOT NULL,
+                    qr_code_url VARCHAR(500),
+                    buyer_name VARCHAR(255),
+                    buyer_email VARCHAR(255),
+                    buyer_phone VARCHAR(20),
+                    price_paid NUMERIC(10,2) DEFAULT 0,
+                    quantity INTEGER DEFAULT 1,
+                    status VARCHAR(20) DEFAULT 'PENDING',
+                    is_checked_in BOOLEAN DEFAULT FALSE,
+                    checked_in_at TIMESTAMP,
+                    checked_in_by INTEGER,
+                    is_valid BOOLEAN DEFAULT TRUE,
+                    pdf_ticket_url VARCHAR(500),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS event_reviews (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+                    reviewer_id INTEGER REFERENCES users(id),
+                    rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE (event_id, reviewer_id)
+                )""",
             ]:
                 try:
                     db.session.execute(_text(col_def))
@@ -372,6 +458,18 @@ def create_app(config_name: str | None = None) -> Flask:
                 name='Weekly store recap email to all active vendors',
                 replace_existing=True,
             )
+            # Event reminder emails — check every hour, send 24h before event
+            try:
+                from app.tasks.event_reminder_tasks import run_event_reminders
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_event_reminders),
+                    trigger=IntervalTrigger(hours=1),
+                    id='event_reminders',
+                    name='24h event reminder emails to ticket holders',
+                    replace_existing=True,
+                )
+            except Exception as reminder_err:
+                logger.warning(f"Event reminder task registration skipped: {reminder_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")

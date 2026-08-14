@@ -18,6 +18,7 @@ from app.models.user import User, Storefront, UserRole
 from app.models.event import Event, TicketType, TicketPurchase
 from app.models.order import Order, OrderItem
 from app.utils.upload import save_uploaded_file
+from app.utils.email import send_siiqo_email
 
 events_bp = Blueprint('events', __name__)
 logger = logging.getLogger(__name__)
@@ -802,6 +803,31 @@ def purchase_tickets(slug):
             
             db.session.commit()
             
+            # Send ticket confirmation email (non-blocking background thread)
+            try:
+                event_date_str = event.start_date.strftime('%A, %B %d, %Y') if event.start_date else 'TBA'
+                event_time_str = event.start_date.strftime('%I:%M %p') if event.start_date else 'TBA'
+                send_siiqo_email(
+                    to_email=buyer_email,
+                    subject=f"🎟️ Your Free Ticket: {event.title}",
+                    template_name="ticket_issued",
+                    buyer_name=buyer_name,
+                    event_title=event.title,
+                    ticket_type_name=ticket_type.name,
+                    ticket_code=tickets[0].ticket_code if tickets else '',
+                    quantity=quantity,
+                    event_date=event_date_str,
+                    event_time=event_time_str,
+                    event_location=event.venue_address or event.city or '',
+                    event_format=event.event_format or 'in-person',
+                    total_price='0',
+                    is_free=True,
+                    tickets_url='https://siiqo.com/buyer/tickets',
+                    year=datetime.utcnow().year,
+                )
+            except Exception as email_err:
+                logger.warning(f"Ticket email failed (non-fatal): {email_err}")
+            
             logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to user {user.id}")
             
             return jsonify({
@@ -1146,3 +1172,231 @@ def search_events():
     except Exception as e:
         logger.error(f"Error searching events: {e}")
         return jsonify({'message': 'Failed to search events'}), 500
+
+# ---------------------------------------------------------------------------
+# EVENT REVIEWS
+# ---------------------------------------------------------------------------
+
+from app.models.event import EventReview  # noqa: E402
+
+
+@events_bp.route('/events/<slug>/reviews', methods=['GET'])
+def get_event_reviews(slug):
+    """Get all reviews for an event."""
+    try:
+        event = Event.query.filter_by(slug=slug, is_deleted=False).first()
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+
+        reviews = EventReview.query.filter_by(event_id=event.id)\
+            .order_by(EventReview.created_at.desc()).all()
+
+        total   = len(reviews)
+        avg     = round(sum(r.rating for r in reviews) / total, 1) if total else 0
+
+        return jsonify({
+            'reviews':        [r.to_dict() for r in reviews],
+            'total':          total,
+            'average_rating': avg,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error fetching reviews: {e}")
+        return jsonify({'message': 'Failed to fetch reviews'}), 500
+
+
+@events_bp.route('/events/<slug>/reviews', methods=['POST'])
+@jwt_required()
+def add_event_review(slug):
+    """
+    Add or update a review for an event.
+    Requires the user to have attended (has an ACTIVE or USED ticket).
+    """
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+
+        event = Event.query.filter_by(slug=slug, is_deleted=False).first()
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+
+        data   = request.get_json() or {}
+        rating = data.get('rating')
+        comment = data.get('comment', '').strip()
+
+        if not rating or not isinstance(rating, int) or not (1 <= rating <= 5):
+            return jsonify({'message': 'Rating must be an integer between 1 and 5'}), 400
+
+        # Check the user actually has a ticket
+        has_ticket = TicketPurchase.query.filter(
+            TicketPurchase.event_id == event.id,
+            TicketPurchase.buyer_id == user.id,
+            TicketPurchase.status.in_(['ACTIVE', 'USED']),
+        ).first()
+
+        if not has_ticket:
+            return jsonify({'message': 'You must have a ticket to review this event'}), 403
+
+        # Upsert review
+        review = EventReview.query.filter_by(
+            event_id=event.id, reviewer_id=user.id
+        ).first()
+
+        if review:
+            review.rating  = rating
+            review.comment = comment
+            review.updated_at = datetime.utcnow()
+            msg = 'Review updated'
+        else:
+            review = EventReview(
+                event_id=event.id,
+                reviewer_id=user.id,
+                rating=rating,
+                comment=comment,
+            )
+            db.session.add(review)
+            msg = 'Review added'
+
+        db.session.commit()
+        return jsonify({'message': msg, 'review': review.to_dict()}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error adding review: {e}")
+        return jsonify({'message': 'Failed to save review'}), 500
+
+
+@events_bp.route('/events/<slug>/reviews/my', methods=['GET'])
+@jwt_required()
+def get_my_event_review(slug):
+    """Get the current user's review for an event (if any)."""
+    try:
+        user_id = get_jwt_identity()
+        event   = Event.query.filter_by(slug=slug, is_deleted=False).first()
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+
+        review = EventReview.query.filter_by(
+            event_id=event.id, reviewer_id=int(user_id)
+        ).first()
+
+        return jsonify({'review': review.to_dict() if review else None}), 200
+
+    except Exception as e:
+        logger.error(f"Error fetching user review: {e}")
+        return jsonify({'message': 'Failed to fetch review'}), 500
+
+
+# ---------------------------------------------------------------------------
+# RECURRING EVENTS
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/vendor/events/<int:event_id>/recur', methods=['POST'])
+@jwt_required()
+def create_recurring_event(event_id):
+    """
+    Generate recurring copies of an event.
+    Body: { "pattern": "weekly"|"biweekly"|"monthly", "occurrences": 4 }
+    Creates up to `occurrences` future copies, each shifted by the pattern interval.
+    Max 12 occurrences per call to prevent abuse.
+    """
+    try:
+        user_id = get_jwt_identity()
+        user, storefront = _require_vendor_storefront(user_id)
+        if not user or not storefront:
+            return jsonify({'message': 'Vendor access required'}), 403
+
+        source = db.session.get(Event, event_id)
+        if not source or source.is_deleted:
+            return jsonify({'message': 'Event not found'}), 404
+        if source.vendor_id != user.id:
+            return jsonify({'message': 'Not your event'}), 403
+
+        data = request.get_json() or {}
+        pattern     = data.get('pattern', 'weekly')
+        occurrences = min(int(data.get('occurrences', 4)), 12)
+
+        from datetime import timedelta
+
+        DELTAS = {
+            'daily':     timedelta(days=1),
+            'weekly':    timedelta(weeks=1),
+            'biweekly':  timedelta(weeks=2),
+            'monthly':   timedelta(days=30),
+        }
+
+        delta = DELTAS.get(pattern, timedelta(weeks=1))
+        duration = (source.end_date - source.start_date) if (source.start_date and source.end_date) else timedelta(hours=2)
+
+        created_events = []
+        current_start = source.start_date + delta
+
+        for i in range(occurrences):
+            new_end   = current_start + duration
+            new_title = source.title  # same title, new dates
+            new_slug  = _generate_unique_slug(f"{source.title} {current_start.strftime('%b-%d')}")
+
+            new_event = Event(
+                storefront_id=source.storefront_id,
+                vendor_id=source.vendor_id,
+                title=new_title,
+                slug=new_slug,
+                description=source.description,
+                cover_image=source.cover_image,
+                images=source.images,
+                start_date=current_start,
+                end_date=new_end,
+                timezone=source.timezone,
+                event_type=source.event_type,
+                event_format=source.event_format,
+                venue_name=source.venue_name,
+                venue_address=source.venue_address,
+                city=source.city,
+                state=source.state,
+                country=source.country,
+                latitude=source.latitude,
+                longitude=source.longitude,
+                meeting_url=source.meeting_url,
+                meeting_password=source.meeting_password,
+                total_capacity=source.total_capacity,
+                is_active=True,
+                is_published=source.is_published,
+                meta_title=source.meta_title,
+                meta_description=source.meta_description,
+                contact_email=source.contact_email,
+                contact_phone=source.contact_phone,
+            )
+            db.session.add(new_event)
+            db.session.flush()  # get new_event.id
+
+            # Copy ticket types
+            for tt in source.ticket_types:
+                new_tt = TicketType(
+                    event_id=new_event.id,
+                    name=tt.name,
+                    description=tt.description,
+                    price=tt.price,
+                    quantity_available=tt.quantity_available,
+                    quantity_sold=0,
+                    is_free=tt.is_free,
+                    benefits=tt.benefits,
+                )
+                db.session.add(new_tt)
+
+            created_events.append(new_event)
+            current_start += delta
+
+        db.session.commit()
+        logger.info(f"Created {len(created_events)} recurring events from event {event_id}")
+
+        return jsonify({
+            'message': f'Created {len(created_events)} recurring events',
+            'events': [e.to_dict() for e in created_events],
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating recurring events: {e}")
+        return jsonify({'message': 'Failed to create recurring events'}), 500
