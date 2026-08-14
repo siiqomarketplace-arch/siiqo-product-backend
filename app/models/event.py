@@ -108,6 +108,9 @@ class Event(db.Model):
     
     def to_dict(self, include_ticket_types=True):
         """Convert event to dictionary"""
+        _start = self.start_date.isoformat() if self.start_date else None
+        _end = self.end_date.isoformat() if self.end_date else None
+        _status = 'published' if self.is_published else 'draft'
         data = {
             'id': self.id,
             'storefront_id': self.storefront_id,
@@ -117,30 +120,41 @@ class Event(db.Model):
             'description': self.description,
             'cover_image': self.cover_image,
             'images': self.images or [],
-            'start_date': self.start_date.isoformat() if self.start_date else None,
-            'end_date': self.end_date.isoformat() if self.end_date else None,
+            # Both naming conventions for frontend compatibility
+            'start_date': _start,
+            'end_date': _end,
+            'start_datetime': _start,
+            'end_datetime': _end,
             'timezone': self.timezone,
             'event_type': self.event_type,
-            'event_format': self.event_format,
+            'event_format': self.event_format or 'in-person',
             'venue_name': self.venue_name,
             'venue_address': self.venue_address,
+            'location': self.venue_address,       # frontend alias
             'city': self.city,
             'state': self.state,
             'country': self.country,
             'latitude': self.latitude,
             'longitude': self.longitude,
-            'meeting_url': self.meeting_url if self.is_published else None,  # Only show to ticket holders
+            'meeting_url': self.meeting_url,
+            'online_link': self.meeting_url,       # frontend alias
+            'meeting_password': self.meeting_password,
             'total_capacity': self.total_capacity,
-            'tickets_sold': self.tickets_sold,
+            'capacity': self.total_capacity,        # frontend alias
+            'tickets_sold': self.tickets_sold or 0,
             'tickets_remaining': self.tickets_remaining,
             'is_sold_out': self.is_sold_out,
             'is_active': self.is_active,
             'is_published': self.is_published,
+            'status': _status,                     # frontend uses status string
             'show_on_storefront': self.show_on_storefront if self.show_on_storefront is not None else True,
             'show_on_marketplace': self.show_on_marketplace if self.show_on_marketplace is not None else True,
-            'view_count': self.view_count,
+            'view_count': self.view_count or 0,
+            'revenue': 0,                          # placeholder; computed in analytics endpoint
             'meta_title': self.meta_title,
+            'seo_title': self.meta_title,           # frontend alias
             'meta_description': self.meta_description,
+            'seo_description': self.meta_description,  # frontend alias
             'contact_email': self.contact_email,
             'contact_phone': self.contact_phone,
             'has_free_tickets': self.has_free_tickets,

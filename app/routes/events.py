@@ -336,39 +336,94 @@ def update_event(event_id):
         if not event:
             return jsonify({'message': 'Event not found'}), 404
         
-        data = request.get_json()
+        data = request.form if request.form else (request.get_json() or {})
         
-        # Update fields
-        if 'title' in data and data['title'] != event.title:
-            event.title = data['title']
-            event.slug = _generate_unique_slug(data['title'], event_id)
+        # Support field name aliases from frontend
+        new_title = (data.get('title') or '').strip()
+        if new_title and new_title != event.title:
+            event.title = new_title
+            event.slug = _generate_unique_slug(new_title, event_id)
         
-        if 'description' in data:
+        if data.get('description'):
             event.description = data['description']
         
-        if 'start_date' in data:
-            event.start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00'))
+        # Accept start_datetime (frontend) or start_date (backend)
+        start_date_raw = data.get('start_datetime') or data.get('start_date')
+        end_date_raw = data.get('end_datetime') or data.get('end_date')
         
-        if 'end_date' in data:
-            event.end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00'))
+        if start_date_raw:
+            try:
+                event.start_date = datetime.fromisoformat(str(start_date_raw).replace('Z', '+00:00'))
+            except ValueError:
+                return jsonify({'message': 'Invalid start date format'}), 400
         
-        # Validate dates
-        if event.end_date <= event.start_date:
+        if end_date_raw:
+            try:
+                event.end_date = datetime.fromisoformat(str(end_date_raw).replace('Z', '+00:00'))
+            except ValueError:
+                return jsonify({'message': 'Invalid end date format'}), 400
+        
+        # Validate dates only if both are present
+        if event.start_date and event.end_date and event.end_date <= event.start_date:
             return jsonify({'message': 'End date must be after start date'}), 400
         
-        # Update other fields
-        updatable_fields = [
-            'timezone', 'event_type', 'event_format', 'venue_name', 'venue_address',
-            'city', 'state', 'country', 'latitude', 'longitude', 'meeting_url',
-            'meeting_password', 'total_capacity', 'is_active', 'is_published',
-            'show_on_storefront', 'show_on_marketplace',
-            'cover_image', 'images', 'meta_title', 'meta_description',
-            'terms_and_conditions', 'contact_email', 'contact_phone'
-        ]
+        # Accept field aliases
+        if data.get('location') or data.get('venue_address'):
+            event.venue_address = data.get('venue_address') or data.get('location')
         
-        for field in updatable_fields:
-            if field in data:
+        if data.get('online_link') or data.get('meeting_url'):
+            event.meeting_url = data.get('meeting_url') or data.get('online_link')
+        
+        if data.get('seo_title') or data.get('meta_title'):
+            event.meta_title = data.get('meta_title') or data.get('seo_title')
+        
+        if data.get('seo_description') or data.get('meta_description'):
+            event.meta_description = data.get('meta_description') or data.get('seo_description')
+        
+        # Handle capacity
+        raw_cap = data.get('total_capacity') or data.get('capacity')
+        if raw_cap and str(raw_cap).isdigit():
+            event.total_capacity = int(raw_cap)
+        
+        # Handle is_published from status or is_published field
+        if data.get('status'):
+            event.is_published = data['status'] == 'published'
+        elif 'is_published' in data:
+            event.is_published = str(data['is_published']).lower() in ('true', '1', 'yes')
+        
+        # Direct updatable string fields
+        for field in ['timezone', 'event_type', 'event_format', 'venue_name', 'city',
+                      'state', 'country', 'meeting_password', 'terms_and_conditions',
+                      'contact_email', 'contact_phone']:
+            if data.get(field):
                 setattr(event, field, data[field])
+        
+        # Boolean fields
+        for field in ['show_on_storefront', 'show_on_marketplace', 'is_active']:
+            if field in data:
+                setattr(event, field, str(data[field]).lower() in ('true', '1', 'yes'))
+        
+        # Float fields
+        if data.get('latitude'):
+            try:
+                event.latitude = float(data['latitude'])
+            except (ValueError, TypeError):
+                pass
+        if data.get('longitude'):
+            try:
+                event.longitude = float(data['longitude'])
+            except (ValueError, TypeError):
+                pass
+        
+        # Handle cover image file upload
+        cover_file = request.files.get('cover_image') if request.files else None
+        if cover_file and cover_file.filename:
+            try:
+                event.cover_image = save_uploaded_file(cover_file, subfolder='events')
+            except ValueError as e:
+                return jsonify({'message': str(e)}), 400
+        elif data.get('cover_image') and isinstance(data.get('cover_image'), str):
+            event.cover_image = data['cover_image']
         
         db.session.commit()
         
@@ -382,7 +437,7 @@ def update_event(event_id):
     except Exception as e:
         db.session.rollback()
         logger.error(f"Error updating event: {e}")
-        return jsonify({'message': 'Failed to update event'}), 500
+        return jsonify({'message': 'Failed to update event', 'error': str(e)}), 500
 
 
 @events_bp.route('/vendor/events/<int:event_id>', methods=['DELETE'])
