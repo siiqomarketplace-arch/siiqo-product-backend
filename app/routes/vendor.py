@@ -691,6 +691,7 @@ def add_product():
         is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
         floor_price=float(data['floor_price']) if data.get('floor_price') else None,
         product_type=data.get('product_type', 'physical'),
+        is_free=(price == 0 or str(data.get('is_free', 'false')).lower() in ('true', '1', 'yes')),
         file_url=file_url_val,
         booking_link=booking_link_val,
         sku=data.get('sku'),
@@ -833,6 +834,11 @@ def edit_product(product_id):
             product.price = float(data.get('price') or data.get('price-text'))
         except (ValueError, TypeError):
             pass
+
+    if product.price == 0 or str(data.get('is_free')).lower() in ('true', '1', 'yes'):
+        product.is_free = True
+    elif 'is_free' in data:
+        product.is_free = str(data.get('is_free')).lower() in ('true', '1', 'yes')
 
     # Accept 'stock_quantity' or 'quantity'
     if 'stock_quantity' in data:

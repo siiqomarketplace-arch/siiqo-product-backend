@@ -670,17 +670,21 @@ def claim_free_product(product_id):
     if not user:
         return jsonify({'message': 'User not found'}), 404
     
-    product = Product.query.filter_by(
-        id=product_id,
-        is_active=True,
-        is_free=True
+    product = Product.query.filter(
+        Product.id == product_id,
+        Product.is_active == True,
+        db.or_(Product.is_free == True, Product.price == 0)
     ).first()
     
     if not product:
         return jsonify({'message': 'Free product not found'}), 404
     
-    if product.product_type not in ['digital', 'service']:
-        return jsonify({'message': 'Only digital products and services can be claimed for free'}), 400
+    # Auto-ensure is_free flag is updated if price is 0
+    if product.price == 0 and not product.is_free:
+        product.is_free = True
+        db.session.commit()
+    
+    p_type = product.product_type or ('digital' if product.file_url else 'service' if product.booking_link else 'digital')
     
     # Check if user already claimed this product
     existing_order = Order.query.join(OrderItem).filter(
@@ -741,11 +745,16 @@ def claim_free_product(product_id):
         }
     }
     
-    if product.product_type == 'digital':
-        response['download_url'] = product.file_url
-        response['access_type'] = 'download'
-    elif product.product_type == 'service':
-        response['booking_url'] = product.booking_link
+    file_url = product.file_url or product.booking_link
+    booking_url = product.booking_link or product.file_url
+
+    response['download_url'] = file_url
+    response['booking_url'] = booking_url
+    response['file_url'] = file_url
+
+    if product.product_type == 'service':
         response['access_type'] = 'booking'
+    else:
+        response['access_type'] = 'download'
     
     return jsonify(response), 201
