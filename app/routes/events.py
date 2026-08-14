@@ -1475,3 +1475,67 @@ def create_recurring_event(event_id):
         db.session.rollback()
         logger.error(f"Error creating recurring events: {e}")
         return jsonify({'message': 'Failed to create recurring events'}), 500
+
+
+def activate_tickets_for_order(order_id):
+    """
+    Activates all PENDING TicketPurchase rows associated with an order,
+    increments ticket_type.quantity_sold and event.tickets_sold & event.revenue,
+    and sends ticket confirmation email to buyer.
+    """
+    try:
+        pending_tickets = TicketPurchase.query.filter_by(order_id=order_id, status='PENDING').all()
+        if not pending_tickets:
+            return False
+
+        from app.models.order import Order
+        order = db.session.get(Order, order_id)
+        
+        for t in pending_tickets:
+            t.status = 'ACTIVE'
+            if t.ticket_type_id:
+                tt = db.session.get(TicketType, t.ticket_type_id)
+                if tt:
+                    tt.quantity_sold = (tt.quantity_sold or 0) + 1
+            if t.event_id:
+                ev = db.session.get(Event, t.event_id)
+                if ev:
+                    ev.tickets_sold = (ev.tickets_sold or 0) + 1
+                    ev.revenue = float(ev.revenue or 0) + float(t.price_paid or 0)
+
+        db.session.commit()
+
+        # Send ticket confirmation email
+        first_ticket = pending_tickets[0]
+        ev = db.session.get(Event, first_ticket.event_id) if (first_ticket and first_ticket.event_id) else None
+        tt = db.session.get(TicketType, first_ticket.ticket_type_id) if (first_ticket and first_ticket.ticket_type_id) else None
+        if ev and first_ticket and first_ticket.buyer_email:
+            try:
+                event_date_str = ev.start_date.strftime('%A, %B %d, %Y') if ev.start_date else 'TBA'
+                event_time_str = ev.start_date.strftime('%I:%M %p') if ev.start_date else 'TBA'
+                send_siiqo_email(
+                    to_email=first_ticket.buyer_email,
+                    subject=f"🎟️ Your Ticket Confirmation: {ev.title}",
+                    template_name="ticket_issued",
+                    buyer_name=first_ticket.buyer_name,
+                    event_title=ev.title,
+                    ticket_type_name=tt.name if tt else 'Ticket',
+                    ticket_code=first_ticket.ticket_code,
+                    quantity=len(pending_tickets),
+                    event_date=event_date_str,
+                    event_time=event_time_str,
+                    event_location=ev.venue_address or ev.city or '',
+                    event_format=ev.event_format or 'in-person',
+                    total_price=f"{float(order.total_amount if order else 0):,.2f}",
+                    is_free=False,
+                    tickets_url='https://siiqo.com/buyer/tickets',
+                    year=datetime.utcnow().year,
+                )
+            except Exception as email_err:
+                logger.warning(f"[TICKET ACTIVATION] Email failed (non-fatal): {email_err}")
+
+        return True
+    except Exception as e:
+        logger.error(f"Error activating tickets for order {order_id}: {e}")
+        return False
+

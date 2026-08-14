@@ -588,6 +588,15 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
 
         db.session.flush()
 
+        # ── Event Ticket Orders: activate tickets and credit revenue ───────────
+        from app.routes.events import activate_tickets_for_order
+        is_ticket_order = activate_tickets_for_order(order_id)
+        if is_ticket_order:
+            escrow.status = EscrowStatus.RELEASED
+            escrow.released_at = _utcnow()
+            order.status = 'COMPLETED'
+            _payout_vendor_via_daya(order, escrow)
+
         from app.routes.escrow import _deliver_digital_products, _deliver_service_products
         is_digital = _deliver_digital_products(order, escrow)
         is_service = False

@@ -341,9 +341,11 @@ class TicketPurchase(db.Model):
         #     return False
         
         return True
-    
     def to_dict(self, include_sensitive=False):
         """Convert ticket purchase to dictionary"""
+        _price = float(self.price_paid) if self.price_paid else 0.00
+        _unit = _price / self.quantity if (self.quantity and self.quantity > 0) else _price
+        _status_lower = (self.status or 'active').lower()
         data = {
             'id': self.id,
             'event_id': self.event_id,
@@ -355,9 +357,12 @@ class TicketPurchase(db.Model):
             'buyer_name': self.buyer_name,
             'buyer_email': self.buyer_email,
             'buyer_phone': self.buyer_phone,
-            'price_paid': float(self.price_paid) if self.price_paid else 0.00,
-            'quantity': self.quantity,
-            'status': self.status,
+            'price_paid': _price,
+            'total_price': _price,  # frontend alias
+            'unit_price': _unit,    # frontend alias
+            'quantity': self.quantity or 1,
+            'status': _status_lower,  # frontend uses lowercase 'active'
+            'status_raw': self.status,
             'is_checked_in': self.is_checked_in,
             'checked_in_at': self.checked_in_at.isoformat() if self.checked_in_at else None,
             'is_valid': self.is_valid,
@@ -371,10 +376,14 @@ class TicketPurchase(db.Model):
             data['event'] = {
                 'id': self.event.id,
                 'title': self.event.title,
+                'slug': self.event.slug,
                 'start_date': self.event.start_date.isoformat() if self.event.start_date else None,
                 'end_date': self.event.end_date.isoformat() if self.event.end_date else None,
+                'start_datetime': self.event.start_date.isoformat() if self.event.start_date else None,
+                'end_datetime': self.event.end_date.isoformat() if self.event.end_date else None,
                 'venue_name': self.event.venue_name,
                 'venue_address': self.event.venue_address,
+                'location': self.event.venue_address,
                 'city': self.event.city,
                 'event_format': self.event.event_format,
                 'cover_image': self.event.cover_image,
