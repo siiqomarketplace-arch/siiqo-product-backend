@@ -172,7 +172,7 @@ def get_event(slug):
         except Exception:
             db.session.rollback()
         
-        return jsonify(event.to_dict(include_ticket_types=True)), 200
+        return jsonify({'event': event.to_dict(include_ticket_types=True)}), 200
         
     except Exception as e:
         logger.error(f"Error getting event: {e}")
