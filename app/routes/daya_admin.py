@@ -18,7 +18,8 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from app.extensions import db
-from app.models.admin import AdminUser, AdminAuditLog
+from app.models.admin import AdminUser
+from app.models.audit import AdminAuditLog
 from app.models.escrow import EscrowTransaction, EscrowStatus
 from sqlalchemy import func
 
@@ -248,12 +249,13 @@ def trigger_fee_sweep():
 
             db.session.add(AdminAuditLog(
                 admin_id=admin.id,
+                admin_email=admin.email,
+                admin_role=admin.role,
                 action="DAYA_FEE_SWEEP",
-                details=(
-                    f"Manual sweep ₦{sweep_ngn:,.2f} to account "
-                    f"{corp_account_number} ref={sweep_ref}"
-                ),
-                ip_address=request.remote_addr,
+                resource_type="SiiqoFeeSweep",
+                resource_id=sweep_ref,
+                details=f"Manual sweep ₦{sweep_ngn:,.2f} to account {corp_account_number} ref={sweep_ref}",
+                ip_address=request.remote_addr or "0.0.0.0",
             ))
             db.session.commit()
 
