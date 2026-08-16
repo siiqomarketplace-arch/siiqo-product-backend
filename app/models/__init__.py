@@ -16,6 +16,7 @@ from .payment_link import PaymentLink
 from .trust import VendorTrustProfile, TrustScoreHistory
 from .grant import Grant
 from .event import Event, TicketType, TicketPurchase, EventReview
+from .fee_sweep import SiiqoFeeSweep
 
 __all__ = [
     'User', 'Storefront', 'UserRole',
@@ -37,4 +38,5 @@ __all__ = [
     'VendorTrustProfile', 'TrustScoreHistory',
     'Grant',
     'Event', 'TicketType', 'TicketPurchase',
+    'SiiqoFeeSweep',
 ]

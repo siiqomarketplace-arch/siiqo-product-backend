@@ -362,6 +362,7 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.grants import grants_bp
     from app.routes.grants_migration import grants_migration_bp
     from app.routes.events import events_bp
+    from app.routes.daya_admin import daya_admin_bp
 
     app.register_blueprint(auth_bp,         url_prefix='/api/auth')
     app.register_blueprint(public_bp,       url_prefix='/api/marketplace')
@@ -384,6 +385,8 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(events_bp,       url_prefix='/api')
     # Temporary grants migration endpoint
     app.register_blueprint(grants_migration_bp, url_prefix='/api/admin')
+    # Daya admin: live balance + platform fee sweep
+    app.register_blueprint(daya_admin_bp,   url_prefix='/api/admin/daya')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
 
@@ -474,6 +477,19 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as reminder_err:
                 logger.warning(f"Event reminder task registration skipped: {reminder_err}")
+
+            # Platform fee auto-sweep — check every 6 hours, sweep when >= threshold
+            try:
+                from app.tasks.fee_sweep_tasks import run_platform_fee_sweep
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_platform_fee_sweep),
+                    trigger=IntervalTrigger(hours=6),
+                    id='platform_fee_sweep',
+                    name='Auto-sweep Siiqo 6% platform fees to corporate bank when >= threshold',
+                    replace_existing=True,
+                )
+            except Exception as sweep_err:
+                logger.warning(f"Platform fee sweep task registration skipped: {sweep_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")
