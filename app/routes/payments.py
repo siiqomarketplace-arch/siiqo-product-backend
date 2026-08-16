@@ -729,19 +729,26 @@ def _payout_vendor_via_daya(order, escrow):
     payment_type = dp.payment_type if dp else "ngn_onramp"
 
     # ── Step 1: Move collection → withdrawal so funds are available to send ──────
-    # Use 1380 NGN/USD as a conservative rate (adds buffer for FX spread + Daya fees).
-    # If this fails, we still attempt the transfer — withdrawal may already have enough.
+    # Fetch live rate dynamically from Daya (with fallback to locked payment rate or 1500)
+    current_rate = float(dp.rate) if (dp and dp.rate and float(dp.rate) > 0) else 1500.0
+    try:
+        rate_data = daya_service.get_rate(asset=dp.asset if dp else "USDT", side="SELL")
+        if rate_data and rate_data.get("rate"):
+            current_rate = float(rate_data["rate"])
+    except Exception as _rate_exc:
+        logger.info("[DAYA PAYOUT] Rate fetch fallback for Order %s: using rate %.2f (%s)", order.id, current_rate, _rate_exc)
+
     try:
         balance = daya_service.get_merchant_balance()
         bal_data = balance.get("data", {})
         collection_usd = float(bal_data.get("collection_balance_usd", 0))
         withdrawal_usd = float(bal_data.get("withdrawal_balance_usd", 0))
         logger.info(
-            "[DAYA PAYOUT] Order %s balances — collection: $%.4f  withdrawal: $%.4f",
-            order.id, collection_usd, withdrawal_usd
+            "[DAYA PAYOUT] Order %s balances — collection: $%.4f  withdrawal: $%.4f (rate: %.2f)",
+            order.id, collection_usd, withdrawal_usd, current_rate
         )
-        # Conservative USD estimate: NGN amount / 1380 + 2% buffer
-        estimated_usd_needed = round((net_amount_ngn / 1380) * 1.02, 4)
+        # USD estimate: NGN amount / current_rate + 2% buffer for fees/spread
+        estimated_usd_needed = round((net_amount_ngn / current_rate) * 1.02, 4)
         if withdrawal_usd < estimated_usd_needed:
             shortfall = estimated_usd_needed - withdrawal_usd
             amount_to_move = min(round(shortfall + 0.10, 4), collection_usd)
@@ -778,8 +785,8 @@ def _payout_vendor_via_daya(order, escrow):
             )
             # Fall through to Flow A
         else:
-            # Convert net NGN → USD. Use conservative 1380 rate.
-            net_usd = round(net_amount_ngn / 1380, 6)
+            # Convert net NGN → USD using current rate
+            net_usd = round(net_amount_ngn / current_rate, 6)
             chain = daya_service.NETWORK_TO_DAYA_CHAIN.get(
                 crypto_wallet.network, crypto_wallet.network
             )
