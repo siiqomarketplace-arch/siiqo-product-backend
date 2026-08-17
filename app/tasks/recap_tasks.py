@@ -18,6 +18,7 @@ def run_monday_recap_task():
     """
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
+    five_days_ago = now - timedelta(days=5)
     date_str = now.strftime("%b %d, %Y")
 
     storefronts = Storefront.query.filter_by(is_verified=True, is_published=True).all()
@@ -27,6 +28,18 @@ def run_monday_recap_task():
         vendor = sf.vendor
         if not vendor or not vendor.email:
             continue
+
+        # Deduplication guard: skip if weekly recap was already sent for this storefront within 5 days
+        sent_dict = dict(sf.onboarding_emails_sent or {})
+        last_recap_raw = sent_dict.get('weekly_recap_sent_at')
+        if last_recap_raw:
+            try:
+                last_recap_dt = datetime.fromisoformat(last_recap_raw.replace('Z', '+00:00'))
+                if last_recap_dt >= five_days_ago:
+                    logger.info(f"[MONDAY RECAP] Storefront #{sf.id} already received recap at {last_recap_raw}. Skipping duplicate.")
+                    continue
+            except Exception:
+                pass
 
         # Calculate orders & revenue in past 7 days
         recent_orders = Order.query.filter(
@@ -56,7 +69,15 @@ def run_monday_recap_task():
                 revenue=revenue_str,
             )
             count_sent += 1
+
+            # Update timestamp in JSONB column to prevent duplicate sending across worker processes
+            sent_dict['weekly_recap_sent_at'] = now.isoformat()
+            sf.onboarding_emails_sent = sent_dict
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(sf, 'onboarding_emails_sent')
+            db.session.commit()
         except Exception as e:
+            db.session.rollback()
             logger.error(f"[MONDAY RECAP ERR] Failed for SF #{sf.id}: {e}")
 
     logger.info(f"[MONDAY RECAP TASK] Sent weekly recap to {count_sent} vendors.")

@@ -356,6 +356,95 @@ def _deliver_service_products(order, escrow):
     logging.info(f"[SERVICE] Auto-delivered and released Order #{order.id}")
     return True
 
+
+def _deliver_event_tickets(order, escrow):
+    """
+    For orders containing event tickets:
+    - Activate pending tickets via activate_tickets_for_order(order.id)
+    - Immediately mark escrow as RELEASED (no physical delivery wait needed)
+    - Credit vendor ledger
+    - Email buyer and vendor
+    - Mark order COMPLETED
+    Returns True if any event tickets were found and handled.
+    """
+    from app.models.event import TicketPurchase
+    from app.routes.events import activate_tickets_for_order
+    from app.models.user import User
+    from app.models.finance import Receipt
+
+    tickets = TicketPurchase.query.filter_by(order_id=order.id).all()
+    if not tickets:
+        return False
+
+    # Activate tickets (switches status PENDING -> ACTIVE, updates sold counts, emails buyer QR code)
+    activate_tickets_for_order(order.id)
+
+    # Release escrow immediately — events are instant
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    escrow.status = EscrowStatus.RELEASED
+    escrow.released_at = _utcnow()
+    order.status = 'COMPLETED'
+
+    is_crypto = (order.payment_method or '').upper() == 'CRYPTO'
+    is_paystack = not is_crypto and (
+        (order.payment_method or '').upper() == 'PAYSTACK'
+        or (
+            escrow.payscrow_transaction_id
+            and not escrow.payscrow_transaction_id.startswith('ESC-')
+            and not escrow.payscrow_transaction_id.startswith('DAYA-')
+        )
+    )
+    if is_paystack:
+        vendor_used_split = False
+        try:
+            bank_acc = VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id, is_default=True
+            ).first() or VendorBankAccount.query.filter_by(
+                vendor_id=order.vendor_id
+            ).first()
+            if bank_acc and bank_acc.paystack_subaccount_code:
+                vendor_used_split = True
+            else:
+                from app.models.user import Storefront
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.paystack_subaccount_code:
+                    vendor_used_split = True
+        except Exception:
+            pass
+
+        if vendor_used_split:
+            logging.info(f"[EVENT] Order #{order.id} — vendor has subaccount, Paystack split already settled vendor.")
+        else:
+            _paystack_payout_vendor(order, escrow)
+
+    _credit_vendor_ledger(
+        vendor_id=order.vendor_id,
+        amount=net_amount,
+        reference_id=escrow.transaction_number,
+        description=f"Auto-released payout for Event Ticket Order #{order.id}",
+    )
+
+    if not Receipt.query.filter_by(order_id=order.id).first():
+        db.session.add(Receipt(order_id=order.id))
+
+    db.session.add(Notification(
+        user_id=order.buyer_id,
+        title="Event Tickets Ready! 🎟️",
+        message=f"Your tickets for Order #{order.id} are active. Access them in My Tickets.",
+        type="ORDER",
+        order_id=order.id,
+    ))
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title="Event Ticket Sale Complete 🎟️",
+        message=f"Order #{order.id} ticket sale completed. ₦{net_amount:,.2f} credited.",
+        type="ESCROW",
+        order_id=order.id,
+    ))
+
+    logging.info(f"[EVENT] Auto-delivered and released Order #{order.id}")
+    return True
+
 # ---------------------------------------------------------------------------
 # POST /escrow/initiate
 # ---------------------------------------------------------------------------
@@ -381,10 +470,9 @@ def initiate_escrow():
             return jsonify({"message": "Unauthorized"}), 403
 
     # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
-    # Paystack cannot hold escrow for physical products — vendor payout is via
-    # Daya using CBN bank codes, not Paystack recipient codes.
-    # Physical products MUST use CRYPTO (Daya) or POD. Block here at server level
-    # so this can never be bypassed regardless of what the frontend sends.
+    # Paystack cannot hold escrow for physical products — company does not hold
+    # an escrow license for physical goods on Paystack.
+    # Physical products MUST use Bank Transfer & Crypto (Daya) or Pay on Delivery (POD).
     from app.models.order import OrderItem
     from app.models.product import Product as _Prod
     for order in orders:
@@ -542,10 +630,13 @@ def payscrow_webhook():
                     db.session.flush()
                     is_digital_order = _deliver_digital_products(order, escrow)
                     is_service_order = False
+                    is_event_order = False
                     if not is_digital_order:
                         is_service_order = _deliver_service_products(order, escrow)
-
                     if not is_digital_order and not is_service_order:
+                        is_event_order = _deliver_event_tickets(order, escrow)
+
+                    if not is_digital_order and not is_service_order and not is_event_order:
                         # Physical: normal logistics flow
                         from app.models.escrow import LogisticsAssignment
                         assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()

@@ -56,6 +56,8 @@ class Order(db.Model):
     delivery_phone = db.Column(db.String(20), nullable=True)
     delivery_name = db.Column(db.String(100), nullable=True)
     
+    confirmation_email_sent = db.Column(db.Boolean, default=False)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

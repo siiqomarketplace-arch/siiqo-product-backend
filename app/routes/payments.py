@@ -592,9 +592,17 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         from app.routes.events import activate_tickets_for_order
         is_ticket_order = activate_tickets_for_order(order_id)
         if is_ticket_order:
+            from app.routes.escrow import _credit_vendor_ledger
+            net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = _utcnow()
             order.status = 'COMPLETED'
+            _credit_vendor_ledger(
+                vendor_id=order.vendor_id,
+                amount=net_amount,
+                reference_id=escrow.transaction_number,
+                description=f"Auto-released payout for Event Order #{order.id}",
+            )
             _payout_vendor_via_daya(order, escrow)
 
         from app.routes.escrow import _deliver_digital_products, _deliver_service_products

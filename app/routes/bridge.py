@@ -1133,13 +1133,16 @@ def paystack_webhook():
                     # Flush so updates are visible to delivery helpers
                     db.session.flush()
 
-                    from app.routes.escrow import _deliver_digital_products, _deliver_service_products
+                    from app.routes.escrow import _deliver_digital_products, _deliver_service_products, _deliver_event_tickets
                     is_digital = _deliver_digital_products(order, escrow)
                     is_service = False
+                    is_event = False
                     if not is_digital:
                         is_service = _deliver_service_products(order, escrow)
-
                     if not is_digital and not is_service:
+                        is_event = _deliver_event_tickets(order, escrow)
+
+                    if not is_digital and not is_service and not is_event:
                         # Physical goods: Activate logistics assignment if pending
                         from app.models.escrow import LogisticsAssignment
                         assignment = LogisticsAssignment.query.filter_by(
@@ -1182,9 +1185,19 @@ def paystack_webhook():
 
             db.session.commit()
 
-            # Send emails (non-blocking)
+            # Send emails (non-blocking, deduplicated per order)
             from app.utils.email import send_siiqo_email
             for order in processed_orders:
+                if getattr(order, 'confirmation_email_sent', False):
+                    logging.info(f"[EMAIL DUP GUARD] Order #{order.id} confirmation email already sent. Skipping.")
+                    continue
+
+                order.confirmation_email_sent = True
+                try:
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
                 is_digital_or_service = all(
                     (item.product.product_type if item.product else 'physical') in ('digital', 'service')
                     for item in order.items

@@ -71,6 +71,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS is_pro_verified BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS pro_verified_expires_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS onboarding_emails_sent JSONB DEFAULT '{}'",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_email_sent BOOLEAN DEFAULT FALSE",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
                 # ── Payment link product type ────────────────────────────────────
