@@ -186,17 +186,30 @@ def daya_initiate():
     rate_id    = rate_data["rate_id"]
     rate       = float(rate_data["rate"])
     expires_at = rate_data["expires_at"]
-    idem_key   = f"siiqo-{primary_order_id}-{payment_type}-{rate_id}"
+    import time
+    idem_key   = f"siiqo-{primary_order_id}-{payment_type}-{rate_id}-{int(time.time())}"
 
     try:
         if payment_type == "ngn_onramp":
-            fa = daya_service.create_ngn_funding_account(
-                customer_id=daya_customer_id,
-                amount_ngn=int(round(amount_ngn)),
-                rate_id=rate_id,
-                idempotency_key=idem_key,
-                developer_fee_pct="0",
-            )
+            try:
+                fa = daya_service.create_ngn_funding_account(
+                    customer_id=daya_customer_id,
+                    amount_ngn=int(round(amount_ngn)),
+                    rate_id=rate_id,
+                    idempotency_key=idem_key,
+                    developer_fee_pct="0",
+                )
+            except RuntimeError as first_exc:
+                logger.warning("[DAYA INITIATE] First attempt for virtual account failed (%s), retrying with fresh key...", first_exc)
+                time.sleep(0.5)
+                idem_key_retry = f"siiqo-{primary_order_id}-{payment_type}-{rate_id}-{int(time.time())}-r2"
+                fa = daya_service.create_ngn_funding_account(
+                    customer_id=daya_customer_id,
+                    amount_ngn=int(round(amount_ngn)),
+                    rate_id=rate_id,
+                    idempotency_key=idem_key_retry,
+                    developer_fee_pct="0",
+                )
             instructions = fa.get("instructions", [{}])[0]
             bank_name      = instructions.get("bank_name", "")
             account_number = instructions.get("account_number", "")
@@ -210,14 +223,27 @@ def daya_initiate():
         else:
             crypto_amount = round(amount_ngn / rate, 6)
             amount_crypto = f"{crypto_amount:.6f}".rstrip("0").rstrip(".")
-            fa = daya_service.create_crypto_funding_account(
-                customer_id=daya_customer_id,
-                asset=asset,
-                network=network,
-                rate_id=rate_id,
-                idempotency_key=idem_key,
-                developer_fee_pct="0",
-            )
+            try:
+                fa = daya_service.create_crypto_funding_account(
+                    customer_id=daya_customer_id,
+                    asset=asset,
+                    network=network,
+                    rate_id=rate_id,
+                    idempotency_key=idem_key,
+                    developer_fee_pct="0",
+                )
+            except RuntimeError as first_exc:
+                logger.warning("[DAYA INITIATE] First attempt for crypto account failed (%s), retrying with fresh key...", first_exc)
+                time.sleep(0.5)
+                idem_key_retry = f"siiqo-{primary_order_id}-{payment_type}-{rate_id}-{int(time.time())}-r2"
+                fa = daya_service.create_crypto_funding_account(
+                    customer_id=daya_customer_id,
+                    asset=asset,
+                    network=network,
+                    rate_id=rate_id,
+                    idempotency_key=idem_key_retry,
+                    developer_fee_pct="0",
+                )
             instructions = fa.get("instructions", [{}])[0]
             wallet_addr    = instructions.get("address", "")
             bank_name      = None
