@@ -586,8 +586,11 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             logger.info("[DAYA CONFIRM] Order %s already confirmed -- skipping", order_id)
             return
 
-        order.status         = "PAID"
-        order.payment_method = "CRYPTO"
+        order.status = "PAID"
+        if dp and dp.payment_type in ("bank_transfer", "ngn_onramp"):
+            order.payment_method = "DAYA_BANK_TRANSFER"
+        else:
+            order.payment_method = "CRYPTO"
 
         escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
         if not escrow:
@@ -716,17 +719,29 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                         type="DELIVERY",
                         order_id=order_id,
                     ))
+            is_naira = dp and dp.payment_type in ("bank_transfer", "ngn_onramp")
+            notif_title = "Payment Received (Bank Transfer)" if is_naira else "Crypto Payment Received"
+            notif_msg = (
+                f"Naira bank transfer confirmed for Order #{order_id}. Please ship the order."
+                if is_naira
+                else f"Crypto payment confirmed for Order #{order_id}. Please ship the order."
+            )
+            buyer_notif_msg = (
+                f"Your bank transfer payment for Order #{order_id} has been confirmed."
+                if is_naira
+                else f"Your crypto payment for Order #{order_id} has been confirmed."
+            )
             db.session.add(Notification(
                 user_id=order.vendor_id,
-                title="Crypto Payment Received",
-                message=f"Crypto payment confirmed for Order #{order_id}. Please ship the order.",
+                title=notif_title,
+                message=notif_msg,
                 type="ESCROW",
                 order_id=order_id,
             ))
             db.session.add(Notification(
                 user_id=order.buyer_id,
                 title="Payment Confirmed",
-                message=f"Your crypto payment for Order #{order_id} has been confirmed.",
+                message=buyer_notif_msg,
                 type="ORDER",
                 order_id=order_id,
             ))
