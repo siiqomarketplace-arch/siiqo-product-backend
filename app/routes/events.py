@@ -1501,7 +1501,6 @@ def activate_tickets_for_order(order_id):
                 ev = db.session.get(Event, t.event_id)
                 if ev:
                     ev.tickets_sold = (ev.tickets_sold or 0) + 1
-                    ev.revenue = float(ev.revenue or 0) + float(t.price_paid or 0)
 
         db.session.commit()
 

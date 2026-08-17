@@ -837,7 +837,19 @@ def _payout_vendor_via_daya(order, escrow):
         vendor_id=order.vendor_id
     ).first()
 
-    if not bank_acc:
+    bank_code = bank_acc.bank_code if bank_acc else None
+    account_number = bank_acc.account_number if bank_acc else None
+    account_name = (bank_acc.account_name if bank_acc else "") or ""
+
+    if not bank_code or not account_number:
+        from app.models.user import Storefront
+        sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+        if sf and sf.bank_code and sf.account_number:
+            bank_code = sf.bank_code
+            account_number = sf.account_number
+            account_name = sf.business_name or (order.vendor.full_name if order.vendor else "")
+
+    if not bank_code or not account_number:
         logger.error(
             "[DAYA PAYOUT] Order %s -- vendor %s has no bank account registered. "
             "Cannot auto-payout. NGN%.2f is still in Daya withdrawal balance.",
@@ -860,9 +872,9 @@ def _payout_vendor_via_daya(order, escrow):
     # Daya validates the account internally on transfer.
     result = daya_service.transfer_ngn_to_vendor(
         amount_ngn=net_amount_ngn,
-        bank_code=bank_acc.bank_code,
-        account_number=bank_acc.account_number,
-        account_name=bank_acc.account_name or "",
+        bank_code=bank_code,
+        account_number=account_number,
+        account_name=account_name,
         reference=payout_ref,
         order_id=order.id,
     )
@@ -870,8 +882,8 @@ def _payout_vendor_via_daya(order, escrow):
     if result.get("success"):
         logger.info(
             "[DAYA PAYOUT] Order %s -- NGN payout initiated: NGN%.2f → %s/%s ref=%s",
-            order.id, net_amount_ngn, bank_acc.bank_code,
-            bank_acc.account_number, payout_ref
+            order.id, net_amount_ngn, bank_code,
+            account_number, payout_ref
         )
         db.session.add(Notification(
             user_id=order.vendor_id,
