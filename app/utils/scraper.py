@@ -7,25 +7,43 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def scrape_product_url(url):
-    proxy_url = os.environ.get("BRIGHT_DATA_PROXY")
-    
+def _fetch_page_content(url):
+    proxy_val = os.environ.get("BRIGHT_DATA_PROXY")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
     }
     
-    proxies = None
-    if proxy_url:
-        proxies = {
-            "http": proxy_url,
-            "https": proxy_url
-        }
-        
-    try:
-        response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
+    if proxy_val:
+        proxy_val = proxy_val.strip()
+        if proxy_val.startswith("http://") or proxy_val.startswith("https://"):
+            # Standard Proxy URL mode
+            proxies = {"http": proxy_val, "https": proxy_val}
+            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
+            response.raise_for_status()
+            return response.text
+        else:
+            # Bright Data Web Unlocker API Key mode
+            api_headers = {
+                "Authorization": f"Bearer {proxy_val}",
+                "Content-Type": "application/json"
+            }
+            api_body = {
+                "zone": "web_unlocker1",
+                "url": url,
+                "format": "raw"
+            }
+            response = requests.post("https://api.brightdata.com/request", headers=api_headers, json=api_body, timeout=30)
+            response.raise_for_status()
+            return response.text
+    else:
+        response = requests.get(url, headers=headers, verify=False, timeout=30)
         response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, "html.parser")
+        return response.text
+
+def scrape_product_url(url):
+    try:
+        html_text = _fetch_page_content(url)
+        soup = BeautifulSoup(html_text, "html.parser")
         
         # Extract basic OpenGraph or standard meta tags
         name = ""
@@ -93,24 +111,9 @@ def scrape_product_url(url):
         }
 
 def analyze_storefront_url(url):
-    proxy_url = os.environ.get("BRIGHT_DATA_PROXY")
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-    }
-    
-    proxies = None
-    if proxy_url:
-        proxies = {
-            "http": proxy_url,
-            "https": proxy_url
-        }
-        
     try:
-        response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, "html.parser")
+        html_text = _fetch_page_content(url)
+        soup = BeautifulSoup(html_text, "html.parser")
         
         name = ""
         og_title = soup.find("meta", property="og:title")
@@ -167,3 +170,4 @@ def analyze_storefront_url(url):
             "success": False,
             "message": str(e)
         }
+
