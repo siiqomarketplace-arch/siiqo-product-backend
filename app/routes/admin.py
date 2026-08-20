@@ -1326,22 +1326,28 @@ def handle_blog():
     while Article.query.filter_by(slug=slug).first():
         slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
 
-    new_article = Article(
-        admin_author_id=parsed_id,
-        title=title,
-        slug=slug,
-        category=data.get('category'),
-        sub_category=data.get('sub_category'),
-        author_name=data.get('author') or data.get('author_name'),
-        content=data.get('content', ''),
-        excerpt=data.get('excerpt'),
-        cover_image=cover_image_url,
-        is_published=data.get('is_published', False) in (True, 'true', '1', 'published'),
-        meta_title=data.get('meta_title') or data.get('seo_title'),
-        meta_description=data.get('meta_description') or data.get('seo_description'),
-    )
-    db.session.add(new_article)
-    db.session.commit()
+    try:
+        new_article = Article(
+            admin_author_id=parsed_id,
+            title=title,
+            slug=slug,
+            category=data.get('category'),
+            sub_category=data.get('sub_category'),
+            author_name=data.get('author') or data.get('author_name'),
+            content=data.get('content', ''),
+            excerpt=data.get('excerpt'),
+            cover_image=cover_image_url,
+            is_published=data.get('is_published', False) in (True, 'true', '1', 'published'),
+            meta_title=data.get('meta_title') or data.get('seo_title'),
+            meta_description=data.get('meta_description') or data.get('seo_description'),
+        )
+        db.session.add(new_article)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        import logging
+        logging.error(f"[BLOG ADMIN] Failed to create article: {e}")
+        return jsonify({"message": f"Failed to create article: {str(e)}"}), 500
 
     if new_article.is_published:
         _auto_post_blog_to_community(new_article)
@@ -1353,6 +1359,7 @@ def _auto_post_blog_to_community(article):
     """Auto-post a published blog article to the community feed if not posted yet."""
     try:
         from app.models.social import Post as CommunityPost
+        from app.models.user import User
         article_url = f"https://siiqo.com/blog/{article.slug}"
         existing = CommunityPost.query.filter(
             CommunityPost.content.like(f"%{article.slug}%")
@@ -1374,8 +1381,12 @@ def _auto_post_blog_to_community(article):
 
             cover_imgs = [article.cover_image] if article.cover_image else []
 
+            # Dynamically get a valid user for system community post
+            system_user = User.query.filter_by(role='ADMIN').first() or User.query.first()
+            poster_id = system_user.id if system_user else 1
+
             community_post = CommunityPost(
-                user_id=1,
+                user_id=poster_id,
                 post_type='ANNOUNCEMENT',
                 content=post_content,
                 images=cover_imgs,
@@ -1383,6 +1394,7 @@ def _auto_post_blog_to_community(article):
             db.session.add(community_post)
             db.session.commit()
     except Exception as e:
+        db.session.rollback()
         import logging
         logging.warning(f"[BLOG AUTO-POST] Auto community post failed for article {article.id}: {e}")
 
@@ -1480,7 +1492,13 @@ def manage_blog_article(article_id):
     if 'meta_description' in data or 'seo_description' in data:
         article.meta_description = data.get('meta_description') or data.get('seo_description')
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        import logging
+        logging.error(f"[BLOG ADMIN] Failed to update article {article_id}: {e}")
+        return jsonify({"message": f"Failed to update article: {str(e)}"}), 500
 
     if article.is_published:
         _auto_post_blog_to_community(article)

@@ -442,7 +442,34 @@ def get_articles():
             query = query.filter_by(category=category)
         if sub_category and hasattr(Article, 'sub_category'):
             try:
-                query = query.filter_by(sub_category=sub_category)
+                from sqlalchemy import or_, func
+                raw_sub = sub_category.strip().lower()
+                slug_sub = raw_sub.replace(' ', '-').replace('_', '-')
+                aliases = [raw_sub, slug_sub]
+                if 'open' in raw_sub:
+                    aliases.extend(['open', 'open-grants', 'open grants'])
+                if 'close' in raw_sub or 'closing' in raw_sub:
+                    aliases.extend(['closing-soon', 'closing soon', 'closing'])
+                if 'upcoming' in raw_sub:
+                    aliases.extend(['upcoming', 'upcoming-grants', 'upcoming grants'])
+                if 'africa' in raw_sub:
+                    aliases.extend(['africa', 'pan-africa', 'pan africa'])
+                if 'guide' in raw_sub:
+                    aliases.extend(['guides', 'grant-guides', 'grant guides'])
+                if 'business' in raw_sub:
+                    aliases.extend(['small-business', 'small business'])
+                if 'startup' in raw_sub:
+                    aliases.extend(['startups', 'startup'])
+                if 'women' in raw_sub:
+                    aliases.extend(['women', 'women entrepreneurs'])
+                if 'youth' in raw_sub:
+                    aliases.extend(['youth', 'youth & tech'])
+                if 'nigeria' in raw_sub:
+                    aliases.extend(['nigeria', 'nigeria specific'])
+
+                aliases = list(set(aliases))
+                conditions = [func.lower(Article.sub_category) == a for a in aliases]
+                query = query.filter(or_(*conditions))
             except Exception:
                 pass
             
