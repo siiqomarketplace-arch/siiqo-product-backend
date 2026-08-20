@@ -11,9 +11,9 @@ from flask import render_template, current_app, request
 
 logger = logging.getLogger(__name__)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# EMAIL VALIDATION — PREVENT SMTP INJECTION & MALFORMED ADDRESSES
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ---------------------------------------------------------------------------
+# EMAIL VALIDATION - PREVENT SMTP INJECTION & MALFORMED ADDRESSES
+# ---------------------------------------------------------------------------
 
 def _validate_email(email: str) -> bool:
     """
