@@ -1409,7 +1409,7 @@ def _auto_post_blog_to_community(article):
             f"👉 Read full guide: {article_url}"
         )
 
-        cover_imgs = [article.cover_image] if article.cover_image else []
+        cover_imgs = [article.cover_image] if article.cover_image and isinstance(article.cover_image, str) and article.cover_image.strip() else []
 
         if existing and article.is_published:
             existing.user_id = poster_id
