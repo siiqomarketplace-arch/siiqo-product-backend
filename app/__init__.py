@@ -109,6 +109,10 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_free BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_storefront BOOLEAN DEFAULT TRUE",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_marketplace BOOLEAN DEFAULT TRUE",
+                # ── Articles Schema Enhancements ─────────────────────────────
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS sub_category VARCHAR(100)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS author_name VARCHAR(100)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS subcategory VARCHAR(100)",
                 """CREATE TABLE IF NOT EXISTS events (
                     id SERIAL PRIMARY KEY,
                     storefront_id INTEGER REFERENCES storefronts(id),
@@ -257,6 +261,53 @@ def create_app(config_name: str | None = None) -> Flask:
             db.session.rollback()
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] Grants table initialization skipped: {_e}")
+
+        # ── Blog Articles Auto-Initialization ─────────────────────────────────
+        try:
+            from sqlalchemy import text as _text
+            import logging as _log
+            
+            _result = db.session.execute(_text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'articles'
+                )
+            """))
+            _articles_table_exists = _result.scalar()
+            
+            if _articles_table_exists:
+                _verify = db.session.execute(_text("SELECT COUNT(*) FROM articles"))
+                _count = _verify.scalar()
+                if _count == 0:
+                    _log.getLogger(__name__).info("[STARTUP] Articles table is empty. Auto-seeding default SME blog articles...")
+                    try:
+                        from seed_blog import articles_data
+                        import re
+                        for item in articles_data:
+                            slug = re.sub(r'[^a-z0-9]+', '-', item['title'].lower()).strip('-')
+                            db.session.execute(_text("""
+                                INSERT INTO articles (title, slug, category, cover_image, excerpt, content, is_published, created_at, updated_at)
+                                VALUES (:title, :slug, :category, :cover_image, :excerpt, :content, true, NOW(), NOW())
+                                ON CONFLICT (slug) DO NOTHING
+                            """), {
+                                "title": item['title'],
+                                "slug": slug,
+                                "category": item.get('category'),
+                                "cover_image": item.get('cover_image'),
+                                "excerpt": item.get('excerpt'),
+                                "content": item.get('content'),
+                            })
+                        db.session.commit()
+                        _log.getLogger(__name__).info("[STARTUP] ✓ Default SME blog articles seeded successfully.")
+                    except Exception as seed_err:
+                        db.session.rollback()
+                        _log.getLogger(__name__).warning(f"[STARTUP] Blog auto-seeding failed: {seed_err}")
+                else:
+                    _log.getLogger(__name__).info(f"[STARTUP] Articles table verified ({_count} articles)")
+        except Exception as _e:
+            db.session.rollback()
+            import logging as _log
+            _log.getLogger(__name__).warning(f"[STARTUP] Articles table verification skipped: {_e}")
 
     # -----------------------------------------------------------------------
     # Basic Logging Configuration

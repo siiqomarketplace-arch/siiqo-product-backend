@@ -436,56 +436,129 @@ def get_articles():
     category = request.args.get('category')
     sub_category = request.args.get('sub_category')
     
-    query = Article.query.filter_by(is_published=True)
-    if category:
-        query = query.filter_by(category=category)
-    if sub_category and hasattr(Article, 'sub_category'):
+    try:
+        query = Article.query.filter_by(is_published=True)
+        if category:
+            query = query.filter_by(category=category)
+        if sub_category and hasattr(Article, 'sub_category'):
+            try:
+                query = query.filter_by(sub_category=sub_category)
+            except Exception:
+                pass
+            
+        paginated = (
+            query
+            .order_by(Article.created_at.desc())
+            .paginate(page=page, per_page=per_page, error_out=False)
+        )
+        return jsonify({
+            "articles": [{
+                "id": a.id,
+                "title": a.title,
+                "slug": a.slug,
+                "author": getattr(a, 'author_name', None) or (a.admin_author.name if getattr(a, 'admin_author', None) else "Siiqo Editorial Team"),
+                "category": a.category,
+                "sub_category": getattr(a, 'sub_category', None),
+                "excerpt": a.excerpt or (a.content[:150] + "..." if a.content and len(a.content) > 150 else (a.content or "")),
+                "cover_image": a.cover_image,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "read_time": max(1, round(len((a.content or "").split()) / 200)) if a.content else None,
+            } for a in paginated.items],
+            "total": paginated.total,
+            "pages": paginated.pages,
+        }), 200
+    except Exception:
+        # Fallback query if table schema is currently missing newer columns before migration runs
         try:
-            query = query.filter_by(sub_category=sub_category)
+            from sqlalchemy import text
+            from app.extensions import db
+            import math
+            
+            offset = (page - 1) * per_page
+            sql = "SELECT id, title, slug, category, excerpt, cover_image, content, created_at FROM articles WHERE is_published = true"
+            params = {"per_page": per_page, "offset": offset}
+            if category:
+                sql += " AND category = :category"
+                params["category"] = category
+            sql += " ORDER BY created_at DESC LIMIT :per_page OFFSET :offset"
+            
+            result = db.session.execute(text(sql), params)
+            rows = result.fetchall()
+            
+            count_sql = "SELECT COUNT(*) FROM articles WHERE is_published = true"
+            count_params = {}
+            if category:
+                count_sql += " AND category = :category"
+                count_params["category"] = category
+            count_res = db.session.execute(text(count_sql), count_params)
+            total = count_res.scalar() or 0
+            
+            articles_list = []
+            for r in rows:
+                content_str = r[6] or ""
+                articles_list.append({
+                    "id": r[0],
+                    "title": r[1],
+                    "slug": r[2],
+                    "author": "Siiqo Editorial Team",
+                    "category": r[3],
+                    "sub_category": None,
+                    "excerpt": r[4] or (content_str[:150] + "..." if len(content_str) > 150 else content_str),
+                    "cover_image": r[5],
+                    "created_at": r[7].isoformat() if r[7] else None,
+                    "read_time": max(1, round(len(content_str.split()) / 200)) if content_str else None,
+                })
+            pages = math.ceil(total / per_page) if total > 0 else 1
+            return jsonify({
+                "articles": articles_list,
+                "total": total,
+                "pages": pages,
+            }), 200
         except Exception:
-            pass
-        
-    paginated = (
-        query
-        .order_by(Article.created_at.desc())
-        .paginate(page=page, per_page=per_page, error_out=False)
-    )
-    return jsonify({
-        "articles": [{
-            "id": a.id,
-            "title": a.title,
-            "slug": a.slug,
-            "author": getattr(a, 'author_name', None) or (a.admin_author.name if a.admin_author else "Siiqo Editorial Team"),
-            "category": a.category,
-            "sub_category": getattr(a, 'sub_category', None),
-            "excerpt": a.excerpt or (a.content[:150] + "..." if a.content and len(a.content) > 150 else (a.content or "")),
-            "cover_image": a.cover_image,
-            "created_at": a.created_at.isoformat() if a.created_at else None,
-            # Calculate read time from full content so cards show accurate time
-            "read_time": max(1, round(len((a.content or "").split()) / 200)) if a.content else None,
-        } for a in paginated.items],
-        "total": paginated.total,
-        "pages": paginated.pages,
-    }), 200
+            return jsonify({"articles": [], "total": 0, "pages": 1}), 200
 
 @public_bp.route('/blog/<string:slug>', methods=['GET'])
 def get_article_by_slug(slug):
-    a = Article.query.filter_by(slug=slug, is_published=True).first()
-    if not a:
-        return jsonify({"message": "Article not found"}), 404
-    return jsonify({
-        "id": a.id,
-        "title": a.title,
-        "category": a.category,
-        "sub_category": getattr(a, 'sub_category', None),
-        "content": a.content,
-        "excerpt": a.excerpt,
-        "cover_image": a.cover_image,
-        "meta_title": a.meta_title or a.title,
-        "meta_description": a.meta_description or a.excerpt,
-        "author": getattr(a, 'author_name', None) or (a.admin_author.name if a.admin_author else "Siiqo Editorial Team"),
-        "created_at": a.created_at.isoformat() if a.created_at else None,
-    }), 200
+    try:
+        a = Article.query.filter_by(slug=slug, is_published=True).first()
+        if not a:
+            return jsonify({"message": "Article not found"}), 404
+        return jsonify({
+            "id": a.id,
+            "title": a.title,
+            "category": a.category,
+            "sub_category": getattr(a, 'sub_category', None),
+            "content": a.content,
+            "excerpt": a.excerpt,
+            "cover_image": a.cover_image,
+            "meta_title": a.meta_title or a.title,
+            "meta_description": a.meta_description or a.excerpt,
+            "author": getattr(a, 'author_name', None) or (a.admin_author.name if getattr(a, 'admin_author', None) else "Siiqo Editorial Team"),
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        }), 200
+    except Exception:
+        try:
+            from sqlalchemy import text
+            from app.extensions import db
+            sql = "SELECT id, title, category, content, excerpt, cover_image, meta_title, meta_description, created_at FROM articles WHERE slug = :slug AND is_published = true"
+            res = db.session.execute(text(sql), {"slug": slug}).fetchone()
+            if not res:
+                return jsonify({"message": "Article not found"}), 404
+            return jsonify({
+                "id": res[0],
+                "title": res[1],
+                "category": res[2],
+                "sub_category": None,
+                "content": res[3],
+                "excerpt": res[4],
+                "cover_image": res[5],
+                "meta_title": res[6] or res[1],
+                "meta_description": res[7] or res[4],
+                "author": "Siiqo Editorial Team",
+                "created_at": res[8].isoformat() if res[8] else None,
+            }), 200
+        except Exception:
+            return jsonify({"message": "Article not found"}), 404
 
 
 # ---------------------------------------------------------------------------
