@@ -1356,35 +1356,67 @@ def handle_blog():
 
 
 def _auto_post_blog_to_community(article):
-    """Auto-post a published blog article to the community feed if not posted yet."""
+    """Auto-post a published blog article to the community feed if not posted yet, using the article author name."""
     try:
         from app.models.social import Post as CommunityPost
         from app.models.user import User
+        from werkzeug.security import generate_password_hash
+        import re, uuid
+
+        target_author = (article.author_name or "").strip() or (article.admin_author.name if getattr(article, 'admin_author', None) else "Siiqo Editorial Team")
+        clean_slug = re.sub(r'[^a-z0-9]+', '', target_author.lower()) or 'editorial'
+        author_email = f"{clean_slug}@siiqo.com"
+
+        # Find or create a dedicated user for this author
+        author_user = User.query.filter(
+            (User.email == author_email) | (User.first_name == target_author)
+        ).first()
+
+        if not author_user:
+            author_user = User(
+                email=author_email,
+                password_hash=generate_password_hash(str(uuid.uuid4())),
+                first_name=target_author,
+                last_name="",
+                role="ADMIN",
+                profile_pic="https://siiqo.com/images/siiqo.png",
+                is_verified=True,
+                is_active=True,
+            )
+            db.session.add(author_user)
+            db.session.commit()
+        else:
+            if author_user.email.endswith('@siiqo.com') and (author_user.first_name != target_author or author_user.last_name):
+                author_user.first_name = target_author
+                author_user.last_name = ""
+                db.session.commit()
+
+        poster_id = author_user.id
         article_url = f"https://siiqo.com/blog/{article.slug}"
         existing = CommunityPost.query.filter(
             CommunityPost.content.like(f"%{article.slug}%")
         ).first()
 
-        if not existing and article.is_published:
-            excerpt_text = article.excerpt or ""
-            if not excerpt_text and article.content:
-                import re
-                clean_text = re.sub('<[^<]+?>', '', article.content)
-                excerpt_text = clean_text[:180] + "..." if len(clean_text) > 180 else clean_text
+        excerpt_text = article.excerpt or ""
+        if not excerpt_text and article.content:
+            clean_text = re.sub('<[^<]+?>', '', article.content)
+            excerpt_text = clean_text[:180] + "..." if len(clean_text) > 180 else clean_text
 
-            post_content = (
-                f"📰 NEW ARTICLE ON SIIQO BLOG!\n\n"
-                f"✨ {article.title}\n\n"
-                f"{excerpt_text}\n\n"
-                f"👉 Read full guide: {article_url}"
-            )
+        post_content = (
+            f"📰 NEW ARTICLE ON SIIQO BLOG!\n\n"
+            f"✨ {article.title}\n\n"
+            f"{excerpt_text}\n\n"
+            f"👉 Read full guide: {article_url}"
+        )
 
-            cover_imgs = [article.cover_image] if article.cover_image else []
+        cover_imgs = [article.cover_image] if article.cover_image else []
 
-            # Dynamically get a valid user for system community post
-            system_user = User.query.filter_by(role='ADMIN').first() or User.query.first()
-            poster_id = system_user.id if system_user else 1
-
+        if existing and article.is_published:
+            existing.user_id = poster_id
+            existing.content = post_content
+            existing.images = cover_imgs
+            db.session.commit()
+        elif not existing and article.is_published:
             community_post = CommunityPost(
                 user_id=poster_id,
                 post_type='ANNOUNCEMENT',
@@ -1433,9 +1465,27 @@ def manage_blog_article(article_id):
         }), 200
 
     if request.method == 'DELETE':
-        db.session.delete(article)
-        db.session.commit()
-        return jsonify({"message": f"Article '{article.title}' deleted."}), 200
+        article_slug = article.slug
+        article_title = article.title
+        try:
+            # Clean up corresponding community announcement posts
+            from app.models.social import Post as CommunityPost
+            community_posts = CommunityPost.query.filter(
+                CommunityPost.content.like(f"%{article_slug}%")
+            ).all()
+            for cp in community_posts:
+                db.session.delete(cp)
+        except Exception as e:
+            import logging
+            logging.warning(f"[BLOG DELETE] Could not delete community posts for article {article.id}: {e}")
+
+        try:
+            db.session.delete(article)
+            db.session.commit()
+            return jsonify({"message": f"Article '{article_title}' and community post deleted."}), 200
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"message": f"Failed to delete article: {str(e)}"}), 500
 
     # PATCH — update existing article
     import re
@@ -1502,6 +1552,17 @@ def manage_blog_article(article_id):
 
     if article.is_published:
         _auto_post_blog_to_community(article)
+    else:
+        try:
+            from app.models.social import Post as CommunityPost
+            community_posts = CommunityPost.query.filter(
+                CommunityPost.content.like(f"%{article.slug}%")
+            ).all()
+            for cp in community_posts:
+                db.session.delete(cp)
+            db.session.commit()
+        except Exception:
+            pass
 
     return jsonify({"message": "Article updated.", "id": article.id}), 200
 
