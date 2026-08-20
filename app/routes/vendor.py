@@ -746,23 +746,34 @@ def add_product():
     if announce:
         try:
             from app.models.social import Post as CommunityPost
-            store_name = sf.store_name or user.full_name or 'A vendor'
-            desc = new_product.description or ''
-            desc_snippet = (desc[:150] + '...') if len(desc) > 150 else desc
-            post_content = f"🚀 New product just dropped!\n\n{name} — ₦{price:,.0f}"
-            if desc_snippet:
-                post_content += f"\n\n{desc_snippet}"
-            post_content += f"\n\nFrom {store_name} — visit our storefront to order!"
+            from datetime import datetime, timedelta, timezone
 
-            community_post = CommunityPost(
-                user_id=user_id,
-                post_type='PRODUCT_LAUNCH',
-                content=post_content,
-                images=new_product.images or [],
-                city=user.city,
-                state=user.state,
-            )
-            db.session.add(community_post)
+            # Deduplication: check if a PRODUCT_LAUNCH post was created by this user in the last 30s
+            recent_threshold = datetime.now(timezone.utc) - timedelta(seconds=30)
+            existing_post = CommunityPost.query.filter(
+                CommunityPost.user_id == user_id,
+                CommunityPost.post_type == 'PRODUCT_LAUNCH',
+                CommunityPost.created_at >= recent_threshold
+            ).first()
+
+            if not existing_post:
+                store_name = sf.store_name or user.full_name or 'A vendor'
+                desc = new_product.description or ''
+                desc_snippet = (desc[:150] + '...') if len(desc) > 150 else desc
+                post_content = f"🚀 New product just dropped!\n\n{name} — ₦{price:,.0f}"
+                if desc_snippet:
+                    post_content += f"\n\n{desc_snippet}"
+                post_content += f"\n\nFrom {store_name} — visit our storefront to order!"
+
+                community_post = CommunityPost(
+                    user_id=user_id,
+                    post_type='PRODUCT_LAUNCH',
+                    content=post_content,
+                    images=new_product.images or [],
+                    city=user.city,
+                    state=user.state,
+                )
+                db.session.add(community_post)
         except Exception as e:
             # Non-fatal — don't block product creation if community post fails
             import logging

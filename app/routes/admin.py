@@ -1331,6 +1331,8 @@ def handle_blog():
         title=title,
         slug=slug,
         category=data.get('category'),
+        sub_category=data.get('sub_category'),
+        author_name=data.get('author') or data.get('author_name'),
         content=data.get('content', ''),
         excerpt=data.get('excerpt'),
         cover_image=cover_image_url,
@@ -1340,7 +1342,49 @@ def handle_blog():
     )
     db.session.add(new_article)
     db.session.commit()
+
+    if new_article.is_published:
+        _auto_post_blog_to_community(new_article)
+
     return jsonify({"message": "Article created.", "id": new_article.id, "slug": new_article.slug}), 201
+
+
+def _auto_post_blog_to_community(article):
+    """Auto-post a published blog article to the community feed if not posted yet."""
+    try:
+        from app.models.social import Post as CommunityPost
+        article_url = f"https://siiqo.com/blog/{article.slug}"
+        existing = CommunityPost.query.filter(
+            CommunityPost.content.like(f"%{article.slug}%")
+        ).first()
+
+        if not existing and article.is_published:
+            excerpt_text = article.excerpt or ""
+            if not excerpt_text and article.content:
+                import re
+                clean_text = re.sub('<[^<]+?>', '', article.content)
+                excerpt_text = clean_text[:180] + "..." if len(clean_text) > 180 else clean_text
+
+            post_content = (
+                f"📰 NEW ARTICLE ON SIIQO BLOG!\n\n"
+                f"✨ {article.title}\n\n"
+                f"{excerpt_text}\n\n"
+                f"👉 Read full guide: {article_url}"
+            )
+
+            cover_imgs = [article.cover_image] if article.cover_image else []
+
+            community_post = CommunityPost(
+                user_id=1,
+                post_type='ANNOUNCEMENT',
+                content=post_content,
+                images=cover_imgs,
+            )
+            db.session.add(community_post)
+            db.session.commit()
+    except Exception as e:
+        import logging
+        logging.warning(f"[BLOG AUTO-POST] Auto community post failed for article {article.id}: {e}")
 
 
 @admin_bp.route('/blog/<int:article_id>', methods=['GET', 'PATCH', 'DELETE'])
@@ -1361,9 +1405,12 @@ def manage_blog_article(article_id):
         return jsonify({
             "id": article.id,
             "title": article.title,
+            "author": article.author_name,
+            "author_name": article.author_name,
             "slug": article.slug,
             "content": article.content,
             "category": article.category,
+            "sub_category": article.sub_category,
             "excerpt": article.excerpt,
             "cover_image": article.cover_image,
             "is_published": article.is_published,
@@ -1416,6 +1463,10 @@ def manage_blog_article(article_id):
             article.slug = new_slug
     if 'category' in data:
         article.category = data['category']
+    if 'sub_category' in data:
+        article.sub_category = data['sub_category']
+    if 'author' in data or 'author_name' in data:
+        article.author_name = data.get('author') or data.get('author_name')
     if 'content' in data:
         article.content = data['content']
     if 'excerpt' in data:
@@ -1430,6 +1481,10 @@ def manage_blog_article(article_id):
         article.meta_description = data.get('meta_description') or data.get('seo_description')
 
     db.session.commit()
+
+    if article.is_published:
+        _auto_post_blog_to_community(article)
+
     return jsonify({"message": "Article updated.", "id": article.id}), 200
 
 

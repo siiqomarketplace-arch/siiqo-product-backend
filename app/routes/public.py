@@ -434,10 +434,13 @@ def get_articles():
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 10)), 50)
     category = request.args.get('category')
+    sub_category = request.args.get('sub_category')
     
     query = Article.query.filter_by(is_published=True)
     if category:
         query = query.filter_by(category=category)
+    if sub_category:
+        query = query.filter_by(sub_category=sub_category)
         
     paginated = (
         query
@@ -449,7 +452,9 @@ def get_articles():
             "id": a.id,
             "title": a.title,
             "slug": a.slug,
+            "author": a.author_name or (a.admin_author.name if a.admin_author else "Siiqo Editorial Team"),
             "category": a.category,
+            "sub_category": a.sub_category,
             "excerpt": a.excerpt or (a.content[:150] + "..." if a.content and len(a.content) > 150 else (a.content or "")),
             "cover_image": a.cover_image,
             "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -469,12 +474,13 @@ def get_article_by_slug(slug):
         "id": a.id,
         "title": a.title,
         "category": a.category,
+        "sub_category": a.sub_category,
         "content": a.content,
         "excerpt": a.excerpt,
         "cover_image": a.cover_image,
         "meta_title": a.meta_title or a.title,
         "meta_description": a.meta_description or a.excerpt,
-        "author": a.admin_author.name if a.admin_author else "Siiqo Team",
+        "author": a.author_name or (a.admin_author.name if a.admin_author else "Siiqo Editorial Team"),
         "created_at": a.created_at.isoformat() if a.created_at else None,
     }), 200
 

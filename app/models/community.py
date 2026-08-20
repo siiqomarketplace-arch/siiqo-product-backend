@@ -20,6 +20,8 @@ class Article(db.Model):
 
     cover_image = db.Column(db.String(255), nullable=True)
     category = db.Column(db.String(100), nullable=True)
+    sub_category = db.Column(db.String(100), nullable=True)
+    author_name = db.Column(db.String(100), nullable=True)
     is_published = db.Column(db.Boolean, default=False)
 
     # SEO
