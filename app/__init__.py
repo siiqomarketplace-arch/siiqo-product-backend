@@ -266,7 +266,64 @@ def create_app(config_name: str | None = None) -> Flask:
         try:
             from sqlalchemy import text as _text
             import logging as _log
-            
+
+            # 1. Create blog_authors table if not exists
+            try:
+                db.session.execute(_text("""
+                    CREATE TABLE IF NOT EXISTS blog_authors (
+                        id              SERIAL PRIMARY KEY,
+                        name            VARCHAR(100) NOT NULL,
+                        slug            VARCHAR(120) NOT NULL UNIQUE,
+                        title           VARCHAR(150),
+                        bio             TEXT,
+                        avatar          VARCHAR(255),
+                        twitter_handle  VARCHAR(100),
+                        linkedin_url    VARCHAR(255),
+                        is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """))
+                db.session.commit()
+            except Exception as _auth_err:
+                db.session.rollback()
+
+            # 2. Add missing columns to articles table
+            _article_columns = [
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS author_id INTEGER REFERENCES blog_authors(id) ON DELETE SET NULL",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS author_name VARCHAR(100)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS sub_category VARCHAR(100)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS meta_title VARCHAR(255)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS meta_description VARCHAR(500)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS cover_image VARCHAR(255)",
+                "ALTER TABLE articles ADD COLUMN IF NOT EXISTS excerpt VARCHAR(500)",
+            ]
+            for _col_sql in _article_columns:
+                try:
+                    db.session.execute(_text(_col_sql))
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
+            # 3. Seed default author if not exists
+            try:
+                db.session.execute(_text("""
+                    INSERT INTO blog_authors (name, slug, title, bio, avatar, is_active)
+                    VALUES (
+                        'Siiqo Editorial Team',
+                        'siiqo-editorial-team',
+                        'Official Siiqo Content Team',
+                        'In-house content team at Siiqo covering e-commerce, vendor growth, logistics and SME insights across West Africa.',
+                        'https://siiqo.com/images/siiqo.png',
+                        TRUE
+                    )
+                    ON CONFLICT (slug) DO NOTHING
+                """))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
+            # 4. Check if articles table exists and has data
             _result = db.session.execute(_text("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables 
@@ -277,7 +334,7 @@ def create_app(config_name: str | None = None) -> Flask:
             
             if _articles_table_exists:
                 _verify = db.session.execute(_text("SELECT COUNT(*) FROM articles"))
-                _count = _verify.scalar()
+                _count = _verify.scalar() or 0
                 if _count == 0:
                     _log.getLogger(__name__).info("[STARTUP] Articles table is empty. Auto-seeding default SME blog articles...")
                     try:

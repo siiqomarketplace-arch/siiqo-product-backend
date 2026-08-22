@@ -501,6 +501,7 @@ def get_articles():
             from app.extensions import db
             import math
             
+            db.session.rollback()
             offset = (page - 1) * per_page
             sql = "SELECT id, title, slug, category, excerpt, cover_image, content, created_at FROM articles WHERE is_published = true"
             params = {"per_page": per_page, "offset": offset}
@@ -542,6 +543,7 @@ def get_articles():
                 "pages": pages,
             }), 200
         except Exception:
+            db.session.rollback()
             return jsonify({"articles": [], "total": 0, "pages": 1}), 200
 
 @public_bp.route('/blog/<string:slug>', methods=['GET'])
@@ -585,6 +587,7 @@ def get_article_by_slug(slug):
         try:
             from sqlalchemy import text
             from app.extensions import db
+            db.session.rollback()
             sql = "SELECT id, title, category, content, excerpt, cover_image, meta_title, meta_description, created_at FROM articles WHERE slug = :slug AND is_published = true"
             res = db.session.execute(text(sql), {"slug": slug}).fetchone()
             if not res:
@@ -603,6 +606,7 @@ def get_article_by_slug(slug):
                 "created_at": res[8].isoformat() if res[8] else None,
             }), 200
         except Exception:
+            db.session.rollback()
             return jsonify({"message": "Article not found"}), 404
 
 
