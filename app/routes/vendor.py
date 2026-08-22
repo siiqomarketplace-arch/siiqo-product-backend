@@ -271,6 +271,111 @@ def get_vendor_dashboard_stats():
 # POST /vendor/onboard & GET /vendor/check-slug
 # ---------------------------------------------------------------------------
 
+def _build_default_template_options(category_str=""):
+    cat = (category_str or "").lower().strip()
+    
+    if any(k in cat for k in ['fashion', 'cloth', 'apparel', 'wear', 'shoe', 'bag', 'dress', 'boutique', 'luxury']):
+        return {
+            "layout_style": "Fashion Chic",
+            "theme": "Fashion Chic",
+            "palette_id": "Warm Luxe",
+            "primary_color": "#111111",
+            "primaryColor": "#111111",
+            "secondary_color": "#C9A86A",
+            "secondaryColor": "#C9A86A",
+            "font_heading": "Playfair Display, serif",
+            "font_body": "Inter, sans-serif",
+            "hero_layout": "centered",
+            "hero_heading": "Curated Modern Fashion & Style",
+            "hero_subtext": "Discover premium apparel, footwear and accessories crafted for timeless elegance.",
+            "hero_cta": "Shop Collection",
+            "about_title": "About Our Brand",
+            "about_description": "We deliver authentic, stylish, and high-quality fashion pieces designed to elevate your everyday wardrobe.",
+            "store_tagline": "Elegance & Style in Every Stitch",
+            "sections": ["hero", "products", "about", "contact"],
+        }
+    elif any(k in cat for k in ['tech', 'gadget', 'electronic', 'phone', 'computer', 'laptop', 'device', 'solar', 'appliance']):
+        return {
+            "layout_style": "Modern Tech",
+            "theme": "Modern Tech",
+            "palette_id": "Ocean Blue",
+            "primary_color": "#0A0F1D",
+            "primaryColor": "#0A0F1D",
+            "secondary_color": "#0066FF",
+            "secondaryColor": "#0066FF",
+            "font_heading": "Plus Jakarta Sans, sans-serif",
+            "font_body": "Inter, sans-serif",
+            "hero_layout": "split",
+            "hero_heading": "Next-Gen Tech & Authentic Gadgets",
+            "hero_subtext": "Top-tier electronics, smart devices, and accessories with verified warranty and fast delivery.",
+            "hero_cta": "Explore Gadgets",
+            "about_title": "Why Buy From Us",
+            "about_description": "We specialize in 100% genuine electronics, guaranteed warranty, and seamless customer support.",
+            "store_tagline": "Empowering Your Digital Lifestyle",
+            "sections": ["hero", "products", "about", "contact"],
+        }
+    elif any(k in cat for k in ['beauty', 'cosmetic', 'skincare', 'hair', 'wellness', 'fragrance', 'perfume', 'makeup']):
+        return {
+            "layout_style": "Beauty & Wellness",
+            "theme": "Beauty & Wellness",
+            "palette_id": "Rose Gold",
+            "primary_color": "#2D1A22",
+            "primaryColor": "#2D1A22",
+            "secondary_color": "#E87A90",
+            "secondaryColor": "#E87A90",
+            "font_heading": "Playfair Display, serif",
+            "font_body": "Inter, sans-serif",
+            "hero_layout": "centered",
+            "hero_heading": "Pure Radiance & Organic Beauty",
+            "hero_subtext": "Nourish your skin and hair with clean, organic, and dermatologist-tested beauty essentials.",
+            "hero_cta": "Find Your Glow",
+            "about_title": "Our Beauty Promise",
+            "about_description": "Specially formulated products for all skin and hair textures with authentic, skin-safe ingredients.",
+            "store_tagline": "Glow With Natural Confidence",
+            "sections": ["hero", "products", "about", "contact"],
+        }
+    elif any(k in cat for k in ['food', 'restaurant', 'meal', 'grocery', 'drink', 'beverage', 'cake', 'bakery', 'snack', 'cater']):
+        return {
+            "layout_style": "Street Food",
+            "theme": "Street Food",
+            "palette_id": "Warm Bronze",
+            "primary_color": "#0B1B3B",
+            "primaryColor": "#0B1B3B",
+            "secondary_color": "#E0921C",
+            "secondaryColor": "#E0921C",
+            "font_heading": "Plus Jakarta Sans, sans-serif",
+            "font_body": "Inter, sans-serif",
+            "hero_layout": "banner",
+            "hero_heading": "Fresh & Delicious Meals Delivered Fast",
+            "hero_subtext": "Savour authentic flavours, freshly prepared dishes, and pantry essentials right to your doorstep.",
+            "hero_cta": "Order Fresh Now",
+            "about_title": "Freshness & Taste Guaranteed",
+            "about_description": "We use the highest quality fresh ingredients to bring you hygienic and unforgettable tastes every day.",
+            "store_tagline": "Taste the Fresh Difference",
+            "sections": ["hero", "products", "about", "contact"],
+        }
+    else:
+        return {
+            "layout_style": "African Market",
+            "theme": "African Market",
+            "palette_id": "Classic Navy",
+            "primary_color": "#0B1B3B",
+            "primaryColor": "#0B1B3B",
+            "secondary_color": "#E0921C",
+            "secondaryColor": "#E0921C",
+            "font_heading": "Plus Jakarta Sans, sans-serif",
+            "font_body": "Inter, sans-serif",
+            "hero_layout": "centered",
+            "hero_heading": "Quality Products & Trusted Service",
+            "hero_subtext": "Explore our full catalog of authentic products backed by Siiqo escrow buyer protection.",
+            "hero_cta": "Browse Catalog",
+            "about_title": "About Our Store",
+            "about_description": "Your trusted vendor for authentic goods, prompt dispatch, and dedicated customer care.",
+            "store_tagline": "Quality You Can Trust",
+            "sections": ["hero", "products", "about", "contact"],
+        }
+
+
 @vendor_bp.route('/check-slug', methods=['GET'])
 @jwt_required()
 def check_slug():
@@ -323,6 +428,22 @@ def onboard_vendor():
 
     user.role = UserRole.VENDOR
 
+    # Determine category & default template options
+    category_val = data.get('category') or data.get('business_category') or ''
+    if not category_val and data.get('description'):
+        category_val = data.get('description')
+    
+    default_template = _build_default_template_options(category_val)
+    if 'template_options' in data:
+        incoming_tpl = data['template_options']
+        if isinstance(incoming_tpl, str):
+            try:
+                incoming_tpl = json.loads(incoming_tpl)
+            except Exception:
+                incoming_tpl = {}
+        if isinstance(incoming_tpl, dict) and incoming_tpl:
+            default_template.update(incoming_tpl)
+
     storefront = Storefront(
         vendor_id=user.id,
         store_name=store_name,
@@ -339,6 +460,8 @@ def onboard_vendor():
         website=data.get('website'),
         cac_reg=data.get('cac_reg'),
         account_type=data.get('account_type', 'INDIVIDUAL'),
+        theme_color=default_template.get('primary_color', '#0b1b3b'),
+        template_options=default_template,
         # Auto-publish so vendor's store is immediately visible to them.
         # Admin approval (is_verified) is still required before the store
         # appears on the public marketplace — but the vendor can browse
@@ -759,11 +882,21 @@ def add_product():
             if not existing_post:
                 store_name = sf.store_name or user.full_name or 'A vendor'
                 desc = new_product.description or ''
-                desc_snippet = (desc[:150] + '...') if len(desc) > 150 else desc
-                post_content = f"🚀 New product just dropped!\n\n{name} — ₦{price:,.0f}"
+                desc_snippet = (desc[:140] + '...') if len(desc) > 140 else desc
+                product_url = f"https://siiqo.com/marketplace?product={new_product.id}"
+                store_url = f"https://siiqo.com/{sf.store_slug}"
+
+                post_content = (
+                    f"🚀 NEW PRODUCT LAUNCH!\n\n"
+                    f"✨ {name} — ₦{price:,.0f}\n"
+                )
                 if desc_snippet:
-                    post_content += f"\n\n{desc_snippet}"
-                post_content += f"\n\nFrom {store_name} — visit our storefront to order!"
+                    post_content += f"\n📝 {desc_snippet}\n"
+                post_content += (
+                    f"\n🏪 Store: {store_name}\n"
+                    f"👉 View & Purchase: {product_url}\n"
+                    f"🏬 Visit Storefront: {store_url}"
+                )
 
                 community_post = CommunityPost(
                     user_id=user_id,
