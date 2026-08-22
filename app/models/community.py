@@ -6,12 +6,30 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+class BlogAuthor(db.Model):
+    __tablename__ = 'blog_authors'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    slug = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    title = db.Column(db.String(150), nullable=True)  # e.g., "Senior E-Commerce Analyst"
+    bio = db.Column(db.Text, nullable=True)
+    avatar = db.Column(db.String(255), nullable=True)
+    twitter_handle = db.Column(db.String(100), nullable=True)
+    linkedin_url = db.Column(db.String(255), nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Article(db.Model):
     __tablename__ = 'articles'
 
     id = db.Column(db.Integer, primary_key=True)
     # author_id points to admin_users — nullable so system articles work too
     admin_author_id = db.Column(db.Integer, db.ForeignKey('admin_users.id'), nullable=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('blog_authors.id'), nullable=True)
 
     title = db.Column(db.String(255), nullable=False)
     slug = db.Column(db.String(255), unique=True, nullable=False, index=True)
@@ -33,6 +51,7 @@ class Article(db.Model):
 
     # Relationships
     admin_author = db.relationship('AdminUser', backref='articles')
+    author = db.relationship('BlogAuthor', backref='articles')
     comments = db.relationship('Comment', back_populates='article', cascade="all, delete-orphan")
 
 

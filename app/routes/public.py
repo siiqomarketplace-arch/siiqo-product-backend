@@ -550,6 +550,23 @@ def get_article_by_slug(slug):
         a = Article.query.filter_by(slug=slug, is_published=True).first()
         if not a:
             return jsonify({"message": "Article not found"}), 404
+
+        # Build rich author data — prefer linked BlogAuthor profile
+        if getattr(a, 'author', None) and a.author:
+            author_data = {
+                "name": a.author.name,
+                "slug": a.author.slug,
+                "title": a.author.title,
+                "bio": a.author.bio,
+                "avatar": a.author.avatar,
+                "twitter_handle": a.author.twitter_handle,
+                "linkedin_url": a.author.linkedin_url,
+            }
+        elif getattr(a, 'author_name', None):
+            author_data = {"name": a.author_name, "slug": None, "title": None, "bio": None, "avatar": None, "twitter_handle": None, "linkedin_url": None}
+        else:
+            author_data = {"name": "Siiqo Editorial Team", "slug": "siiqo-editorial-team", "title": "Official Siiqo Content Team", "bio": None, "avatar": "https://siiqo.com/images/siiqo.png", "twitter_handle": None, "linkedin_url": None}
+
         return jsonify({
             "id": a.id,
             "title": a.title,
@@ -560,7 +577,8 @@ def get_article_by_slug(slug):
             "cover_image": a.cover_image,
             "meta_title": a.meta_title or a.title,
             "meta_description": a.meta_description or a.excerpt,
-            "author": getattr(a, 'author_name', None) or (a.admin_author.name if getattr(a, 'admin_author', None) else "Siiqo Editorial Team"),
+            "author": author_data["name"],
+            "author_data": author_data,
             "created_at": a.created_at.isoformat() if a.created_at else None,
         }), 200
     except Exception:

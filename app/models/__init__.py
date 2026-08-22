@@ -5,7 +5,7 @@ from .escrow import EscrowTransaction, LogisticsAssignment, EscrowStatus
 from .finance import Invoice, Receipt, Ledger, InventoryItem, StockMovement, Expense, BrandingSettings
 from .crm import CustomerProfile
 from .marketing import Coupon, Campaign
-from .community import Article, Comment, Review
+from .community import Article, Comment, Review, BlogAuthor
 from .partnerships import PartnerApplication, Referral, PartnerStaff
 from .admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription, SponsoredListing, Favorite
 from .communication import Notification, Message
@@ -26,7 +26,7 @@ __all__ = [
     'Invoice', 'Receipt', 'Ledger', 'InventoryItem', 'StockMovement', 'Expense', 'BrandingSettings',
     'CustomerProfile',
     'Coupon', 'Campaign',
-    'Article', 'Comment', 'Review',
+    'Article', 'Comment', 'Review', 'BlogAuthor',
     'PartnerApplication', 'Referral', 'PartnerStaff',
     'AdminUser', 'PlatformSetting', 'SubscriptionPlan', 'VendorSubscription',
     'SponsoredListing', 'Favorite',

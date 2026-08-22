@@ -21,7 +21,7 @@ from app.extensions import db
 from app.models.admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription
 from app.models.user import User, Storefront
 from app.models.escrow import EscrowTransaction, EscrowStatus
-from app.models.community import Article
+from app.models.community import Article, BlogAuthor
 from app.models.product import Category
 from app.models.partnerships import PartnerApplication
 from app.models.finance import Ledger
@@ -1267,6 +1267,122 @@ def approve_partnership(app_id):
 
 
 # ---------------------------------------------------------------------------
+# Blog Authors
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/blog/authors', methods=['GET', 'POST'])
+@jwt_required()
+def handle_blog_authors():
+    """List or create blog author profiles."""
+    admin_id = get_jwt_identity()
+    parsed_id = _parse_admin_id(admin_id)
+    if not _get_admin(parsed_id):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    if request.method == 'GET':
+        authors = BlogAuthor.query.filter_by(is_active=True).order_by(BlogAuthor.name).all()
+        return jsonify({"authors": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "slug": a.slug,
+                "title": a.title,
+                "bio": a.bio,
+                "avatar": a.avatar,
+                "twitter_handle": a.twitter_handle,
+                "linkedin_url": a.linkedin_url,
+            } for a in authors
+        ]}), 200
+
+    # POST — create a new author profile
+    if not _require_superadmin(parsed_id):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    import re as _re
+    # Support multipart (avatar upload) and JSON
+    if request.content_type and 'multipart' in request.content_type:
+        data = request.form.to_dict()
+        avatar_file = request.files.get('avatar')
+        avatar_url = None
+        if avatar_file:
+            from app.utils.upload import save_uploaded_file
+            avatar_url = save_uploaded_file(avatar_file, subfolder="authors")
+    else:
+        data = request.get_json() or {}
+        avatar_url = data.get('avatar')
+
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({"message": "Author name is required."}), 400
+
+    slug = _re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+    original_slug = slug
+    import uuid as _uuid
+    while BlogAuthor.query.filter_by(slug=slug).first():
+        slug = f"{original_slug}-{str(_uuid.uuid4())[:6]}"
+
+    author = BlogAuthor(
+        name=name,
+        slug=slug,
+        title=data.get('title'),
+        bio=data.get('bio'),
+        avatar=avatar_url,
+        twitter_handle=data.get('twitter_handle'),
+        linkedin_url=data.get('linkedin_url'),
+        is_active=True,
+    )
+    db.session.add(author)
+    db.session.commit()
+    return jsonify({"message": "Author created.", "id": author.id, "slug": author.slug}), 201
+
+
+@admin_bp.route('/blog/authors/<int:author_id>', methods=['PATCH', 'DELETE'])
+@jwt_required()
+def manage_blog_author(author_id):
+    """Update or deactivate a blog author."""
+    admin_id = get_jwt_identity()
+    parsed_id = _parse_admin_id(admin_id)
+    if not _require_superadmin(parsed_id):
+        return jsonify({"message": "SuperAdmin required"}), 403
+
+    author = db.session.get(BlogAuthor, author_id)
+    if not author:
+        return jsonify({"message": "Author not found"}), 404
+
+    if request.method == 'DELETE':
+        author.is_active = False
+        db.session.commit()
+        return jsonify({"message": "Author deactivated."}), 200
+
+    # PATCH
+    if request.content_type and 'multipart' in request.content_type:
+        data = request.form.to_dict()
+        avatar_file = request.files.get('avatar')
+        if avatar_file:
+            from app.utils.upload import save_uploaded_file
+            s3_url = save_uploaded_file(avatar_file, subfolder="authors")
+            if s3_url:
+                author.avatar = s3_url
+    else:
+        data = request.get_json() or {}
+        if 'avatar' in data:
+            author.avatar = data['avatar']
+
+    if 'name' in data and data['name']:
+        author.name = data['name'].strip()
+    if 'title' in data:
+        author.title = data['title']
+    if 'bio' in data:
+        author.bio = data['bio']
+    if 'twitter_handle' in data:
+        author.twitter_handle = data['twitter_handle']
+    if 'linkedin_url' in data:
+        author.linkedin_url = data['linkedin_url']
+
+    db.session.commit()
+    return jsonify({"message": "Author updated."}), 200
+
+
 # Blog
 # ---------------------------------------------------------------------------
 
@@ -1326,14 +1442,25 @@ def handle_blog():
     while Article.query.filter_by(slug=slug).first():
         slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
 
+    # Resolve author from author_id or fallback to plain author_name text
+    author_id_val = data.get('author_id')
+    resolved_author_name = data.get('author') or data.get('author_name')
+    if author_id_val:
+        linked_author = db.session.get(BlogAuthor, int(author_id_val))
+        if linked_author:
+            resolved_author_name = linked_author.name
+    else:
+        linked_author = None
+
     try:
         new_article = Article(
             admin_author_id=parsed_id,
+            author_id=linked_author.id if linked_author else None,
             title=title,
             slug=slug,
             category=data.get('category'),
             sub_category=data.get('sub_category'),
-            author_name=data.get('author') or data.get('author_name'),
+            author_name=resolved_author_name,
             content=data.get('content', ''),
             excerpt=data.get('excerpt'),
             cover_image=cover_image_url,
@@ -1356,60 +1483,63 @@ def handle_blog():
 
 
 def _auto_post_blog_to_community(article):
-    """Auto-post a published blog article to the community feed if not posted yet, using the article author name."""
+    """Auto-post a published blog article to the community feed.
+    Posts are always authored by the official 'Siiqo Editorial' brand user account.
+    The credited author name/title is displayed in the post body.
+    No new users are ever created in the users table by this function.
+    """
     try:
         from app.models.social import Post as CommunityPost
         from app.models.user import User
-        from werkzeug.security import generate_password_hash
-        import re, uuid
+        import re
 
-        target_author = (article.author_name or "").strip() or (article.admin_author.name if getattr(article, 'admin_author', None) else "Siiqo Editorial Team")
-        clean_slug = re.sub(r'[^a-z0-9]+', '', target_author.lower()) or 'editorial'
-        author_email = f"{clean_slug}@siiqo.com"
+        # ── Use the official Siiqo Editorial brand account ─────────
+        editorial_user = User.query.filter_by(email='editorial@siiqo.com').first()
+        if not editorial_user:
+            # Fallback: first admin user if editorial account doesn't exist yet
+            editorial_user = User.query.filter_by(role='ADMIN').order_by(User.id).first()
+        if not editorial_user:
+            logging.warning("[BLOG AUTO-POST] No editorial user found; skipping community post.")
+            return
 
-        # Find or create a dedicated user for this author
-        author_user = User.query.filter(
-            (User.email == author_email) | (User.first_name == target_author)
-        ).first()
+        poster_id = editorial_user.id
 
-        if not author_user:
-            author_user = User(
-                email=author_email,
-                password_hash=generate_password_hash(str(uuid.uuid4())),
-                first_name=target_author,
-                last_name="",
-                role="ADMIN",
-                profile_pic="https://siiqo.com/images/siiqo.png",
-                is_verified=True,
-                is_active=True,
-            )
-            db.session.add(author_user)
-            db.session.commit()
+        # ── Build author credit line ───────────────────────────────
+        # Prefer linked BlogAuthor profile; fallback to article.author_name
+        author_credit = ""
+        if article.author and article.author.name:
+            if article.author.title:
+                author_credit = f"✍️ By {article.author.name} ({article.author.title})"
+            else:
+                author_credit = f"✍️ By {article.author.name}"
+        elif article.author_name:
+            author_credit = f"✍️ By {article.author_name}"
         else:
-            if author_user.email.endswith('@siiqo.com') and (author_user.first_name != target_author or author_user.last_name):
-                author_user.first_name = target_author
-                author_user.last_name = ""
-                db.session.commit()
+            author_credit = "✍️ By Siiqo Editorial Team"
 
-        poster_id = author_user.id
-        article_url = f"https://siiqo.com/blog/{article.slug}"
-        existing = CommunityPost.query.filter(
-            CommunityPost.content.like(f"%{article.slug}%")
-        ).first()
-
+        # ── Build excerpt ─────────────────────────────────────────
         excerpt_text = article.excerpt or ""
         if not excerpt_text and article.content:
             clean_text = re.sub('<[^<]+?>', '', article.content)
             excerpt_text = clean_text[:180] + "..." if len(clean_text) > 180 else clean_text
 
+        article_url = f"https://siiqo.com/blog/{article.slug}"
         post_content = (
             f"📰 NEW ARTICLE ON SIIQO BLOG!\n\n"
             f"✨ {article.title}\n\n"
+            f"{author_credit}\n\n"
             f"{excerpt_text}\n\n"
-            f"👉 Read full guide: {article_url}"
+            f"👉 Read full article: {article_url}"
         )
 
-        cover_imgs = [article.cover_image] if article.cover_image and isinstance(article.cover_image, str) and article.cover_image.strip() else []
+        cover_imgs = [
+            article.cover_image
+        ] if article.cover_image and isinstance(article.cover_image, str) and article.cover_image.strip() else []
+
+        # ── Upsert community post ─────────────────────────────────
+        existing = CommunityPost.query.filter(
+            CommunityPost.content.like(f"%{article.slug}%")
+        ).first()
 
         if existing and article.is_published:
             existing.user_id = poster_id
@@ -1425,6 +1555,7 @@ def _auto_post_blog_to_community(article):
             )
             db.session.add(community_post)
             db.session.commit()
+
     except Exception as e:
         db.session.rollback()
         import logging
@@ -1527,7 +1658,12 @@ def manage_blog_article(article_id):
         article.category = data['category']
     if 'sub_category' in data:
         article.sub_category = data['sub_category']
-    if 'author' in data or 'author_name' in data:
+    if 'author_id' in data and data['author_id']:
+        linked_author = db.session.get(BlogAuthor, int(data['author_id']))
+        if linked_author:
+            article.author_id = linked_author.id
+            article.author_name = linked_author.name
+    elif 'author' in data or 'author_name' in data:
         article.author_name = data.get('author') or data.get('author_name')
     if 'content' in data:
         article.content = data['content']
