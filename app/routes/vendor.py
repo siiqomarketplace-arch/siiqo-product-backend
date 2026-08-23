@@ -879,9 +879,10 @@ def add_product():
             ).first()
 
             if not existing_post:
+                from app.routes.community import _clean_community_text
                 store_name = sf.store_name or user.full_name or 'A vendor'
-                desc = new_product.description or ''
-                desc_snippet = (desc[:140] + '...') if len(desc) > 140 else desc
+                clean_desc = _clean_community_text(new_product.description or '')
+                desc_snippet = (clean_desc[:140] + '...') if len(clean_desc) > 140 else clean_desc
                 product_url = f"https://siiqo.com/marketplace?product={new_product.id}"
                 store_url = f"https://siiqo.com/{sf.store_slug}"
 
