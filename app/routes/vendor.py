@@ -462,11 +462,10 @@ def onboard_vendor():
         account_type=data.get('account_type', 'INDIVIDUAL'),
         theme_color=default_template.get('primary_color', '#0b1b3b'),
         template_options=default_template,
-        # Auto-publish so vendor's store is immediately visible to them.
-        # Admin approval (is_verified) is still required before the store
-        # appears on the public marketplace — but the vendor can browse
-        # their own store and share Pay Links right away.
+        # Auto-publish and verify so vendor's store is immediately live upon onboarding.
+        # Identity review / Verified badge is handled separately via KYC documents (NIN / CAC).
         is_published=True,
+        is_verified=True,
     )
 
     if 'nin' in data:

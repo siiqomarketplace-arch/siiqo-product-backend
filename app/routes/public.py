@@ -258,10 +258,11 @@ def get_storefront_details(slug):
     if not s:
         return jsonify({"message": "Store not found"}), 404
 
-    if not s.is_verified:
+    # If the vendor account is suspended, show suspended/offline message
+    if s.vendor and not s.vendor.is_active:
         return jsonify({
-            "status": "pending_approval",
-            "message": "This storefront is under review. It will go live once approved.",
+            "status": "suspended",
+            "message": "This storefront is temporarily unavailable.",
         }), 202
 
     if not s.is_published:

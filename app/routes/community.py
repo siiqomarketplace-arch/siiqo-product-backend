@@ -1,15 +1,12 @@
-import logging
-"""
-community.py — Community/Social Feed Routes
-Handles: Posts, Likes, Comments, Follows, Feed
-"""
+import html
+import re
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.extensions import db, limiter
 from app.models.social import Post, PostLike, PostComment, Follow, PostView, UserActivity
 from app.models.user import User
 from app.models.communication import Notification
-from datetime import datetime, timezone
 from sqlalchemy import or_, and_, func
 from app.utils.algolia_sync import sync_post_to_algolia, delete_post_from_algolia
 
@@ -18,6 +15,22 @@ community_bp = Blueprint('community', __name__, url_prefix='/api/community')
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def _clean_community_text(text: str) -> str:
+    """Clean raw HTML markup and unescape HTML entities while preserving natural line breaks."""
+    if not text:
+        return ""
+    # Convert line-breaking HTML tags to newlines
+    text = re.sub(r'(?i)<br\s*/?>', '\n', text)
+    text = re.sub(r'(?i)</(p|div|li|h[1-6]|tr)>', '\n', text)
+    # Strip all remaining HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Unescape HTML entities (&amp;, &lt;, &gt;, &quot;, &#39;, etc.)
+    text = html.unescape(text)
+    # Clean excessive newlines (max 2 consecutive newlines)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def _track_activity(user_id: int, activity_type: str, points: int = 0, ref_id: int = None, ref_type: str = None):
@@ -168,8 +181,8 @@ def create_post():
     
     data = request.get_json() or {}
     
-    # Validate
-    content = (data.get('content') or '').strip()
+    # Validate & clean content
+    content = _clean_community_text(data.get('content') or '')
     if not content or len(content) < 3:
         return jsonify({'message': 'Content must be at least 3 characters'}), 400
     
@@ -199,7 +212,7 @@ def create_post():
     try:
         sync_post_to_algolia(post)
     except Exception as e:
-        logging.warning(f"Failed to sync post to Algolia: {e}")
+        pass
     
     return jsonify({
         'message': 'Post created successfully',
@@ -262,7 +275,7 @@ def update_post(post_id):
     
     # Update allowed fields
     if 'content' in data:
-        content = data['content'].strip()
+        content = _clean_community_text(data['content'] or '')
         if len(content) < 3:
             return jsonify({'message': 'Content must be at least 3 characters'}), 400
         if len(content) > 5000:
@@ -432,7 +445,7 @@ def add_comment(post_id):
         return jsonify({'message': 'Post not found'}), 404
     
     data = request.get_json() or {}
-    content = (data.get('content') or '').strip()
+    content = _clean_community_text(data.get('content') or '')
     
     if not content or len(content) < 1:
         return jsonify({'message': 'Comment cannot be empty'}), 400

@@ -233,12 +233,14 @@ def get_all_users():
     users = User.query.order_by(User.created_at.desc()).limit(500).all()
     user_list = []
     for u in users:
-        if u.storefront and not u.storefront.is_verified:
+        if not u.is_active:
+            status = 'suspended'
+        elif u.storefront and u.storefront.verification_status == 'PENDING_VERIFY_SUB':
             status = 'pending'
+        elif u.storefront and u.storefront.verification_status == 'VERIFIED':
+            status = 'verified'
         elif u.is_active and u.is_verified:
             status = 'verified'
-        elif not u.is_active:
-            status = 'suspended'
         else:
             status = 'unverified'
 
