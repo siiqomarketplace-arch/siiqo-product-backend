@@ -27,12 +27,13 @@ def get_products():
 
     query = (
         Product.query
-        .join(Storefront)
+        .join(Storefront, Product.storefront_id == Storefront.id)
+        .join(User, Storefront.vendor_id == User.id)
         .filter(
             Product.is_active == True,
             Product.stock_quantity > 0,
-            Storefront.is_verified == True,
             Storefront.is_published == True,
+            User.is_active == True,
         )
     )
 
@@ -228,7 +229,14 @@ def get_storefronts():
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 20)), 100)
 
-    query = Storefront.query.filter_by(is_verified=True, is_published=True)
+    query = (
+        Storefront.query
+        .join(User, Storefront.vendor_id == User.id)
+        .filter(
+            Storefront.is_published == True,
+            User.is_active == True,
+        )
+    )
 
     if city:
         query = query.order_by(
