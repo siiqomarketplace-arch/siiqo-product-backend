@@ -1819,3 +1819,35 @@ def sponsor_product(product_id):
         return jsonify({"message": f"Payment error: {str(e)}"}), 500
 
 
+@vendor_bp.route('/uploads/presigned-url', methods=['POST'])
+@jwt_required()
+def get_presigned_upload_url():
+    """
+    Generates a pre-signed S3 upload payload for fast direct-to-S3 uploads.
+    """
+    from app.utils.upload import generate_presigned_upload_url
+    data = request.get_json() or {}
+    filename = data.get('filename')
+    file_type = data.get('file_type', 'application/octet-stream')
+    subfolder = data.get('subfolder', 'digital_products')
+    is_digital = data.get('is_digital', True)
+
+    if not filename:
+        return jsonify({"message": "Filename is required"}), 400
+
+    try:
+        res = generate_presigned_upload_url(
+            filename=filename,
+            file_type=file_type,
+            subfolder=subfolder,
+            is_digital=is_digital
+        )
+        return jsonify(res), 200
+    except ValueError as ve:
+        return jsonify({"message": str(ve)}), 400
+    except Exception as e:
+        logging.error(f"[PRESIGNED S3 ERR] {e}")
+        return jsonify({"message": "Failed to generate upload authorization", "is_direct_s3": False}), 500
+
+
+

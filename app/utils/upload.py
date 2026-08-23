@@ -77,3 +77,63 @@ def save_uploaded_file(file_obj, subfolder="general", is_digital=False):
     file_obj.save(file_path)
     
     return f"/static/uploads/{subfolder}/{unique_filename}"
+
+
+def generate_presigned_upload_url(filename, file_type="application/octet-stream", subfolder="digital_products", is_digital=True):
+    """
+    Generates a pre-signed S3 POST authorization payload so clients can upload directly to S3.
+    """
+    if subfolder == "digital_products":
+        is_digital = True
+
+    if not filename or not allowed_file(filename, is_digital=is_digital):
+        if is_digital:
+            raise ValueError("Invalid file format. Allowed: PDF, ZIP, MP3, MP4, EPUB, DOCX, XLSX, TXT, images.")
+        else:
+            raise ValueError("Invalid file type. Only image files (PNG, JPG, WEBP) are allowed.")
+
+    ext = filename.rsplit('.', 1)[1].lower()
+    unique_filename = f"{uuid.uuid4().hex}.{ext}"
+    s3_key = f"uploads/{subfolder}/{unique_filename}"
+
+    aws_access_key = current_app.config.get('AWS_ACCESS_KEY_ID')
+    aws_secret_key = current_app.config.get('AWS_SECRET_ACCESS_KEY')
+    bucket_name = current_app.config.get('AWS_S3_BUCKET_NAME')
+    region = current_app.config.get('AWS_REGION', 'us-east-1')
+    max_size = (50 * 1024 * 1024) if is_digital else (10 * 1024 * 1024)
+
+    if aws_access_key and aws_secret_key and bucket_name:
+        try:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                region_name=region
+            )
+            content_type = file_type or ('application/pdf' if ext == 'pdf' else 'application/octet-stream')
+            presigned_post = s3_client.generate_presigned_post(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Fields={"Content-Type": content_type},
+                Conditions=[
+                    {"Content-Type": content_type},
+                    ["content-length-range", 1, max_size]
+                ],
+                ExpiresIn=3600
+            )
+            file_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
+            return {
+                "is_direct_s3": True,
+                "url": presigned_post["url"],
+                "fields": presigned_post["fields"],
+                "file_url": file_url,
+                "s3_key": s3_key
+            }
+        except Exception as e:
+            logger.info(f"[WARN] Failed to generate presigned S3 URL: {e}")
+
+    return {
+        "is_direct_s3": False,
+        "fallback_upload_url": "/api/vendor/uploads/direct"
+    }
+
