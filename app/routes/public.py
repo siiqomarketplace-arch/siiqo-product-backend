@@ -289,7 +289,10 @@ def get_storefront_details(slug):
     products = Product.query.filter(
         Product.storefront_id == s.id,
         Product.is_active == True,
-        Product.stock_quantity > 0
+        db.or_(
+            Product.stock_quantity > 0,
+            Product.product_type.in_(['digital', 'service', 'event'])
+        )
     ).limit(500).all()
 
     # Group by category
@@ -366,8 +369,10 @@ def search():
         .join(Storefront)
         .filter(
             Product.is_active == True,
-            Product.stock_quantity > 0,
-            Storefront.is_verified == True,
+            db.or_(
+                Product.stock_quantity > 0,
+                Product.product_type.in_(['digital', 'service', 'event'])
+            ),
             Storefront.is_published == True,
             Product.name.ilike(f'%{q}%') | Product.description.ilike(f'%{q}%')
         )
@@ -378,7 +383,6 @@ def search():
     storefronts = (
         Storefront.query
         .filter(
-            Storefront.is_verified == True,
             Storefront.is_published == True,
             Storefront.store_name.ilike(f'%{q}%') | Storefront.store_description.ilike(f'%{q}%')
         )

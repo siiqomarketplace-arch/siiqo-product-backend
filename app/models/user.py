@@ -185,8 +185,9 @@ class Storefront(db.Model):
 
     @property
     def is_live(self) -> bool:
-        """True only when both admin-verified AND vendor-published."""
-        return self.is_verified and self.is_published
+        """True when vendor has published their storefront and account is active."""
+        vendor_active = self.vendor.is_active if self.vendor else True
+        return bool(self.is_published and vendor_active)
 
     def to_public_dict(self) -> dict:
         # Avoid circular imports by loading models inline
@@ -215,6 +216,13 @@ class Storefront(db.Model):
             lat = None
             lng = None
 
+        now_dt = utcnow()
+        is_pro_active = bool(
+            self.is_pro_verified and 
+            (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
+        )
+        badge_verified = bool(is_pro_active or self.verification_status == 'VERIFIED')
+
         return {
             "id": self.id,
             "store_name": self.store_name,
@@ -235,7 +243,8 @@ class Storefront(db.Model):
             "is_verified": self.is_verified,
             "is_published": self.is_published,
             "is_live": self.is_live,
-            "is_pro_verified": bool(self.is_pro_verified),
+            "is_pro_verified": is_pro_active,
+            "badge_verified": badge_verified,
             "pro_verified_expires_at": self.pro_verified_expires_at.isoformat() if self.pro_verified_expires_at else None,
             "view_count": self.view_count or 0,
             # â”€â”€ vendor identity (required for chat / messaging) â”€â”€

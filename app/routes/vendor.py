@@ -462,10 +462,10 @@ def onboard_vendor():
         account_type=data.get('account_type', 'INDIVIDUAL'),
         theme_color=default_template.get('primary_color', '#0b1b3b'),
         template_options=default_template,
-        # Auto-publish and verify so vendor's store is immediately live upon onboarding.
-        # Identity review / Verified badge is handled separately via KYC documents (NIN / CAC).
+        # Auto-publish so vendor's store is immediately live upon onboarding.
+        # Identity review / Verified badge is handled separately via KYC documents (NIN / CAC) or Pro Verified subscription.
         is_published=True,
-        is_verified=True,
+        is_verified=False,
     )
 
     if 'nin' in data:
@@ -536,7 +536,7 @@ def onboard_vendor():
         pass
 
     return jsonify({
-        "message": "Vendor onboarding complete. Your application is under review.",
+        "message": "Vendor onboarding complete! Your storefront is now live.",
         "store_name": storefront.store_name,
         "store_slug": storefront.store_slug,
         "status": "success",
