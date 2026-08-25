@@ -17,6 +17,7 @@ from app.models.partnerships import Referral
 from app.models.communication import Notification
 from app.models.withdrawal import PODPayment, VendorBankAccount
 from app.utils.email import send_siiqo_email
+from app.utils.telegram import send_telegram_message
 
 cart_bp = Blueprint('cart', __name__)
 
@@ -510,6 +511,37 @@ def checkout():
             vendor_id=vid,
             buyer_id=user_id,
         ))
+
+        # Push direct Telegram alert to vendor
+        vendor_obj = db.session.get(User, vid)
+        if vendor_obj and vendor_obj.telegram_id:
+            try:
+                # Check if this is the vendor's first order
+                prev_orders = Order.query.filter(
+                    Order.vendor_id == vid,
+                    Order.id != new_order.id
+                ).count()
+                first_product_name = items[0].product.name if items and items[0].product else "an item"
+                vendor_fname = vendor_obj.first_name or "Seller"
+
+                if prev_orders == 0:
+                    tg_text = (
+                        f"🎉 <b>CONGRATULATIONS {vendor_fname.upper()}! YOUR FIRST SALE ON SIIQO!</b>\n\n"
+                        f"A customer just ordered <b>{first_product_name}</b> (Order #{new_order.id}) "
+                        f"worth <b>NGN{total:,.2f}</b> ({payment_method})!\n\n"
+                        f"You are officially an active Siiqo Seller. Login to view and fulfill your order:\n"
+                        f"👉 <a href='https://siiqo.com/vendor/orders'>View & Fulfill Order</a>"
+                    )
+                else:
+                    tg_text = (
+                        f"🛒 <b>New Order Received!</b>\n\n"
+                        f"A customer just ordered <b>{first_product_name}</b> (Order #{new_order.id}) "
+                        f"worth <b>NGN{total:,.2f}</b> ({payment_method}).\n\n"
+                        f"👉 <a href='https://siiqo.com/vendor/orders'>View & Fulfill Order</a>"
+                    )
+                send_telegram_message(vendor_obj.telegram_id, tg_text)
+            except Exception as tg_err:
+                logging.warning(f"[TELEGRAM PUSH WARN] Failed to notify vendor {vid}: {tg_err}")
 
         if payment_method == 'POD':
             try:

@@ -1689,6 +1689,20 @@ def get_vendor_dashboard_stats_legacy():
     ).all()
     sponsored_product_ids = [s.product_id for s in active_sponsored]
 
+    # Calculate dynamic gamified Seller Tier (Jobs-to-be-Done & Identity system)
+    completed_count = len(completed_orders)
+    products_count = len(products)
+    if sf and sf.is_pro_verified and completed_count >= 20:
+        seller_tier = {"level": 5, "name": "Elite Seller", "badge": "🏆 Elite Seller", "color": "#f59e0b", "fee_discount": "4.5% fee"}
+    elif completed_count >= 5:
+        seller_tier = {"level": 4, "name": "Trusted Seller", "badge": "💛 Trusted Seller", "color": "#10b981", "fee_discount": "5.4% fee"}
+    elif completed_count >= 1:
+        seller_tier = {"level": 3, "name": "Active Seller", "badge": "🔥 Active Seller", "color": "#3b82f6", "fee_discount": "Standard fee"}
+    elif products_count >= 1:
+        seller_tier = {"level": 2, "name": "Rising Seller", "badge": "⭐ Rising Seller", "color": "#8b5cf6", "fee_discount": "Standard fee"}
+    else:
+        seller_tier = {"level": 1, "name": "Starter", "badge": "🌱 Starter", "color": "#6b7280", "fee_discount": "Standard fee"}
+
     return jsonify({
         "store_view_count": sf.view_count if sf else 0,
         "total_product_views": total_product_views,
@@ -1697,6 +1711,7 @@ def get_vendor_dashboard_stats_legacy():
         "is_first_sale": is_first_sale,
         "nudge_products": nudge_products,
         "sponsored_product_ids": sponsored_product_ids,
+        "seller_tier": seller_tier,
         "pro_verified": {
             "is_pro_verified": bool(sf.is_pro_verified) if sf else False,
             "expires_at": sf.pro_verified_expires_at.isoformat() if (sf and sf.pro_verified_expires_at) else None,

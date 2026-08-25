@@ -5,6 +5,7 @@ from app.models.user import User, Storefront
 from app.models.order import Order
 from app.models.product import Product
 from app.utils.email import send_siiqo_email
+from app.utils.telegram import send_telegram_message
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ def run_monday_recap_task():
     - product views
     - orders
     - revenue
+    Sent via Email and direct Telegram Bot push.
     """
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
@@ -55,19 +57,36 @@ def run_monday_recap_task():
         products = Product.query.filter_by(storefront_id=sf.id, is_active=True).all()
         product_views = sum(p.view_count or 0 for p in products)
         store_visits = sf.view_count or 0
+        vendor_name = vendor.first_name or "Vendor"
+        tg_id = vendor.telegram_id
 
         try:
             send_siiqo_email(
                 to_email=vendor.email,
                 subject="Your Weekly Siiqo Store Recap 📊",
                 template_name="monday_recap",
-                first_name=vendor.first_name or "Vendor",
+                first_name=vendor_name,
                 date_str=date_str,
                 store_visits=store_visits,
                 product_views=product_views,
                 orders_count=orders_count,
                 revenue=revenue_str,
             )
+
+            # Push Telegram Recap if linked
+            if tg_id:
+                tg_msg = (
+                    f"📊 <b>Weekly Store Performance — {date_str}</b>\n\n"
+                    f"Hey {vendor_name}! Here is your 7-day business summary on Siiqo:\n\n"
+                    f"👁️ <b>Store Visits:</b> {store_visits}\n"
+                    f"📦 <b>Product Views:</b> {product_views}\n"
+                    f"🛒 <b>Orders:</b> {orders_count}\n"
+                    f"💰 <b>Revenue:</b> {revenue_str}\n\n"
+                    f"💡 <i>Tip: Updating your catalog or sharing links early in the week drives stronger weekend sales.</i>\n"
+                    f"👉 <a href='https://siiqo.com/vendor/dashboard'>Open Siiqo Dashboard</a>"
+                )
+                send_telegram_message(tg_id, tg_msg)
+
             count_sent += 1
 
             # Update timestamp in JSONB column to prevent duplicate sending across worker processes
@@ -82,3 +101,4 @@ def run_monday_recap_task():
 
     logger.info(f"[MONDAY RECAP TASK] Sent weekly recap to {count_sent} vendors.")
     return count_sent
+
