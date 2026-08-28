@@ -2,7 +2,7 @@
 fee_sweep_tasks.py — Siiqo Platform Fee Auto-Sweep
 
 Runs on a scheduled interval (every 6 hours by default).
-Checks how much platform fee (6% of order totals) has accumulated in
+Checks how much platform fee (5% standard / 3% verified) has accumulated in
 Siiqo's Daya collection balance and, when it exceeds the configured
 threshold (default: ₦20,000), automatically transfers those funds to
 Siiqo's corporate NGN bank account.
@@ -45,7 +45,7 @@ def run_platform_fee_sweep():
 
     Steps:
     1. Fetch Siiqo's live Daya merchant balance.
-    2. Calculate the total accumulated Siiqo platform fees (6% of RELEASED escrows
+    2. Calculate the total accumulated Siiqo platform fees (from RELEASED escrows
        paid via Daya, not yet swept) from the database.
     3. If accumulated fees >= SWEEP_THRESHOLD_NGN:
        a. Convert target NGN to USD using live Daya rate.

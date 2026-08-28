@@ -103,13 +103,13 @@ class PaystackProvider(BaseEscrowProvider):
         buyer_phone = _format_phone(buyer.phone if buyer else None)
 
         # ── fee accounting ───────────────────────────────────────────────
-        # Platform fee: 5.4% for Pro Verified vendors, 6% standard.
+        # Platform fee: 3.0% for Pro Verified vendors, 5.0% standard.
         siiqo_fee_total = Decimal("0.00")
         for o in orders:
             subtotal = Decimal(str(o.total_amount))
-            fee_rate = Decimal("0.06")
+            fee_rate = Decimal("0.05")
             if o.vendor and o.vendor.storefront and o.vendor.storefront.is_pro_verified:
-                fee_rate = Decimal("0.054")
+                fee_rate = Decimal("0.03")
             siiqo_fee_total += (subtotal * fee_rate).quantize(Decimal("0.01"))
         siiqo_fee_kobo = int(round(float(siiqo_fee_total) * 100))
 

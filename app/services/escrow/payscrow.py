@@ -81,8 +81,9 @@ class PayscrowProvider(BaseEscrowProvider):
         
         for o in orders:
             p_subtotal = Decimal(str(o.total_amount))
-            # 6% platform fee — deducted from vendor payout only; vendor receives 94%
-            fee = (p_subtotal * Decimal('0.06')).quantize(Decimal('0.01'))
+            # 5% platform fee (3% for Verified Pro) — deducted from vendor payout only
+            fee_rate = Decimal('0.03') if (o.vendor and o.vendor.storefront and o.vendor.storefront.is_pro_verified) else Decimal('0.05')
+            fee = (p_subtotal * fee_rate).quantize(Decimal('0.01'))
             vendor_amount = p_subtotal - fee
             
             siiqo_total_fee += fee

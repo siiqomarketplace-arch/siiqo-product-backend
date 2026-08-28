@@ -595,7 +595,7 @@ def create_app(config_name: str | None = None) -> Flask:
                     func=lambda: _run_in_context(app, run_platform_fee_sweep),
                     trigger=IntervalTrigger(hours=6),
                     id='platform_fee_sweep',
-                    name='Auto-sweep Siiqo 6% platform fees to corporate bank when >= threshold',
+                    name='Auto-sweep Siiqo platform fees (5% standard / 3% verified) to corporate bank when >= threshold',
                     replace_existing=True,
                 )
             except Exception as sweep_err:
