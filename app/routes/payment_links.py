@@ -257,9 +257,12 @@ def pay_payment_link(link_id):
         quantity=1,
     ))
 
-    # Calculate platform fees (6% fee)
-    fee_percent = 6.00
-    fee_amount = amount * Decimal('0.06')
+    # Calculate platform fees (5% standard, 3% for verified pro)
+    from app.models.user import User as _User
+    _v_user = db.session.get(_User, new_order.vendor_id) if new_order.vendor_id else None
+    _is_v_pro = bool(_v_user and (_v_user.is_pro_verified or (_v_user.storefront and _v_user.storefront.is_pro_verified)))
+    fee_percent = 3.00 if _is_v_pro else 5.00
+    fee_amount = amount * Decimal(str(fee_percent / 100.0))
 
     # Build the return URL so buyer lands on a proper success/tracking page
     site_url = os.environ.get('SITE_URL', 'https://siiqo.com').rstrip('/')

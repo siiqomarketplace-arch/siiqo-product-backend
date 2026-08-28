@@ -44,13 +44,13 @@ def get_or_create_trust_profile(vendor_id):
         if not profile:
             profile = VendorTrustProfile(
                 vendor_id=vendor_id,
-                completion_score=Decimal('200.00'),   # Midpoint defaults
-                satisfaction_score=Decimal('218.75'), # Bayesian avg (4.5 star equivalent)
-                responsiveness_score=Decimal('100.00'),
-                compliance_score=Decimal('25.00'),    # Email verified base
+                completion_score=Decimal('0.00'),
+                satisfaction_score=Decimal('0.00'),
+                responsiveness_score=Decimal('0.00'),
+                compliance_score=Decimal('0.00'),
                 community_score=Decimal('0.00'),
-                total_trust_score=500,
-                trust_tier='SILVER'
+                total_trust_score=0,
+                trust_tier='UNRANKED'
             )
             db.session.add(profile)
             db.session.commit()
@@ -68,7 +68,7 @@ def calculate_completion_score(vendor_id) -> float:
         # 1. Total orders handled by this vendor
         total_orders = Order.query.filter_by(vendor_id=vendor_id).count()
         if total_orders == 0:
-            return 200.00 # default midpoint
+            return 0.00
 
         # 2. Completed orders (Escrow released or POD payment confirmed)
         completed_orders = Order.query.filter(
@@ -98,7 +98,7 @@ def calculate_completion_score(vendor_id) -> float:
         return round(final_score, 2)
     except Exception as e:
         logging.error(f"[TRUST] Error calculating completion score for vendor {vendor_id}: {e}")
-        return 200.00
+        return 0.00
 
 def calculate_satisfaction_score(vendor_id) -> float:
     """Pillar 2: Customer Satisfaction (Weight: 25% - Max 250 pts) using Bayesian Average"""
@@ -108,24 +108,23 @@ def calculate_satisfaction_score(vendor_id) -> float:
         vendor_reviews = Review.query.filter_by(vendor_id=vendor_id, is_approved=True).all()
         v = len(vendor_reviews)
         
+        if v == 0:
+            return 0.00
+            
         # Bayesian parameters
-        C = 5.0    # Baseline review volume constant
+        C = 3.0    # Baseline review volume constant
         S = 4.5    # Siiqo baseline global average rating
         
-        if v == 0:
-            # If no reviews, assume global baseline
-            bayesian_avg = S
-        else:
-            total_rating = sum(r.vendor_rating for r in vendor_reviews)
-            m = total_rating / v
-            bayesian_avg = ((v * m) + (C * S)) / (v + C)
+        total_rating = sum(r.vendor_rating for r in vendor_reviews)
+        m = total_rating / v
+        bayesian_avg = ((v * m) + (C * S)) / (v + C)
 
         # Scale Bayesian rating (1.0 to 5.0) to points (0.0 to 250.0)
         points = 250.0 * ((bayesian_avg - 1.0) / 4.0)
         return round(max(0.0, min(250.0, points)), 2)
     except Exception as e:
         logging.error(f"[TRUST] Error calculating satisfaction score for vendor {vendor_id}: {e}")
-        return 218.75
+        return 0.00
 
 def calculate_responsiveness_score(vendor_id) -> float:
     """Pillar 3: Chat & Negotiation Responsiveness (Weight: 15% - Max 150 pts)"""
@@ -151,8 +150,7 @@ def calculate_responsiveness_score(vendor_id) -> float:
                     last_buyer_time = None # reset to prevent counting double
 
         if not response_deltas:
-            # Default speed: ~4 hours median response time (70 pts)
-            speed_score = 70.0
+            speed_score = 0.0
         else:
             response_deltas.sort()
             n = len(response_deltas)
@@ -177,7 +175,7 @@ def calculate_responsiveness_score(vendor_id) -> float:
         # 2. Negotiation Conversion Rate (Max 60 pts)
         total_negotiations = NegotiationRequest.query.filter_by(vendor_id=vendor_id).count()
         if total_negotiations == 0:
-            conversion_score = 30.0 # default midpoint
+            conversion_score = 0.0
         else:
             accepted_negotiations = NegotiationRequest.query.filter_by(
                 vendor_id=vendor_id,
@@ -189,10 +187,10 @@ def calculate_responsiveness_score(vendor_id) -> float:
         return round(speed_score + conversion_score, 2)
     except Exception as e:
         logging.error(f"[TRUST] Error calculating responsiveness score for vendor {vendor_id}: {e}")
-        return 100.00
+        return 0.00
 
 def calculate_compliance_score(vendor_id) -> float:
-    """Pillar 4: Profile Verification & Compliance (Weight: 15% - Max 150 pts)"""
+    """Pillar 4: Profile Verification & Compliance (Weight: 15% - Max 200 pts)"""
     from app.models.user import User, Storefront
     from app.models.withdrawal import VendorBankAccount
     try:
@@ -209,22 +207,25 @@ def calculate_compliance_score(vendor_id) -> float:
         # Storefront details
         sf = user.storefront
         if sf:
-            # Identity Verification Verified by admin (50 pts)
-            if sf.verification_status == 'VERIFIED' or sf.is_verified:
-                score += 50.0
+            # Store logo or banner (25 pts)
+            if getattr(sf, 'logo', None) or getattr(sf, 'banner_url', None) or getattr(sf, 'avatar', None):
+                score += 25.0
+            # Paid Verified Accreditation (75 pts)
+            if sf.is_pro_verified or getattr(user, 'is_pro_verified', False) or sf.verification_status == 'VERIFIED':
+                score += 75.0
             # CAC or NIN provided (50 pts)
-            if sf.cac_reg or user.nin:
+            if sf.cac_reg or getattr(user, 'nin', None):
                 score += 50.0
 
-        # Linked bank account verified via Paystack (25 pts)
+        # Linked bank account verified via Paystack (50 pts)
         bank_acc = VendorBankAccount.query.filter_by(vendor_id=vendor_id, is_verified=True).first()
-        if bank_acc:
-            score += 25.0
+        if bank_acc or (sf and getattr(sf, 'account_number', None)):
+            score += 50.0
 
-        return round(score, 2)
+        return round(min(200.0, score), 2)
     except Exception as e:
         logging.error(f"[TRUST] Error calculating compliance score for vendor {vendor_id}: {e}")
-        return 25.00
+        return 0.00
 
 def calculate_community_score(vendor_id) -> float:
     """Pillar 5: Community Engagement & Social Standing (Weight: 5% - Max 50 pts)"""
@@ -267,14 +268,16 @@ def recalculate_vendor_trust(vendor_id, reason="Recalculation"):
         new_score = max(0, min(1000, new_score))
 
         # Assign tier
-        if new_score >= 900:
+        if new_score >= 800:
             new_tier = 'PLATINUM'
-        elif new_score >= 700:
+        elif new_score >= 550:
             new_tier = 'GOLD'
-        elif new_score >= 400:
+        elif new_score >= 300:
             new_tier = 'SILVER'
-        else:
+        elif new_score > 0:
             new_tier = 'BRONZE'
+        else:
+            new_tier = 'UNRANKED'
 
         old_score = profile.total_trust_score
 

@@ -521,7 +521,7 @@ def initiate_escrow():
         if not escrow_txn:
             # fee_amount for an individual order in a master transaction
             # the result['fee_amount'] is total, so we calculate proportional
-            fee_rate = 0.054 if (order.vendor and order.vendor.storefront and order.vendor.storefront.is_pro_verified) else 0.06
+            fee_rate = 0.03 if (order.vendor and order.vendor.storefront and (order.vendor.storefront.is_pro_verified or getattr(order.vendor, 'is_pro_verified', False))) else 0.05
             individual_fee = round(float(order.total_amount) * fee_rate, 2)
             escrow_txn = EscrowTransaction(
                 order_id=order.id,

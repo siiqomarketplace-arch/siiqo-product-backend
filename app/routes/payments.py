@@ -594,7 +594,7 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
 
         escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
         if not escrow:
-            fee_rate = 0.054 if (order.vendor and order.vendor.storefront and order.vendor.storefront.is_pro_verified) else 0.06
+            fee_rate = 0.03 if (order.vendor and order.vendor.storefront and (order.vendor.storefront.is_pro_verified or getattr(order.vendor, 'is_pro_verified', False))) else 0.05
             fee_amount = round(float(order.total_amount) * fee_rate, 2)
             txn_number = f"DYA-{uuid.uuid4().hex[:12].upper()}"
             escrow = EscrowTransaction(
@@ -648,7 +648,7 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
             if _ltype == 'digital':
                 # Digital Pay Link — release immediately, credit vendor
-                fee_rate = 0.054 if (order.vendor and order.vendor.storefront and order.vendor.storefront.is_pro_verified) else 0.06
+                fee_rate = 0.03 if (order.vendor and order.vendor.storefront and (order.vendor.storefront.is_pro_verified or getattr(order.vendor, 'is_pro_verified', False))) else 0.05
                 net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
