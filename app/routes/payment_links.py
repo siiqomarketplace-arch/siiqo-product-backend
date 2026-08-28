@@ -260,7 +260,11 @@ def pay_payment_link(link_id):
     # Calculate platform fees (5% standard, 3% for verified pro)
     from app.models.user import User as _User
     _v_user = db.session.get(_User, new_order.vendor_id) if new_order.vendor_id else None
-    _is_v_pro = bool(_v_user and (_v_user.is_pro_verified or (_v_user.storefront and _v_user.storefront.is_pro_verified)))
+    _now = _utcnow()
+    _sf = _v_user.storefront if _v_user else None
+    _is_v_pro = bool(
+        _sf and _sf.is_pro_verified and (not _sf.pro_verified_expires_at or _sf.pro_verified_expires_at > _now)
+    )
     fee_percent = 3.00 if _is_v_pro else 5.00
     fee_amount = amount * Decimal(str(fee_percent / 100.0))
 
@@ -321,47 +325,81 @@ def pay_payment_link(link_id):
         # Initiate Daya funding account
         try:
             from app.services import daya_service as _daya
+            import time
 
-            # 1. Get a firm exchange rate
-            # NGN onramp: BUY (NGN→USDT), crypto_direct: SELL (USDT→NGN)
+            # 1. Split buyer name safely
+            name_parts = buyer_name.strip().split(' ', 1)
+            first_name = name_parts[0] if name_parts else (buyer_user.first_name or buyer_email.split('@')[0])
+            last_name = name_parts[1] if len(name_parts) > 1 else (buyer_user.last_name or "")
+
+            # 2. Get or create Daya customer
+            customer_id = _daya.get_or_create_customer(
+                email=buyer_email,
+                first_name=first_name,
+                last_name=last_name,
+            )
+
+            # 3. Get a firm exchange rate
             rate_side = "SELL" if daya_type == 'crypto_direct' else "BUY"
             rate_data = _daya.get_rate(asset="USDT", side=rate_side)
             rate = float(rate_data.get("rate", 1500))
             rate_id = rate_data.get("rate_id", "")
             rate_expires_at = rate_data.get("expires_at")
 
-            # 2. Get or create Daya customer
-            customer_id = _daya.get_or_create_customer(
-                email=buyer_email,
-                first_name=buyer_user.first_name or buyer_name.split()[0],
-                last_name=buyer_user.last_name or (buyer_name.split()[1] if len(buyer_name.split()) > 1 else ''),
-            )
+            idempotency_key = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}"
 
-            idempotency_key = f"paylink-{new_order.id}-{daya_type}"
-
-            # 3. Create the funding account based on type
+            # 4. Create the funding account based on type with retry
             if daya_type == 'crypto_direct':
-                fa = _daya.create_crypto_funding_account(
-                    customer_id=str(customer_id),
-                    asset="USDT",
-                    network="TRC20",
-                    rate_id=rate_id,
-                    idempotency_key=idempotency_key,
-                )
+                try:
+                    fa = _daya.create_crypto_funding_account(
+                        customer_id=str(customer_id),
+                        asset="USDT",
+                        network="TRC20",
+                        rate_id=rate_id,
+                        idempotency_key=idempotency_key,
+                        developer_fee_pct="0",
+                    )
+                except RuntimeError as first_exc:
+                    logging.warning(f"[PAYLINK DAYA] First crypto account attempt failed ({first_exc}), retrying...")
+                    time.sleep(0.5)
+                    idempotency_key_retry = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}-r2"
+                    fa = _daya.create_crypto_funding_account(
+                        customer_id=str(customer_id),
+                        asset="USDT",
+                        network="TRC20",
+                        rate_id=rate_id,
+                        idempotency_key=idempotency_key_retry,
+                        developer_fee_pct="0",
+                    )
             else:
                 # NGN onramp — Daya returns the exact NGN amount buyer must send
-                fa = _daya.create_ngn_funding_account(
-                    customer_id=str(customer_id),
-                    amount_ngn=int(float(amount)),
-                    rate_id=rate_id,
-                    idempotency_key=idempotency_key,
-                )
-                # Use Daya's returned amount — may differ due to processing margin
-                daya_amount = fa.get("amount")
-                if daya_amount:
-                    daya_amount_ngn = float(daya_amount)
-                else:
-                    daya_amount_ngn = float(amount)
+                try:
+                    fa = _daya.create_ngn_funding_account(
+                        customer_id=str(customer_id),
+                        amount_ngn=int(round(float(amount))),
+                        rate_id=rate_id,
+                        idempotency_key=idempotency_key,
+                        developer_fee_pct="0",
+                    )
+                except RuntimeError as first_exc:
+                    logging.warning(f"[PAYLINK DAYA] First NGN virtual account attempt failed ({first_exc}), retrying...")
+                    time.sleep(0.5)
+                    idempotency_key_retry = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}-r2"
+                    fa = _daya.create_ngn_funding_account(
+                        customer_id=str(customer_id),
+                        amount_ngn=int(round(float(amount))),
+                        rate_id=rate_id,
+                        idempotency_key=idempotency_key_retry,
+                        developer_fee_pct="0",
+                    )
+
+            # Bank/wallet details are nested under fa["instructions"][0]
+            instructions = fa.get("instructions", [{}])[0]
+            daya_amount = fa.get("amount")
+            if daya_type == 'ngn_onramp' and daya_amount:
+                final_amount_ngn = float(daya_amount)
+            else:
+                final_amount_ngn = float(amount)
 
             from app.models.withdrawal import DayaPayment
             from datetime import datetime as _dt_parse
@@ -371,14 +409,6 @@ def pay_payment_link(link_id):
                     expires_dt = _dt_parse.fromisoformat(str(rate_expires_at).replace('Z', '+00:00'))
                 except Exception:
                     pass
-
-            # Bank/wallet details are nested under fa["instructions"][0]
-            instructions = fa.get("instructions", [{}])[0]
-            # For crypto path, amount_ngn stays as the vendor set it
-            if daya_type == 'ngn_onramp':
-                final_amount_ngn = daya_amount_ngn
-            else:
-                final_amount_ngn = float(amount)
 
             dp = DayaPayment(
                 order_id=new_order.id,

@@ -189,6 +189,15 @@ class Storefront(db.Model):
         vendor_active = self.vendor.is_active if self.vendor else True
         return bool(self.is_published and vendor_active)
 
+    @property
+    def is_pro_active(self) -> bool:
+        """True when vendor is Pro Verified and subscription has not expired."""
+        now_dt = utcnow()
+        return bool(
+            self.is_pro_verified and 
+            (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
+        )
+
     def to_public_dict(self) -> dict:
         # Avoid circular imports by loading models inline
         from app.models.community import Review

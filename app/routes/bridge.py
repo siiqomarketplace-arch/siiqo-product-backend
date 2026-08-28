@@ -430,49 +430,23 @@ def buyer_order_history():
 
     # ── Live payment sync for stuck PENDING orders ──────────────────────────
     # If an order is PENDING and has an escrow record, the webhook may have
-    # been missed. Verify directly with the active provider.
-    active_provider = os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
-
+    # been missed. Verify directly with Paystack.
     for o in orders:
         if o.status == 'PENDING':
             escrow_check = EscrowTransaction.query.filter_by(order_id=o.id).first()
             if escrow_check and escrow_check.transaction_number:
                 try:
-                    if active_provider == "paystack":
-                        from app.services.escrow.paystack_provider import PaystackProvider
-                        verify = PaystackProvider().verify_transaction(
-                            escrow_check.transaction_number
-                        )
-                        if verify.get("success"):
-                            escrow_check.status = EscrowStatus.IN_ESCROW
-                            escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
-                            o.status = 'PAID'
-                            db.session.commit()
-                    else:
-                        # Legacy Payscrow sync
-                        from app.routes.escrow import _payscrow_env as _ps_env
-                        import requests as _http
-                        ps_key, ps_base = _ps_env()
-                        if ps_key:
-                            r = _http.get(
-                                f"{ps_base}/api/v3/marketplace/transactions/"
-                                f"{escrow_check.transaction_number}/status",
-                                headers={"BrokerApiKey": ps_key},
-                                timeout=8,
-                            )
-                            if r.status_code == 200:
-                                ps_status = str(r.json().get('paymentStatus', '')).lower()
-                                if ps_status in ['paid', 'completed', 'pendingsettlement']:
-                                    escrow_check.status = EscrowStatus.IN_ESCROW
-                                    escrow_check.paid_at = (
-                                        escrow_check.paid_at or datetime.now(timezone.utc)
-                                    )
-                                    if r.json().get('escrowCode'):
-                                        escrow_check.escrow_code = r.json().get('escrowCode')
-                                    o.status = 'PAID'
-                                    db.session.commit()
-                except Exception:
-                    pass  # non-fatal — show whatever status we have
+                    from app.services.escrow.paystack_provider import PaystackProvider
+                    verify = PaystackProvider().verify_transaction(
+                        escrow_check.transaction_number
+                    )
+                    if verify.get("success"):
+                        escrow_check.status = EscrowStatus.IN_ESCROW
+                        escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
+                        o.status = 'PAID'
+                        db.session.commit()
+                except Exception as sync_err:
+                    logging.warning(f"Payment sync failed for order #{o.id}: {sync_err}")
 
     result = []
     for o in orders:

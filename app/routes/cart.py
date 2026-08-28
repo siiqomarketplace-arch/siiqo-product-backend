@@ -319,6 +319,22 @@ def checkout():
     if not vendors:
         return jsonify({"message": "No valid items in cart"}), 400
 
+    # Validate POD access (exclusive to Pro Subscribed vendors)
+    if payment_method == 'POD':
+        from app.models.admin import VendorSubscription
+        now_dt = _utcnow()
+        for (vid, is_physical) in vendors.keys():
+            active_sub = VendorSubscription.query.filter_by(
+                vendor_id=vid, status='ACTIVE'
+            ).filter(VendorSubscription.end_date > now_dt).first()
+            if not active_sub:
+                vendor_user = db.session.get(User, vid)
+                v_name = (vendor_user.storefront.store_name if (vendor_user and vendor_user.storefront) else "This seller")
+                return jsonify({
+                    "message": f"Pay on Delivery is an exclusive feature for Pro Subscribed vendors. '{v_name}' does not currently have active POD permissions. Please pay securely via Escrow or Crypto.",
+                    "code": "POD_PRO_REQUIRED"
+                }), 400
+
     # Validate bank accounts for ESCROW (not needed for CRYPTO or POD)
     if payment_method == 'ESCROW':
         for (vid, is_physical) in vendors.keys():
@@ -358,7 +374,9 @@ def checkout():
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
             for item in items
         )
-        fee_percent = 6.00
+        vendor_user = db.session.get(User, vid)
+        is_pro = bool(vendor_user and vendor_user.storefront and vendor_user.storefront.is_pro_active)
+        fee_percent = 3.00 if is_pro else 5.00
         fee_amount = total * (fee_percent / 100)
         has_physical_items = is_physical
         logistics_fee = 0.0
@@ -465,7 +483,7 @@ def checkout():
             # For crypto, create an escrow transaction record in PENDING_PAYMENT state.
             # The DayaPayment record is created by /payments/daya/initiate AFTER checkout.
             # When Daya confirms payment, _handle_crypto_payment_confirmed() updates both.
-            fee_rate = 0.03 if (new_order.vendor and new_order.vendor.storefront and new_order.vendor.storefront.is_pro_verified) else 0.05
+            fee_rate = 0.03 if (new_order.vendor and new_order.vendor.storefront and new_order.vendor.storefront.is_pro_active) else 0.05
             txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
             new_escrow = EscrowTransaction(
                 order_id=new_order.id,

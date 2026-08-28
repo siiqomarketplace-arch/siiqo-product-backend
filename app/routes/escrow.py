@@ -30,23 +30,9 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
-def _payscrow_env():
-    """Return (api_key, base_url) for Payscrow — still used by Payment Links."""
-    key = os.environ.get('PAYSCROW_API_KEY', '')
-    base_url = os.environ.get('PAYSCROW_BASE_URL')
-    if not base_url:
-        is_sandbox = (
-            not key
-            or key.startswith('ps_9')
-            or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-        )
-        base_url = "https://api.payscrow.dev" if is_sandbox else "https://api.payscrow.net"
-    return key, base_url
-
-
 def _active_provider() -> str:
     """Return the currently-configured payment provider name."""
-    return os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
+    return os.environ.get("ACTIVE_ESCROW_PROVIDER", "paystack").lower()
 
 
 def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, description: str):
@@ -492,17 +478,15 @@ def initiate_escrow():
     # Validate bank accounts ONLY for Payscrow (physical orders)
     # Paystack handles digital/service orders and uses its own recipient API
     from app.models.withdrawal import VendorBankAccount
-    provider_check = get_escrow_provider(orders)
-    if isinstance(provider_check, type) or provider_check.__class__.__name__ == 'PayscrowProvider':
-        for order in orders:
-            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
-            if not bank_acc:
-                bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
-            if not bank_acc:
-                sf = order.vendor.storefront if order.vendor else None
-                if not (sf and sf.bank_code and sf.account_number):
-                    v_name = order.vendor.full_name if order.vendor else f"ID {order.vendor_id}"
-                    return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
+    for order in orders:
+        bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
+        if not bank_acc:
+            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
+        if not bank_acc:
+            sf = order.vendor.storefront if order.vendor else None
+            if not (sf and sf.bank_code and sf.account_number):
+                v_name = order.vendor.full_name if order.vendor else f"ID {order.vendor_id}"
+                return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
 
     escrow_txns = EscrowTransaction.query.filter(EscrowTransaction.order_id.in_([o.id for o in orders])).all()
     existing_txn_number = next((e.transaction_number for e in escrow_txns if e.payment_link), None)

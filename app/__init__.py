@@ -601,6 +601,19 @@ def create_app(config_name: str | None = None) -> Flask:
             except Exception as sweep_err:
                 logger.warning(f"Platform fee sweep task registration skipped: {sweep_err}")
 
+            # Pro Badge Auto-Revocation — check every 6 hours
+            try:
+                from app.tasks.pro_badge_expiry_tasks import run_pro_badge_expiry_check
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_pro_badge_expiry_check),
+                    trigger=IntervalTrigger(hours=6),
+                    id='pro_badge_expiry_check',
+                    name='Auto-revoke expired Pro Verified badges and notify vendors',
+                    replace_existing=True,
+                )
+            except Exception as badge_err:
+                logger.warning(f"Pro badge expiry task registration skipped: {badge_err}")
+
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")
         except ImportError:

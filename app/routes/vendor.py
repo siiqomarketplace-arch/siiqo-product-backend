@@ -1228,34 +1228,22 @@ def get_orders():
     else:
         orders = query.limit(500).all()
 
-    # ── Live PayScrow sync for stuck PENDING orders ───────────────────────────
-    # If an order is PENDING but already has an escrow record, the webhook
-    # was likely missed. Check PayScrow directly and heal the status now.
+    # ── Live Paystack sync for stuck PENDING orders ───────────────────────────
     from app.models.escrow import EscrowTransaction
-    from app.routes.escrow import _payscrow_env as _ps_env
     from datetime import datetime, timezone as _tz
-    import requests as _http
-    ps_key, ps_base = _ps_env()
     needs_commit = False
     for o in orders:
         if o.status == 'PENDING':
             escrow_check = EscrowTransaction.query.filter_by(order_id=o.id).first()
-            if escrow_check and escrow_check.transaction_number and ps_key:
+            if escrow_check and escrow_check.transaction_number:
                 try:
-                    r = _http.get(
-                        f"{ps_base}/api/v3/marketplace/transactions/{escrow_check.transaction_number}/status",
-                        headers={"BrokerApiKey": ps_key},
-                        timeout=8,
-                    )
-                    if r.status_code == 200:
-                        ps_status = str(r.json().get('paymentStatus', '')).lower()
-                        if ps_status in ['paid', 'completed', 'pendingsettlement']:
-                            escrow_check.status = 'IN_ESCROW'
-                            escrow_check.paid_at = escrow_check.paid_at or datetime.now(_tz.utc)
-                            if r.json().get('escrowCode'):
-                                escrow_check.escrow_code = r.json().get('escrowCode')
-                            o.status = 'PAID'
-                            needs_commit = True
+                    from app.services.escrow.paystack_provider import PaystackProvider
+                    verify = PaystackProvider().verify_transaction(escrow_check.transaction_number)
+                    if verify.get("success"):
+                        escrow_check.status = 'IN_ESCROW'
+                        escrow_check.paid_at = escrow_check.paid_at or datetime.now(_tz.utc)
+                        o.status = 'PAID'
+                        needs_commit = True
                 except Exception:
                     pass  # non-fatal
     if needs_commit:
