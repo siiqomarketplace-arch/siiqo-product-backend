@@ -878,9 +878,9 @@ def claim_free_product(product_id):
         order_id=order.id
     )
     # Update/create CRM CustomerProfile for the vendor so free claims are tracked
-    try:
         from app.models.crm import CustomerProfile
-        from app.utils.datetime_utils import _utcnow
+        from datetime import datetime as _dt_crm, timezone as _tz_crm
+        _utcnow = lambda: _dt_crm.now(_tz_crm.utc)
         vid = product.storefront.vendor_id
         profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user.id).first()
         if profile:

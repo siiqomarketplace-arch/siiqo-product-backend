@@ -120,6 +120,14 @@ def get_settings():
             "is_published": sf.is_published,
             "is_verified": sf.is_verified,
             "is_live": sf.is_live,
+            "is_pro_verified": bool(sf.is_pro_active or sf.is_pro_verified),
+            "is_pro_active": bool(sf.is_pro_active),
+            "pro_verified_expires_at": sf.pro_verified_expires_at.isoformat() if sf.pro_verified_expires_at else None,
+            "verification_status": sf.verification_status or "NOT_SUBMITTED",
+            "account_type": sf.account_type or "INDIVIDUAL",
+            "nin_document_url": sf.nin_document_url,
+            "cac_document_url": sf.cac_document_url,
+            "nin": user.nin,
             "bank_code": sf.bank_code,
             "account_number": sf.account_number,
             "account_name": sf.account_name,
@@ -133,6 +141,7 @@ def get_settings():
             "meta_description": sf.meta_description,
             "plan_name": plan_name,
             "plan_renews": plan_renews,
+            "has_active_subscription": bool(active_sub),
         }
     else:
         store_settings = {
@@ -149,6 +158,14 @@ def get_settings():
             "is_published": False,
             "is_verified": False,
             "is_live": False,
+            "is_pro_verified": False,
+            "is_pro_active": False,
+            "pro_verified_expires_at": None,
+            "verification_status": "NOT_SUBMITTED",
+            "account_type": "INDIVIDUAL",
+            "nin_document_url": None,
+            "cac_document_url": None,
+            "nin": user.nin,
             "bank_code": None,
             "account_number": None,
             "account_name": None,
@@ -162,6 +179,7 @@ def get_settings():
             "meta_description": None,
             "plan_name": plan_name,
             "plan_renews": plan_renews,
+            "has_active_subscription": bool(active_sub),
         }
 
     return jsonify({

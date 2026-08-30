@@ -405,9 +405,28 @@ def create_paystack_subaccount(
     if not key:
         return {"success": False, "error_message": "Paystack API key not configured."}
 
+    # Map NIBSS / CBN institution codes to Paystack settlement bank codes
+    NIBSS_TO_PAYSTACK_BANKS = {
+        "100004": "999992",  # OPay (Paycom)
+        "999992": "999992",  # OPay
+        "100033": "999991",  # PalmPay
+        "999991": "999991",  # PalmPay
+        "090405": "50515",   # Moniepoint MFB
+        "50515": "50515",    # Moniepoint MFB
+        "090267": "50211",   # Kuda Bank
+        "50211": "50211",    # Kuda Bank
+        "090551": "51318",   # FairMoney MFB
+        "51318": "51318",    # FairMoney MFB
+        "090110": "565",     # VFD Microfinance Bank
+        "565": "565",        # VFD Microfinance Bank
+        "090251": "50383",   # Carbon
+        "50383": "50383",    # Carbon
+    }
+    settlement_bank = NIBSS_TO_PAYSTACK_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
+
     payload = {
         "business_name": business_name,
-        "settlement_bank": bank_code,
+        "settlement_bank": settlement_bank,
         "account_number": account_number,
         "percentage_charge": 0,  # We use transaction_charge (fixed) at checkout instead
         "description": description or f"Siiqo vendor: {business_name}",
@@ -420,7 +439,7 @@ def create_paystack_subaccount(
 
     logging.info(
         f"[PAYSTACK SUBACCOUNT] Creating subaccount for '{business_name}' "
-        f"bank={bank_code} acct={account_number[-4:].rjust(len(account_number), '*')}"
+        f"bank={settlement_bank} (raw={bank_code}) acct={account_number[-4:].rjust(len(account_number), '*')}"
     )
 
     try:
