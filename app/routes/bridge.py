@@ -1236,26 +1236,21 @@ def paystack_webhook():
                     sf = user_obj.storefront
 
             if sf:
-                from dateutil.relativedelta import relativedelta
-                now_dt = _utcnow()
-                # Extend from existing expiry if still valid (allows early renewals)
-                base = sf.pro_verified_expires_at if (sf.pro_verified_expires_at and sf.pro_verified_expires_at > now_dt) else now_dt
-                sf.is_pro_verified        = True
-                sf.pro_verified_expires_at = base + relativedelta(years=1)
-                sf.verification_status    = 'VERIFIED'
+                # Mark verification as pending admin review upon successful payment
+                sf.verification_status = 'PENDING_ADMIN_REVIEW'
                 db.session.commit()
                 logging.info(
-                    f'[PAYSTACK] Pro Verified activated for storefront {sf.id} '
-                    f'(vendor {sf.vendor_id}) — expires {sf.pro_verified_expires_at}'
+                    f'[PAYSTACK] Pro Verified payment received for storefront {sf.id} '
+                    f'(vendor {sf.vendor_id}) — status set to PENDING_ADMIN_REVIEW'
                 )
                 # Notify vendor
                 from app.models.communication import Notification
                 db.session.add(Notification(
                     user_id=sf.vendor_id,
-                    title="Pro Verified Badge Activated! ✅",
+                    title="Verification Application Received 🛡️",
                     message=(
-                        "Your store now has the Pro Verified badge. "
-                        "Buyers can see you are a verified seller on Siiqo."
+                        "Your verification payment and application have been received. "
+                        "Our admin team is reviewing your documents and will approve your badge within 48 hours."
                     ),
                     type="ACCOUNT",
                 ))
