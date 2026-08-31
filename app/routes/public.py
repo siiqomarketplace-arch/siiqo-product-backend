@@ -561,6 +561,7 @@ def get_articles():
 
 @public_bp.route('/blog/<string:slug>', methods=['GET'])
 def get_article_by_slug(slug):
+    from flask import redirect as flask_redirect, request as flask_request
     clean_slug = slug.strip().lower()
     try:
         a = Article.query.filter_by(slug=clean_slug, is_published=True).first()
@@ -569,13 +570,12 @@ def get_article_by_slug(slug):
             redirect_entry = ArticleSlugRedirect.query.filter_by(old_slug=clean_slug).first()
             if redirect_entry and redirect_entry.article and redirect_entry.article.is_published:
                 canonical_slug = redirect_entry.article.slug
-                return jsonify({
-                    "redirect": True,
-                    "canonical_slug": canonical_slug,
-                    "canonical_url": f"https://siiqo.com/blog/{canonical_slug}",
-                    "status_code": 301,
-                    "message": f"Article moved to /blog/{canonical_slug}"
-                }), 200
+                # Preserve any query string (e.g. ?utm_source=...)
+                qs = flask_request.query_string.decode('utf-8')
+                dest = f"https://siiqo.com/blog/{canonical_slug}"
+                if qs:
+                    dest = f"{dest}?{qs}"
+                return flask_redirect(dest, code=301)
 
             return jsonify({"message": "Article not found"}), 404
 
@@ -627,13 +627,11 @@ def get_article_by_slug(slug):
                 redir_res = db.session.execute(text(sql_redir), {"slug": clean_slug}).fetchone()
                 if redir_res:
                     canonical_slug = redir_res[0]
-                    return jsonify({
-                        "redirect": True,
-                        "canonical_slug": canonical_slug,
-                        "canonical_url": f"https://siiqo.com/blog/{canonical_slug}",
-                        "status_code": 301,
-                        "message": f"Article moved to /blog/{canonical_slug}"
-                    }), 200
+                    qs = flask_request.query_string.decode('utf-8')
+                    dest = f"https://siiqo.com/blog/{canonical_slug}"
+                    if qs:
+                        dest = f"{dest}?{qs}"
+                    return flask_redirect(dest, code=301)
                 return jsonify({"message": "Article not found"}), 404
 
             return jsonify({
