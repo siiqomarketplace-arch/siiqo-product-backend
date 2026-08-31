@@ -53,6 +53,22 @@ class Article(db.Model):
     admin_author = db.relationship('AdminUser', backref='articles')
     author = db.relationship('BlogAuthor', backref='articles')
     comments = db.relationship('Comment', back_populates='article', cascade="all, delete-orphan")
+    slug_redirects = db.relationship('ArticleSlugRedirect', back_populates='article', cascade="all, delete-orphan", order_by="desc(ArticleSlugRedirect.created_at)")
+
+
+class ArticleSlugRedirect(db.Model):
+    """Stores historical slugs for articles to enable permanent 301 redirects."""
+    __tablename__ = 'article_slug_redirects'
+
+    id = db.Column(db.Integer, primary_key=True)
+    article_id = db.Column(db.Integer, db.ForeignKey('articles.id', ondelete='CASCADE'), nullable=False, index=True)
+    old_slug = db.Column(db.String(255), unique=True, nullable=False, index=True)
+
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    article = db.relationship('Article', back_populates='slug_redirects')
 
 
 class Comment(db.Model):

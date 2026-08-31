@@ -21,7 +21,7 @@ from app.extensions import db
 from app.models.admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription
 from app.models.user import User, Storefront
 from app.models.escrow import EscrowTransaction, EscrowStatus
-from app.models.community import Article, BlogAuthor
+from app.models.community import Article, BlogAuthor, ArticleSlugRedirect
 from app.models.product import Category
 from app.models.partnerships import PartnerApplication
 from app.models.finance import Ledger
@@ -1436,12 +1436,15 @@ def handle_blog():
     title = data.get('title', '')
     if not title:
         return jsonify({"message": "Title is required"}), 400
-    slug = data.get('slug') or re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+    raw_slug = data.get('slug') or title
+    slug = re.sub(r'[^a-z0-9]+', '-', raw_slug.lower()).strip('-')
+    if not slug:
+        slug = f"article-{str(uuid.uuid4())[:8]}"
 
-    # Ensure slug is unique
+    # Ensure slug is unique across both live articles and historical 301 redirects
     original_slug = slug
     import uuid
-    while Article.query.filter_by(slug=slug).first():
+    while Article.query.filter_by(slug=slug).first() or ArticleSlugRedirect.query.filter_by(old_slug=slug).first():
         slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
 
     # Resolve author from author_id or fallback to plain author_name text
@@ -1578,13 +1581,16 @@ def manage_blog_article(article_id):
         return jsonify({"message": "Article not found"}), 404
 
     if request.method == 'GET':
-        # Return full article details for editing
+        # Return full article details for editing + active redirects
+        redirect_list = [r.old_slug for r in article.slug_redirects] if getattr(article, 'slug_redirects', None) else []
         return jsonify({
             "id": article.id,
             "title": article.title,
             "author": article.author_name,
             "author_name": article.author_name,
+            "author_id": article.author_id,
             "slug": article.slug,
+            "redirects": redirect_list,
             "content": article.content,
             "category": article.category,
             "sub_category": article.sub_category,
@@ -1639,23 +1645,49 @@ def manage_blog_article(article_id):
 
     if 'title' in data and data['title']:
         article.title = data['title']
-        if not data.get('slug'):
-            new_slug = re.sub(r'[^a-z0-9]+', '-', data['title'].lower()).strip('-')
-            # Ensure new slug is unique
-            if new_slug != article.slug:
-                original_slug = new_slug
-                import uuid
-                while Article.query.filter(Article.slug == new_slug, Article.id != article_id).first():
-                    new_slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
-                article.slug = new_slug
+        # NOTE: DO NOT TOUCH article.slug WHEN TITLE CHANGES! Title & URL slug are decoupled.
+
+    # Only update slug if explicitly provided in payload and different from current canonical slug
     if 'slug' in data and data['slug']:
-        new_slug = data['slug']
-        if new_slug != article.slug:
-            original_slug = new_slug
-            import uuid
-            while Article.query.filter(Article.slug == new_slug, Article.id != article_id).first():
-                new_slug = f"{original_slug}-{str(uuid.uuid4())[:6]}"
-            article.slug = new_slug
+        requested_slug = re.sub(r'[^a-z0-9]+', '-', str(data['slug']).lower()).strip('-')
+        if requested_slug and requested_slug != article.slug:
+            # 1. Reject if slug belongs to another active article
+            existing_article = Article.query.filter(Article.slug == requested_slug, Article.id != article_id).first()
+            if existing_article:
+                return jsonify({
+                    "message": f"URL Slug '{requested_slug}' is already in use by article #{existing_article.id} ('{existing_article.title}'). Please choose a unique slug."
+                }), 400
+
+            # 2. Reject if slug is an old redirect belonging to a different article
+            existing_redirect = ArticleSlugRedirect.query.filter(
+                ArticleSlugRedirect.old_slug == requested_slug,
+                ArticleSlugRedirect.article_id != article_id
+            ).first()
+            if existing_redirect:
+                return jsonify({
+                    "message": f"URL Slug '{requested_slug}' is already registered as a 301 redirect for article #{existing_redirect.article_id}. Please choose a unique slug."
+                }), 400
+
+            old_slug_to_save = article.slug
+
+            # 3. Prevent redirect loops & chains:
+            # If the new slug was previously an old redirect FOR THIS SAME ARTICLE (e.g. reverting to an earlier URL),
+            # remove that redirect entry so it doesn't self-reference.
+            same_article_redirect = ArticleSlugRedirect.query.filter_by(article_id=article_id, old_slug=requested_slug).first()
+            if same_article_redirect:
+                db.session.delete(same_article_redirect)
+
+            # 4. Record old_slug in article_slug_redirects for this article if not already present
+            existing_old_record = ArticleSlugRedirect.query.filter_by(article_id=article_id, old_slug=old_slug_to_save).first()
+            if not existing_old_record:
+                new_redirect = ArticleSlugRedirect(
+                    article_id=article.id,
+                    old_slug=old_slug_to_save
+                )
+                db.session.add(new_redirect)
+
+            # Set new canonical slug
+            article.slug = requested_slug
     if 'category' in data:
         article.category = data['category']
     if 'sub_category' in data:

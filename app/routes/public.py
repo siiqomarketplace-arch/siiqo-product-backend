@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify
 from app.extensions import db, limiter
 from app.models.product import Product, Category
 from app.models.user import Storefront, User
-from app.models.community import Article, Review
+from app.models.community import Article, Review, ArticleSlugRedirect
 from app.models.admin import SponsoredListing
 
 public_bp = Blueprint('public', __name__)
@@ -561,9 +561,22 @@ def get_articles():
 
 @public_bp.route('/blog/<string:slug>', methods=['GET'])
 def get_article_by_slug(slug):
+    clean_slug = slug.strip().lower()
     try:
-        a = Article.query.filter_by(slug=slug, is_published=True).first()
+        a = Article.query.filter_by(slug=clean_slug, is_published=True).first()
         if not a:
+            # Check 301 redirect history for old slugs
+            redirect_entry = ArticleSlugRedirect.query.filter_by(old_slug=clean_slug).first()
+            if redirect_entry and redirect_entry.article and redirect_entry.article.is_published:
+                canonical_slug = redirect_entry.article.slug
+                return jsonify({
+                    "redirect": True,
+                    "canonical_slug": canonical_slug,
+                    "canonical_url": f"https://siiqo.com/blog/{canonical_slug}",
+                    "status_code": 301,
+                    "message": f"Article moved to /blog/{canonical_slug}"
+                }), 200
+
             return jsonify({"message": "Article not found"}), 404
 
         # Build rich author data — prefer linked BlogAuthor profile
@@ -585,6 +598,7 @@ def get_article_by_slug(slug):
         return jsonify({
             "id": a.id,
             "title": a.title,
+            "slug": a.slug,
             "category": a.category,
             "sub_category": getattr(a, 'sub_category', None),
             "content": a.content,
@@ -601,13 +615,31 @@ def get_article_by_slug(slug):
             from sqlalchemy import text
             from app.extensions import db
             db.session.rollback()
-            sql = "SELECT id, title, category, content, excerpt, cover_image, meta_title, meta_description, created_at FROM articles WHERE slug = :slug AND is_published = true"
-            res = db.session.execute(text(sql), {"slug": slug}).fetchone()
+            sql = "SELECT id, title, category, content, excerpt, cover_image, meta_title, meta_description, created_at, slug FROM articles WHERE slug = :slug AND is_published = true"
+            res = db.session.execute(text(sql), {"slug": clean_slug}).fetchone()
             if not res:
+                # Fallback raw sql check for redirects
+                sql_redir = """
+                    SELECT a.slug FROM article_slug_redirects r 
+                    JOIN articles a ON r.article_id = a.id 
+                    WHERE r.old_slug = :slug AND a.is_published = true
+                """
+                redir_res = db.session.execute(text(sql_redir), {"slug": clean_slug}).fetchone()
+                if redir_res:
+                    canonical_slug = redir_res[0]
+                    return jsonify({
+                        "redirect": True,
+                        "canonical_slug": canonical_slug,
+                        "canonical_url": f"https://siiqo.com/blog/{canonical_slug}",
+                        "status_code": 301,
+                        "message": f"Article moved to /blog/{canonical_slug}"
+                    }), 200
                 return jsonify({"message": "Article not found"}), 404
+
             return jsonify({
                 "id": res[0],
                 "title": res[1],
+                "slug": res[9] if len(res) > 9 else clean_slug,
                 "category": res[2],
                 "sub_category": None,
                 "content": res[3],
