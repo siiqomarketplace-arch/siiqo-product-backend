@@ -156,7 +156,8 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     try:
         html_content = render_template(f"emails/{template_name}.html", **context)
     except Exception as tmpl_err:
-        html_content = f"<h1>Siiqo</h1><p>{subject}</p><p>{context}</p>"
+        first_name = context.get('first_name', 'Vendor')
+        html_content = f"<h1>Siiqo</h1><p>Hi {first_name},</p><p>{subject}</p>"
         logger.info(f"[EMAIL WARN] Template render failed ({tmpl_err}), using plain fallback.")
 
     # Dispatch to background thread

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Siiqo - Identity Verification Update</title>
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px; color: #334155; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #ef4444; }
+        .header h1 { color: #ffffff; margin: 0; font-size: 28px; font-weight: 900; letter-spacing: -0.5px; }
+        .content { padding: 40px; text-align: center; }
+        .content h2 { color: #0f172a; margin-top: 0; font-size: 22px; font-weight: 700; }
+        .content p { font-size: 15px; line-height: 1.6; color: #475569; margin-bottom: 24px; }
+        .highlight-box { background-color: #fef2f2; border: 2px dashed #f87171; border-radius: 12px; padding: 20px; margin: 30px 0; text-align: center; }
+        .btn { display: inline-block; background-color: #0b1b3b; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin-top: 10px; }
+        .btn:hover { background-color: #1e293b; }
+        .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+        .footer p { margin: 5px 0; }
+        .footer a { color: #0b1b3b; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="https://siiqo.com" target="_blank" style="text-decoration: none;">
+                <div style="display: inline-block; vertical-align: middle;">
+                    <img src="{{ logo_url }}" alt="Siiqo Logo" height="40" style="display: inline-block; vertical-align: middle; border: 0;">
+                    <span style="color: #ffffff; font-size: 28px; font-weight: 900; font-family: 'Inter', sans-serif; letter-spacing: -1px; display: inline-block; vertical-align: middle; margin-left: 8px;">Siiqo</span>
+                </div>
+            </a>
+        </div>
+        <div class="content">
+            <h2>Identity Verification Update</h2>
+            <p>Hi {{ first_name }},<br><br>Thank you for submitting your identity verification documents for <strong>{{ store_name }}</strong>.</p>
+            
+            <div class="highlight-box">
+                <p style="margin: 0; font-weight: 600; color: #991b1b;">Our compliance team could not verify your submission. Please check your uploaded documents and registration / NIN numbers to ensure all details are clear and accurate, then resubmit your verification in settings.</p>
+            </div>
+            
+            <p style="font-size: 13px; color: #64748b;">No additional fee is required to resubmit your documents.</p>
+            
+            <a href="https://siiqo.com/vendor/settings?section=verification" class="btn">Resubmit Documents in Settings</a>
+        </div>
+        <div class="footer">
+            <div style="margin-bottom: 20px; font-size: 14px;">
+                <a href="https://www.linkedin.com/company/siiqo4smes" target="_blank" style="text-decoration: none; margin: 0 10px;">
+                    <img src="https://img.icons8.com/color/48/000000/linkedin.png" alt="LinkedIn" width="24" height="24" style="border: none; display: inline-block; vertical-align: middle;">
+                </a>
+                <a href="https://www.facebook.com/Siiqo4SMEs" target="_blank" style="text-decoration: none; margin: 0 10px;">
+                    <img src="https://img.icons8.com/color/48/000000/facebook-new.png" alt="Facebook" width="24" height="24" style="border: none; display: inline-block; vertical-align: middle;">
+                </a>
+                <a href="https://x.com/Siiqo4SMEs" target="_blank" style="text-decoration: none; margin: 0 10px;">
+                    <img src="https://img.icons8.com/color/48/000000/twitterx--v1.png" alt="X (Twitter)" width="24" height="24" style="border: none; display: inline-block; vertical-align: middle;">
+                </a>
+                <a href="https://www.youtube.com/@Siiqo4SMEs" target="_blank" style="text-decoration: none; margin: 0 10px;">
+                    <img src="https://img.icons8.com/color/48/000000/youtube-play.png" alt="YouTube" width="24" height="24" style="border: none; display: inline-block; vertical-align: middle;">
+                </a>
+            </div>
+            <p>&copy; 2026 Siiqo Systems LTD. All rights reserved.</p>
+            <p>This is an automated message. Please do not reply directly to this email.</p>
+        </div>
+    </div>
+</body>
+</html>

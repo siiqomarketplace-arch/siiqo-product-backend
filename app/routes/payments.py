@@ -564,6 +564,31 @@ def daya_webhook():
                         dp.order_id,
                         dp.created_at.isoformat() if dp.created_at else "unknown",
                     )
+            else:
+                # Check if this funding account belongs to a storefront verification fee
+                try:
+                    from app.models.user import Storefront
+                    from app.models.communication import Notification
+                    all_sfs = Storefront.query.filter(Storefront.template_options.isnot(None)).all()
+                    for sf_item in all_sfs:
+                        opts = sf_item.template_options or {}
+                        if opts.get("daya_verification", {}).get("funding_account_id") == funding_account_id:
+                            sf_item.verification_status = 'PENDING_ADMIN_REVIEW'
+                            db.session.add(Notification(
+                                user_id=sf_item.vendor_id,
+                                title="Verification Application Received 🛡️",
+                                message=(
+                                    "Your verification payment of ₦2,500 via Daya transfer has been received. "
+                                    "Our compliance team will review your identity documents within 48 hours."
+                                ),
+                                type="ACCOUNT",
+                            ))
+                            db.session.commit()
+                            logger.info("[DAYA WEBHOOK] Verification deposit %s applied to storefront %s (vendor %s)",
+                                        deposit_id, sf_item.id, sf_item.vendor_id)
+                            break
+                except Exception as exc:
+                    logger.warning("[DAYA WEBHOOK] Error matching verification storefront: %s", exc)
 
     return jsonify({"received": True}), 200
 

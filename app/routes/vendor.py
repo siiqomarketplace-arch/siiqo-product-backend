@@ -1758,7 +1758,7 @@ def checkout_pro_verified():
         "email": user.email,
         "amount": amount_kobo,
         "reference": txn_ref,
-        "callback_url": f"{site_url}/vendor/settings?pro_verified=success",
+        "callback_url": f"{site_url}/vendor/settings?section=verification&pro_verified=success",
         "metadata": {
             "type": "pro_verified_subscription",
             "vendor_id": user.id,
@@ -1779,6 +1779,165 @@ def checkout_pro_verified():
     except Exception as e:
         logging.error(f"[PRO VERIFIED CHECKOUT ERR] {e}")
         return jsonify({"message": f"Payment error: {str(e)}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /vendor/pro-verified/daya-initiate — Dedicated Daya Virtual Account for Verification (₦2,500)
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/pro-verified/daya-initiate', methods=['POST'])
+@jwt_required()
+def initiate_daya_pro_verified():
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user or not sf:
+        return jsonify({"message": "Storefront required"}), 400
+
+    from app.services import daya_service
+    import time
+    from datetime import datetime, timezone
+
+    if not daya_service._key():
+        return jsonify({"message": "Daya payment gateway is not configured"}), 503
+
+    # Check if an unexpired Daya session already exists
+    opts = dict(sf.template_options or {})
+    existing_daya = opts.get("daya_verification")
+    if existing_daya and existing_daya.get("expires_at"):
+        try:
+            exp_dt = datetime.fromisoformat(existing_daya["expires_at"].replace("Z", "+00:00"))
+            if exp_dt > datetime.now(timezone.utc):
+                return jsonify({
+                    "status": "success",
+                    "data": {
+                        "bank_name": existing_daya.get("bank_name"),
+                        "account_number": existing_daya.get("account_number"),
+                        "account_name": existing_daya.get("account_name"),
+                        "amount": 2500,
+                        "expires_at": existing_daya.get("expires_at"),
+                        "funding_account_id": existing_daya.get("funding_account_id"),
+                    }
+                }), 200
+        except Exception:
+            pass
+
+    # Create Daya customer
+    try:
+        name_parts = (user.first_name or user.email.split("@")[0]).strip()
+        last = (user.last_name or "").strip()
+        daya_customer_id = daya_service.get_or_create_customer(user.email, name_parts, last)
+    except RuntimeError as exc:
+        logging.error(f"[DAYA VERIFICATION] Customer create failed: {exc}")
+        return jsonify({"message": f"Could not create Daya session: {exc}"}), 502
+
+    # Get rate
+    try:
+        rate_data = daya_service.get_rate(asset="USDT", side="BUY")
+        rate_id = rate_data["rate_id"]
+        expires_at = rate_data.get("expires_at")
+    except RuntimeError as exc:
+        logging.error(f"[DAYA VERIFICATION] Rate fetch failed: {exc}")
+        return jsonify({"message": f"Could not fetch rate: {exc}"}), 502
+
+    # Create NGN temporary virtual account for ₦2,500
+    idem_key = f"siiqo-ver-{sf.id}-{rate_id}-{int(time.time())}"
+    try:
+        fa = daya_service.create_ngn_funding_account(
+            customer_id=daya_customer_id,
+            amount_ngn=2500,
+            rate_id=rate_id,
+            idempotency_key=idem_key,
+            developer_fee_pct="0",
+        )
+    except RuntimeError as exc:
+        logging.error(f"[DAYA VERIFICATION] Funding account create failed: {exc}")
+        return jsonify({"message": f"Could not generate virtual account: {exc}"}), 502
+
+    instructions = fa.get("instructions", [{}])[0]
+    bank_name = instructions.get("bank_name") or "Wema Bank"
+    account_number = instructions.get("account_number", "")
+    account_name = instructions.get("account_name") or "Siiqo Verification"
+
+    # Save to storefront options
+    opts["daya_verification"] = {
+        "funding_account_id": fa.get("id"),
+        "rate_id": rate_id,
+        "bank_name": bank_name,
+        "account_number": account_number,
+        "account_name": account_name,
+        "amount": 2500,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sf.template_options = opts
+    db.session.commit()
+
+    return jsonify({
+        "status": "success",
+        "data": {
+            "bank_name": bank_name,
+            "account_number": account_number,
+            "account_name": account_name,
+            "amount": 2500,
+            "expires_at": expires_at,
+            "funding_account_id": fa.get("id"),
+        }
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /vendor/pro-verified/daya-status — Check Daya Verification Transfer Status
+# ---------------------------------------------------------------------------
+
+@vendor_bp.route('/pro-verified/daya-status', methods=['GET'])
+@jwt_required()
+def get_daya_pro_verified_status():
+    user_id = get_jwt_identity()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user or not sf:
+        return jsonify({"message": "Storefront required"}), 400
+
+    if sf.verification_status in ('PENDING_ADMIN_REVIEW', 'VERIFIED'):
+        return jsonify({
+            "status": "COMPLETED",
+            "verification_status": sf.verification_status,
+            "message": "Payment verified. Application is under review."
+        }), 200
+
+    opts = sf.template_options or {}
+    daya_info = opts.get("daya_verification", {})
+    fa_id = daya_info.get("funding_account_id")
+    if not fa_id:
+        return jsonify({"status": "NOT_INITIATED", "verification_status": sf.verification_status}), 200
+
+    from app.services import daya_service
+    deposit = daya_service.get_deposit_by_funding_account(fa_id)
+    if deposit:
+        dep_status = str(deposit.get("status", "")).upper()
+        if dep_status in ("COMPLETED", "RECEIVED", "PROCESSING"):
+            sf.verification_status = 'PENDING_ADMIN_REVIEW'
+            from app.models.communication import Notification
+            db.session.add(Notification(
+                user_id=sf.vendor_id,
+                title="Verification Application Received 🛡️",
+                message=(
+                    "Your verification payment of ₦2,500 via Daya transfer has been received. "
+                    "Our compliance team will review your identity documents within 48 hours."
+                ),
+                type="ACCOUNT",
+            ))
+            db.session.commit()
+            return jsonify({
+                "status": "COMPLETED",
+                "verification_status": "PENDING_ADMIN_REVIEW",
+                "message": "Deposit confirmed! Application is now under admin review."
+            }), 200
+
+    return jsonify({
+        "status": "PENDING",
+        "verification_status": sf.verification_status,
+        "message": "Awaiting transfer confirmation."
+    }), 200
 
 
 # ---------------------------------------------------------------------------
