@@ -403,9 +403,9 @@ def toggle_favorite(product_id):
 # ===========================================================================
 
 @bridge_bp.route('/buyer-orders/checkout', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def buyer_checkout():
-    """Delegates to /api/cart/checkout"""
+    """Delegates to /api/cart/checkout (supports logged-in users and guests)"""
     from app.routes.cart import checkout as _checkout
     return _checkout()
 
