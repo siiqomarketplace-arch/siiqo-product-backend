@@ -605,24 +605,25 @@ def checkout():
             except Exception as e:
                 logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
 
-        profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()
-        if profile:
-            profile.total_spent = float(profile.total_spent or 0) + total
-            profile.total_orders = (profile.total_orders or 0) + 1
-            profile.last_purchase_date = _utcnow()
-            if profile.total_orders >= 10:
-                profile.segment = 'VIP'
-            elif profile.total_orders >= 3:
-                profile.segment = 'REGULAR'
-        else:
-            db.session.add(CustomerProfile(
-                vendor_id=vid,
-                buyer_id=user_id,
-                total_spent=total,
-                total_orders=1,
-                segment='NEW',
-                last_purchase_date=_utcnow(),
-            ))
+        if user_id:
+            profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user_id).first()
+            if profile:
+                profile.total_spent = float(profile.total_spent or 0) + total
+                profile.total_orders = (profile.total_orders or 0) + 1
+                profile.last_purchase_date = _utcnow()
+                if profile.total_orders >= 10:
+                    profile.segment = 'VIP'
+                elif profile.total_orders >= 3:
+                    profile.segment = 'REGULAR'
+            else:
+                db.session.add(CustomerProfile(
+                    vendor_id=vid,
+                    buyer_id=user_id,
+                    total_spent=total,
+                    total_orders=1,
+                    segment='NEW',
+                    last_purchase_date=_utcnow(),
+                ))
 
     checked_out_item_ids = [
         item.id
