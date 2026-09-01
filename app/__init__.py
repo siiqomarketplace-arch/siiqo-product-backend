@@ -109,6 +109,26 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_free BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_storefront BOOLEAN DEFAULT TRUE",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS show_on_marketplace BOOLEAN DEFAULT TRUE",
+                # ── Events Enhancements (Organizer, Schedules, FAQs, Custom Questions) ───
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS organizer_name VARCHAR(255)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS organizer_bio TEXT",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS organizer_avatar VARCHAR(500)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS organizer_socials JSONB DEFAULT '{}'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS agenda JSONB DEFAULT '[]'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS faqs JSONB DEFAULT '[]'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS schedules JSONB DEFAULT '[]'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '[]'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS cta_button_text VARCHAR(100) DEFAULT 'Get Tickets'",
+                # ── Ticket Purchases Guest & Custom Fields ──────────────────
+                "ALTER TABLE ticket_purchases ALTER COLUMN buyer_id DROP NOT NULL",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS selected_schedule_id VARCHAR(100)",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS selected_schedule_title VARCHAR(255)",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS custom_responses JSONB DEFAULT '{}'",
+                # ── Orders Guest Checkout ────────────────────────────────────
+                "ALTER TABLE orders ALTER COLUMN buyer_id DROP NOT NULL",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_email VARCHAR(255)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(255)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_guest BOOLEAN DEFAULT FALSE",
                 # ── Articles Schema Enhancements ─────────────────────────────
                 "ALTER TABLE articles ADD COLUMN IF NOT EXISTS sub_category VARCHAR(100)",
                 "ALTER TABLE articles ADD COLUMN IF NOT EXISTS author_name VARCHAR(100)",
