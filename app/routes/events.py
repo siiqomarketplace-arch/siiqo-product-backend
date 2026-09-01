@@ -284,6 +284,15 @@ def create_event():
             terms_and_conditions=data.get('terms_and_conditions'),
             contact_email=data.get('contact_email'),
             contact_phone=data.get('contact_phone'),
+            organizer_name=data.get('organizer_name'),
+            organizer_bio=data.get('organizer_bio'),
+            organizer_avatar=data.get('organizer_avatar'),
+            organizer_socials=data.get('organizer_socials') if isinstance(data.get('organizer_socials'), dict) else {},
+            agenda=data.get('agenda') if isinstance(data.get('agenda'), list) else [],
+            faqs=data.get('faqs') if isinstance(data.get('faqs'), list) else [],
+            schedules=data.get('schedules') if isinstance(data.get('schedules'), list) else [],
+            custom_fields=data.get('custom_fields') if isinstance(data.get('custom_fields'), list) else [],
+            cta_button_text=data.get('cta_button_text') or 'Get Tickets',
         )
         
         # Handle cover image upload (File or URL string)
@@ -295,6 +304,14 @@ def create_event():
                 return jsonify({'message': str(e)}), 400
         elif data.get('cover_image') and isinstance(data['cover_image'], str):
             event.cover_image = data['cover_image']
+
+        # Handle organizer avatar file upload if present
+        avatar_file = request.files.get('organizer_avatar')
+        if avatar_file and avatar_file.filename:
+            try:
+                event.organizer_avatar = save_uploaded_file(avatar_file, subfolder='events')
+            except Exception:
+                pass
         
         # Handle multiple images if provided
         if data.get('images'):
@@ -394,10 +411,24 @@ def update_event(event_id):
         # Direct updatable string fields
         for field in ['timezone', 'event_type', 'event_format', 'venue_name', 'city',
                       'state', 'country', 'meeting_password', 'terms_and_conditions',
-                      'contact_email', 'contact_phone']:
-            if data.get(field):
+                      'contact_email', 'contact_phone', 'organizer_name', 'organizer_bio',
+                      'organizer_avatar', 'cta_button_text']:
+            if data.get(field) is not None:
                 setattr(event, field, data[field])
         
+        # JSON fields
+        for json_field in ['organizer_socials', 'agenda', 'faqs', 'schedules', 'custom_fields', 'images']:
+            if json_field in data:
+                val = data[json_field]
+                if isinstance(val, (dict, list)):
+                    setattr(event, json_field, val)
+                elif isinstance(val, str):
+                    try:
+                        import json as _json
+                        setattr(event, json_field, _json.loads(val))
+                    except Exception:
+                        pass
+
         # Boolean fields
         for field in ['show_on_storefront', 'show_on_marketplace', 'is_active']:
             if field in data:
@@ -424,6 +455,13 @@ def update_event(event_id):
                 return jsonify({'message': str(e)}), 400
         elif data.get('cover_image') and isinstance(data.get('cover_image'), str):
             event.cover_image = data['cover_image']
+
+        avatar_file = request.files.get('organizer_avatar') if request.files else None
+        if avatar_file and avatar_file.filename:
+            try:
+                event.organizer_avatar = save_uploaded_file(avatar_file, subfolder='events')
+            except Exception:
+                pass
         
         db.session.commit()
         
@@ -772,19 +810,16 @@ def get_event_tickets(event_id):
 # ---------------------------------------------------------------------------
 
 @events_bp.route('/events/<slug>/purchase-tickets', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def purchase_tickets(slug):
     """
-    Purchase tickets for an event
+    Purchase tickets for an event (supports logged-in users and guests)
     For free tickets: creates ticket immediately
-    For paid tickets: creates order and tickets after payment
+    For paid tickets: creates order and pending tickets for Daya payment
     """
     try:
         user_id = get_jwt_identity()
-        user = db.session.get(User, int(user_id))
-        
-        if not user:
-            return jsonify({'message': 'User not found'}), 404
+        user = db.session.get(User, int(user_id)) if user_id else None
         
         event = Event.query.filter_by(
             slug=slug,
@@ -796,7 +831,7 @@ def purchase_tickets(slug):
         if not event:
             return jsonify({'message': 'Event not found'}), 404
         
-        data = request.get_json()
+        data = request.get_json() or {}
         
         # Validate required fields
         if not data.get('ticket_type_id') or not data.get('quantity'):
@@ -842,13 +877,30 @@ def purchase_tickets(slug):
                     'message': f'Only {event.tickets_remaining} tickets remaining for this event'
                 }), 400
         
-        # Buyer information
-        buyer_name = data.get('buyer_name', user.full_name)
-        buyer_email = data.get('buyer_email', user.email)
-        buyer_phone = data.get('buyer_phone', user.phone)
+        # Buyer information (from input or logged in user)
+        buyer_name = (data.get('buyer_name') or (user.full_name if user else '')).strip()
+        buyer_email = (data.get('buyer_email') or (user.email if user else '')).strip().lower()
+        buyer_phone = (data.get('buyer_phone') or (user.phone if user else '')).strip()
         
-        if not buyer_name or not buyer_email:
-            return jsonify({'message': 'Buyer name and email are required'}), 400
+        if not buyer_name:
+            return jsonify({'message': 'Full Name is required'}), 400
+        if not buyer_email or '@' not in buyer_email:
+            return jsonify({'message': 'Valid Email address is required'}), 400
+        
+        # Custom Form Responses & Selected Schedule
+        custom_responses = data.get('custom_responses') or {}
+        selected_schedule_id = data.get('selected_schedule_id')
+        selected_schedule_title = data.get('selected_schedule_title')
+
+        # Validate required custom fields if configured
+        if event.custom_fields and isinstance(event.custom_fields, list):
+            for cf in event.custom_fields:
+                if cf.get('required'):
+                    cf_id = cf.get('id')
+                    cf_label = cf.get('label') or 'Required question'
+                    val = custom_responses.get(cf_id)
+                    if val is None or str(val).strip() == '':
+                        return jsonify({'message': f'Please answer required field: {cf_label}'}), 400
         
         # Calculate total price
         total_price = float(ticket_type.price) * quantity
@@ -861,10 +913,13 @@ def purchase_tickets(slug):
                 ticket = TicketPurchase(
                     event_id=event.id,
                     ticket_type_id=ticket_type.id,
-                    buyer_id=user.id,
+                    buyer_id=user.id if user else None,
                     buyer_name=buyer_name,
                     buyer_email=buyer_email,
                     buyer_phone=buyer_phone,
+                    selected_schedule_id=selected_schedule_id,
+                    selected_schedule_title=selected_schedule_title,
+                    custom_responses=custom_responses,
                     price_paid=0,
                     quantity=1,
                     status='ACTIVE'
@@ -882,6 +937,7 @@ def purchase_tickets(slug):
             try:
                 event_date_str = event.start_date.strftime('%A, %B %d, %Y') if event.start_date else 'TBA'
                 event_time_str = event.start_date.strftime('%I:%M %p') if event.start_date else 'TBA'
+                event_loc = selected_schedule_title or event.venue_address or event.city or ''
                 send_siiqo_email(
                     to_email=buyer_email,
                     subject=f"🎟️ Your Free Ticket: {event.title}",
@@ -893,7 +949,7 @@ def purchase_tickets(slug):
                     quantity=quantity,
                     event_date=event_date_str,
                     event_time=event_time_str,
-                    event_location=event.venue_address or event.city or '',
+                    event_location=event_loc,
                     event_format=event.event_format or 'in-person',
                     total_price='0',
                     is_free=True,
@@ -903,7 +959,7 @@ def purchase_tickets(slug):
             except Exception as email_err:
                 logger.warning(f"Ticket email failed (non-fatal): {email_err}")
             
-            logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to user {user.id}")
+            logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to {buyer_email}")
             
             return jsonify({
                 'message': 'Free tickets issued successfully',
@@ -911,23 +967,26 @@ def purchase_tickets(slug):
                 'is_free': True
             }), 201
         
-        # PAID TICKETS - Create order and return payment info
+        # PAID TICKETS - Create order and return payment info for Daya
         else:
             # Create order for payment
             order = Order(
-                buyer_id=user.id,
+                buyer_id=user.id if user else None,
                 vendor_id=event.vendor_id,
                 total_amount=Decimal(str(total_price)),
                 status='PENDING',
-                payment_method='ESCROW'
+                payment_method='CRYPTO',
+                buyer_email=buyer_email,
+                buyer_name=buyer_name,
+                is_guest=(user is None)
             )
             db.session.add(order)
             db.session.flush()  # Get order ID
             
-            # Create order item (we'll use product_id=None for tickets)
+            # Create order item
             order_item = OrderItem(
                 order_id=order.id,
-                product_id=None,  # Not a product
+                product_id=None,
                 price_at_purchase=ticket_type.price,
                 quantity=quantity
             )
@@ -939,26 +998,31 @@ def purchase_tickets(slug):
                 ticket = TicketPurchase(
                     event_id=event.id,
                     ticket_type_id=ticket_type.id,
-                    buyer_id=user.id,
+                    buyer_id=user.id if user else None,
                     order_id=order.id,
                     buyer_name=buyer_name,
                     buyer_email=buyer_email,
                     buyer_phone=buyer_phone,
+                    selected_schedule_id=selected_schedule_id,
+                    selected_schedule_title=selected_schedule_title,
+                    custom_responses=custom_responses,
                     price_paid=ticket_type.price,
                     quantity=1,
-                    status='PENDING'  # Will be activated after payment
+                    status='PENDING'  # Will be activated after Daya payment confirmation
                 )
                 db.session.add(ticket)
                 tickets.append(ticket)
             
             db.session.commit()
             
-            logger.info(f"Paid ticket order created: {order.id} for event {event.id}")
+            logger.info(f"Paid ticket order created: {order.id} for event {event.id} by {buyer_email}")
             
             return jsonify({
-                'message': 'Order created. Complete payment to receive tickets.',
+                'message': 'Order created. Complete payment via Daya to receive tickets.',
                 'order_id': order.id,
                 'total_amount': float(total_price),
+                'buyer_email': buyer_email,
+                'buyer_name': buyer_name,
                 'payment_required': True,
                 'is_free': False
             }), 201

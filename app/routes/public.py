@@ -327,11 +327,11 @@ def get_storefront_details(slug):
     try:
         from app.models.event import Event
         events = Event.query.filter(
-            Event.storefront_id == s.id,
+            db.or_(Event.storefront_id == s.id, Event.vendor_id == s.vendor_id),
             Event.is_active == True,
             Event.is_published == True,
             Event.is_deleted == False
-        ).all()
+        ).order_by(Event.start_date.asc()).all()
         # Filter show_on_storefront (default True)
         events_data = [
             e.to_dict(include_ticket_types=True) 

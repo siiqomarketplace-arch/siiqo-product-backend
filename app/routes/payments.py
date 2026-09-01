@@ -119,10 +119,11 @@ def save_vendor_crypto_wallet():
 # ===========================================================================
 
 @payments_bp.route("/daya/initiate", methods=["POST"])
-@jwt_required()
+@jwt_required(optional=True)
 def daya_initiate():
-    """Create a Daya funding account for a crypto payment."""
-    buyer_user_id = int(get_jwt_identity())
+    """Create a Daya funding account for a crypto payment (supports logged-in users and guests)."""
+    user_id = get_jwt_identity()
+    buyer_user_id = int(user_id) if user_id else None
     data = request.get_json() or {}
 
     order_id_param = data.get("orderId") or data.get("order_id", "")
@@ -139,7 +140,7 @@ def daya_initiate():
     if amount_ngn <= 0:
         return jsonify({"message": "amountNgn must be greater than 0"}), 400
 
-    buyer_email  = (data.get("buyerEmail") or data.get("buyer_email") or "").strip()
+    buyer_email  = (data.get("buyerEmail") or data.get("buyer_email") or "").strip().lower()
     buyer_name   = (data.get("buyerName")  or data.get("buyer_name")  or "").strip()
     payment_type = data.get("type", "ngn_onramp")
     asset        = data.get("asset", "USDT")
@@ -155,8 +156,15 @@ def daya_initiate():
     order = db.session.get(Order, primary_order_id)
     if not order:
         return jsonify({"message": "Order not found"}), 404
-    if order.buyer_id != buyer_user_id:
+    
+    # Check authorization if order is tied to a specific registered user
+    if order.buyer_id is not None and buyer_user_id is not None and order.buyer_id != buyer_user_id:
         return jsonify({"message": "Unauthorized"}), 403
+
+    if not buyer_email and order.buyer_email:
+        buyer_email = order.buyer_email
+    if not buyer_name and order.buyer_name:
+        buyer_name = order.buyer_name
 
     existing = DayaPayment.query.filter_by(
         order_id=primary_order_id,

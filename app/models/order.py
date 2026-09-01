@@ -35,7 +35,7 @@ class Order(db.Model):
     __tablename__ = 'orders'
     
     id = db.Column(db.Integer, primary_key=True)
-    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Nullable for guest checkout
     vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     
     total_amount = db.Column(db.Numeric(10, 2), nullable=False)
@@ -43,6 +43,11 @@ class Order(db.Model):
     
     # Payment method
     payment_method = db.Column(db.String(20), default='ESCROW', nullable=False) # ESCROW, POD, CRYPTO
+    
+    # Guest checkout fields
+    buyer_email = db.Column(db.String(255), nullable=True)
+    buyer_name = db.Column(db.String(255), nullable=True)
+    is_guest = db.Column(db.Boolean, default=False)
     
     # Logistics information
     logistics_provider_id = db.Column(db.String(100), nullable=True) # e.g. "siiqo_partner_1" or "self_pickup"

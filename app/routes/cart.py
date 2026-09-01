@@ -257,16 +257,41 @@ def clear_cart():
 # ---------------------------------------------------------------------------
 
 @cart_bp.route('/checkout', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def checkout():
     user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    cart = Cart.query.filter_by(user_id=user_id).first()
-
-    if not cart or not cart.items:
-        return jsonify({"message": "Your cart is empty"}), 400
+    user = db.session.get(User, int(user_id)) if user_id else None
+    cart = Cart.query.filter_by(user_id=user_id).first() if user_id else None
 
     data = request.get_json() or {}
+    guest_items_input = data.get('items', [])
+
+    # Simple wrapper object if checking out from guest cart items array
+    class _GuestItem:
+        def __init__(self, item_id, product, quantity, negotiated_price=None, negotiation=None):
+            self.id = item_id
+            self.product = product
+            self.quantity = quantity
+            self.negotiated_price = negotiated_price
+            self.negotiation = negotiation
+
+    items_to_process = []
+    if cart and cart.items and not guest_items_input:
+        items_to_process = list(cart.items)
+    elif guest_items_input:
+        for idx, gi in enumerate(guest_items_input):
+            p_id = gi.get('product_id') or (gi.get('product', {}).get('id'))
+            if not p_id:
+                continue
+            prod = db.session.get(Product, int(p_id))
+            if prod:
+                qty = int(gi.get('quantity', 1))
+                neg_price = gi.get('negotiated_price')
+                items_to_process.append(_GuestItem(idx, prod, qty, neg_price))
+    
+    if not items_to_process:
+        return jsonify({"message": "Your cart is empty"}), 400
+
     referral_code = (data.get('referral_code') or '').strip().upper()
     delivery_address = data.get('delivery_address', '')
 
@@ -285,7 +310,7 @@ def checkout():
 
     vendors: dict[tuple[int, bool], list] = {}
     skipped_items = []
-    for item in cart.items:
+    for item in items_to_process:
         if not (item.product and item.product.is_active and item.product.storefront):
             continue
         sf = item.product.storefront
@@ -391,19 +416,25 @@ def checkout():
                     logistics_provider_id = opt.get('id')
                     break
 
+        guest_email = (data.get('delivery_email') or data.get('email') or (data.get('customer', {}).get('email')) or (user.email if user else '')).strip().lower()
+        guest_name = (data.get('delivery_name') or (data.get('customer', {}).get('name')) or (user.full_name if user else '')).strip()
+
         new_order = Order(
-            buyer_id=user_id,
+            buyer_id=int(user_id) if user_id else None,
             vendor_id=vid,
             total_amount=total,
             status='PENDING',
             payment_method=payment_method,
+            buyer_email=guest_email,
+            buyer_name=guest_name,
+            is_guest=(user_id is None),
             logistics_provider_id=logistics_provider_id,
             logistics_fee=logistics_fee,
             delivery_address=data.get('delivery_address') if has_physical_items else 'Digital Delivery',
             delivery_city=data.get('delivery_city') if has_physical_items else None,
             delivery_state=data.get('delivery_state') if has_physical_items else None,
             delivery_phone=data.get('delivery_phone') if has_physical_items else None,
-            delivery_name=data.get('customer', {}).get('name') if data.get('customer') else None,
+            delivery_name=guest_name or (data.get('customer', {}).get('name') if data.get('customer') else None),
         )
         db.session.add(new_order)
         db.session.flush()
@@ -605,10 +636,11 @@ def checkout():
             NegotiationRequest.cart_item_id.in_(checked_out_item_ids)
         ).update({"cart_item_id": None}, synchronize_session=False)
 
-    CartItem.query.filter(
-        CartItem.cart_id == cart.id,
-        CartItem.id.in_(checked_out_item_ids)
-    ).delete(synchronize_session=False)
+    if cart and checked_out_item_ids:
+        CartItem.query.filter(
+            CartItem.cart_id == cart.id,
+            CartItem.id.in_(checked_out_item_ids)
+        ).delete(synchronize_session=False)
 
     try:
         db.session.commit()

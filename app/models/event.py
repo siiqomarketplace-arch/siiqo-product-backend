@@ -62,6 +62,23 @@ class Event(db.Model):
     meta_title = db.Column(db.String(255), nullable=True)
     meta_description = db.Column(db.Text, nullable=True)
     
+    # Organizer details
+    organizer_name = db.Column(db.String(255), nullable=True)
+    organizer_bio = db.Column(db.Text, nullable=True)
+    organizer_avatar = db.Column(db.String(500), nullable=True)
+    organizer_socials = db.Column(db.JSON, default=dict)
+    
+    # Event highlights, agenda and FAQs
+    agenda = db.Column(db.JSON, default=list)
+    faqs = db.Column(db.JSON, default=list)
+    
+    # Multi-location / Multi-session schedules
+    schedules = db.Column(db.JSON, default=list)
+    
+    # Custom registration form fields & CTA
+    custom_fields = db.Column(db.JSON, default=list)
+    cta_button_text = db.Column(db.String(100), default='Get Tickets')
+
     # Additional details
     terms_and_conditions = db.Column(db.Text, nullable=True)
     contact_email = db.Column(db.String(255), nullable=True)
@@ -155,6 +172,15 @@ class Event(db.Model):
             'seo_title': self.meta_title,           # frontend alias
             'meta_description': self.meta_description,
             'seo_description': self.meta_description,  # frontend alias
+            'organizer_name': self.organizer_name,
+            'organizer_bio': self.organizer_bio,
+            'organizer_avatar': self.organizer_avatar,
+            'organizer_socials': self.organizer_socials or {},
+            'agenda': self.agenda or [],
+            'faqs': self.faqs or [],
+            'schedules': self.schedules or [],
+            'custom_fields': self.custom_fields or [],
+            'cta_button_text': self.cta_button_text or 'Get Tickets',
             'contact_email': self.contact_email,
             'contact_phone': self.contact_phone,
             'has_free_tickets': self.has_free_tickets,
@@ -267,7 +293,7 @@ class TicketPurchase(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('events.id'), nullable=False)
     ticket_type_id = db.Column(db.Integer, db.ForeignKey('ticket_types.id'), nullable=False)
-    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Optional for guest buyers
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)  # NULL for free tickets
     
     # Unique ticket identification
@@ -278,6 +304,13 @@ class TicketPurchase(db.Model):
     buyer_name = db.Column(db.String(255), nullable=False)
     buyer_email = db.Column(db.String(255), nullable=False)
     buyer_phone = db.Column(db.String(20), nullable=True)
+    
+    # Schedule / Location selected
+    selected_schedule_id = db.Column(db.String(100), nullable=True)
+    selected_schedule_title = db.Column(db.String(255), nullable=True)
+    
+    # Custom registration responses
+    custom_responses = db.Column(db.JSON, default=dict)
     
     # Purchase details
     price_paid = db.Column(db.Numeric(10, 2), default=0.00)
@@ -335,12 +368,8 @@ class TicketPurchase(db.Model):
         if self.is_checked_in:
             return False
         
-        # Check if event has started (optional - can check in before event)
-        # now = datetime.utcnow()
-        # if now < self.event.start_date:
-        #     return False
-        
         return True
+
     def to_dict(self, include_sensitive=False):
         """Convert ticket purchase to dictionary"""
         _price = float(self.price_paid) if self.price_paid else 0.00
@@ -357,6 +386,9 @@ class TicketPurchase(db.Model):
             'buyer_name': self.buyer_name,
             'buyer_email': self.buyer_email,
             'buyer_phone': self.buyer_phone,
+            'selected_schedule_id': self.selected_schedule_id,
+            'selected_schedule_title': self.selected_schedule_title,
+            'custom_responses': self.custom_responses or {},
             'price_paid': _price,
             'total_price': _price,  # frontend alias
             'unit_price': _unit,    # frontend alias
