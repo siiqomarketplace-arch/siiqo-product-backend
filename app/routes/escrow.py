@@ -413,13 +413,14 @@ def _deliver_event_tickets(order, escrow):
     if not Receipt.query.filter_by(order_id=order.id).first():
         db.session.add(Receipt(order_id=order.id))
 
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title="Event Tickets Ready! 🎟️",
-        message=f"Your tickets for Order #{order.id} are active. Access them in My Tickets.",
-        type="ORDER",
-        order_id=order.id,
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Event Tickets Ready! 🎟️",
+            message=f"Your tickets for Order #{order.id} are active. Access them in My Tickets.",
+            type="ORDER",
+            order_id=order.id,
+        ))
     db.session.add(Notification(
         user_id=order.vendor_id,
         title="Event Ticket Sale Complete 🎟️",
@@ -436,7 +437,7 @@ def _deliver_event_tickets(order, escrow):
 # ---------------------------------------------------------------------------
 
 @escrow_bp.route('/initiate', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def initiate_escrow():
     user_id = get_jwt_identity()
     data = request.get_json() or {}

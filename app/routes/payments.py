@@ -688,12 +688,13 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 order.status = 'COMPLETED'
                 if _link: _link.status = 'PAID'
                 _payout_vendor_via_daya(order, escrow)
-                db.session.add(Notification(
-                    user_id=order.buyer_id,
-                    title="Payment Complete",
-                    message=f"Your payment for Order #{order_id} is confirmed. The vendor has been notified.",
-                    type="ORDER", order_id=order_id,
-                ))
+                if order.buyer_id:
+                    db.session.add(Notification(
+                        user_id=order.buyer_id,
+                        title="Payment Complete",
+                        message=f"Your payment for Order #{order_id} is confirmed. The vendor has been notified.",
+                        type="ORDER", order_id=order_id,
+                    ))
                 db.session.add(Notification(
                     user_id=order.vendor_id,
                     title="Digital Sale Complete",
@@ -709,12 +710,13 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 order.status = 'COMPLETED'
                 if _link: _link.status = 'PAID'
                 _payout_vendor_via_daya(order, escrow)
-                db.session.add(Notification(
-                    user_id=order.buyer_id,
-                    title="Payment Complete",
-                    message=f"Your payment for Order #{order_id} is confirmed.",
-                    type="ORDER", order_id=order_id,
-                ))
+                if order.buyer_id:
+                    db.session.add(Notification(
+                        user_id=order.buyer_id,
+                        title="Payment Complete",
+                        message=f"Your payment for Order #{order_id} is confirmed.",
+                        type="ORDER", order_id=order_id,
+                    ))
                 db.session.add(Notification(
                     user_id=order.vendor_id,
                     title="Service Sale Complete",

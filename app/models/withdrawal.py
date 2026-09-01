@@ -279,7 +279,7 @@ class DayaPayment(db.Model):
 
     id      = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False, index=True)
-    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Nullable for guest buyers
 
     # "ngn_onramp" or "crypto_direct"
     payment_type = db.Column(db.String(20), nullable=False)
