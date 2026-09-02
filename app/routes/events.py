@@ -508,15 +508,7 @@ def delete_event(event_id):
         if not event:
             return jsonify({'message': 'Event not found'}), 404
         
-        # Check if there are any ticket purchases
-        has_purchases = TicketPurchase.query.filter_by(event_id=event.id).count() > 0
-        
-        if has_purchases:
-            return jsonify({
-                'message': 'Cannot delete event with ticket purchases. Unpublish instead.'
-            }), 400
-        
-        # Soft delete
+        # Soft delete event (hides from vendor dashboard and marketplace)
         event.is_deleted = True
         event.is_published = False
         db.session.commit()
@@ -968,6 +960,30 @@ def purchase_tickets(slug):
                 )
             except Exception as email_err:
                 logger.warning(f"Ticket email failed (non-fatal): {email_err}")
+
+            # Notify vendor of ticket registration
+            try:
+                vendor = db.session.get(User, event.vendor_id)
+                if vendor and vendor.email:
+                    vendor_name = vendor.business_name or vendor.first_name or vendor.email
+                    dashboard_url = f"https://siiqo.com/vendor/events/{event.id}/tickets"
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject=f"🎟️ New Free Ticket Registration — {event.title}",
+                        template_name="ticket_purchased_vendor",
+                        vendor_name=vendor_name,
+                        buyer_name=buyer_name,
+                        buyer_email=buyer_email,
+                        event_title=event.title,
+                        ticket_type_name=ticket_type.name,
+                        quantity=quantity,
+                        total_price="0",
+                        is_free=True,
+                        dashboard_url=dashboard_url,
+                        year=datetime.utcnow().year,
+                    )
+            except Exception as email_err:
+                logger.warning(f"Vendor free ticket email failed (non-fatal): {email_err}")
             
             logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to {buyer_email}")
             
@@ -1268,7 +1284,8 @@ def confirm_manual_payment(event_id, ticket_id):
         if not event:
             return jsonify({'message': 'Event not found'}), 404
 
-        if user.role.value not in ('admin', 'superadmin') and event.vendor_id != user.id:
+        user_role = (user.role or '').lower()
+        if user_role not in ('admin', 'superadmin') and event.vendor_id != user.id:
             return jsonify({'message': 'Access denied'}), 403
 
         ticket = TicketPurchase.query.filter_by(
@@ -1352,7 +1369,8 @@ def reject_manual_payment(event_id, ticket_id):
         if not event:
             return jsonify({'message': 'Event not found'}), 404
 
-        if user.role.value not in ('admin', 'superadmin') and event.vendor_id != user.id:
+        user_role = (user.role or '').lower()
+        if user_role not in ('admin', 'superadmin') and event.vendor_id != user.id:
             return jsonify({'message': 'Access denied'}), 403
 
         ticket = TicketPurchase.query.filter_by(
@@ -1971,6 +1989,30 @@ def activate_tickets_for_order(order_id):
                 )
             except Exception as email_err:
                 logger.warning(f"[TICKET ACTIVATION] Email failed (non-fatal): {email_err}")
+
+            # Notify vendor of paid ticket purchase
+            try:
+                vendor = db.session.get(User, ev.vendor_id)
+                if vendor and vendor.email:
+                    vendor_name = vendor.business_name or vendor.first_name or vendor.email
+                    dashboard_url = f"https://siiqo.com/vendor/events/{ev.id}/tickets"
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject=f"💰 New Ticket Purchase (₦{float(order.total_amount if order else 0):,.0f}) — {ev.title}",
+                        template_name="ticket_purchased_vendor",
+                        vendor_name=vendor_name,
+                        buyer_name=first_ticket.buyer_name,
+                        buyer_email=first_ticket.buyer_email,
+                        event_title=ev.title,
+                        ticket_type_name=tt.name if tt else 'Ticket',
+                        quantity=len(pending_tickets),
+                        total_price=f"{float(order.total_amount if order else 0):,.0f}",
+                        is_free=False,
+                        dashboard_url=dashboard_url,
+                        year=datetime.utcnow().year,
+                    )
+            except Exception as email_err:
+                logger.warning(f"[TICKET ACTIVATION] Vendor email failed (non-fatal): {email_err}")
 
         return True
     except Exception as e:
