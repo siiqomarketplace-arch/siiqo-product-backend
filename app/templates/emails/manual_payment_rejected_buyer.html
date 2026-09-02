@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Payment Not Verified — {{ event_title }}</title>
+  <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px; color: #334155; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+    .header { background-color: #0b1b3b; padding: 30px 40px; text-align: center; border-bottom: 4px solid #ef4444; }
+    .content { padding: 40px; }
+    .rejection-box { background: #fef2f2; border: 2px solid #fca5a5; border-radius: 14px; padding: 20px; margin: 20px 0; }
+    .btn { display: inline-block; background: linear-gradient(135deg, #7c3aed, #4f46e5); color: #ffffff !important; text-decoration: none; padding: 14px 28px; border-radius: 10px; font-weight: 800; font-size: 15px; margin-top: 16px; }
+    .footer { background-color: #f8fafc; padding: 24px 40px; text-align: center; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; }
+    .footer a { color: #E0921C; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <a href="https://siiqo.com" style="text-decoration:none;">
+        <span style="color:#ffffff;font-size:26px;font-weight:900;letter-spacing:-1px;">Siiqo</span>
+      </a>
+    </div>
+    <div class="content">
+      <h2 style="color:#0f172a;margin-top:0;font-size:22px;font-weight:800;">Payment Not Verified ❌</h2>
+      <p style="font-size:15px;color:#475569;line-height:1.6;">
+        Hi {{ buyer_name }},<br><br>
+        Unfortunately, we were unable to verify your payment for <strong>{{ event_title }}</strong>.
+      </p>
+
+      <div class="rejection-box">
+        <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.5px;color:#991b1b;margin:0 0 10px;">Reason</p>
+        <p style="font-size:14px;color:#7f1d1d;font-weight:600;margin:0;">{{ rejection_reason }}</p>
+      </div>
+
+      <p style="font-size:14px;color:#475569;line-height:1.6;">
+        <strong>You can re-register</strong> by visiting the event page and submitting a new, clear payment screenshot or receipt. 
+        Make sure the transfer amount and your name are visible.
+      </p>
+
+      <div style="text-align:center;margin-top:24px;">
+        <a href="{{ resubmit_url }}" class="btn">🔁 Re-submit Payment Proof</a>
+      </div>
+
+      <p style="font-size:13px;color:#64748b;margin-top:28px;">
+        Still having trouble? Contact the organiser directly at 
+        <a href="mailto:{{ organizer_email }}" style="color:#E0921C;">{{ organizer_email }}</a> 
+        or <a href="mailto:support@siiqo.com" style="color:#E0921C;">support@siiqo.com</a>.
+      </p>
+    </div>
+    <div class="footer">
+      <p>You're receiving this because you registered for an event on <a href="https://siiqo.com">Siiqo</a>.</p>
+      <p style="margin-top:12px;color:#cbd5e1;">© {{ year }} Siiqo. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>

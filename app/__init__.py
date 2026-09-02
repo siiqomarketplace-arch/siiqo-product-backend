@@ -119,11 +119,26 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS schedules JSONB DEFAULT '[]'",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '[]'",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS cta_button_text VARCHAR(100) DEFAULT 'Get Tickets'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS registration_type VARCHAR(20) DEFAULT 'native'",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS external_registration_url VARCHAR(500)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS external_registration_instructions TEXT",
+                # ── Events Manual Bank Transfer Payment Fields ───────────────
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_bank_name VARCHAR(100)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_account_name VARCHAR(255)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_account_number VARCHAR(50)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_instructions TEXT",
                 # ── Ticket Purchases Guest & Custom Fields ──────────────────
                 "ALTER TABLE ticket_purchases ALTER COLUMN buyer_id DROP NOT NULL",
                 "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS selected_schedule_id VARCHAR(100)",
                 "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS selected_schedule_title VARCHAR(255)",
                 "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS custom_responses JSONB DEFAULT '{}'",
+                # ── Ticket Purchases Manual Payment Tracking ─────────────────
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS payment_proof_url VARCHAR(500)",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS manual_payment_status VARCHAR(30)",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS rejection_reason TEXT",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES users(id)",
+                "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMP",
                 # ── Orders Guest Checkout ────────────────────────────────────
                 "ALTER TABLE orders ALTER COLUMN buyer_id DROP NOT NULL",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_email VARCHAR(255)",

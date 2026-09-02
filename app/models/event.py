@@ -84,6 +84,17 @@ class Event(db.Model):
     contact_email = db.Column(db.String(255), nullable=True)
     contact_phone = db.Column(db.String(20), nullable=True)
     
+    # Registration & Payment Mode: 'native' (Daya crypto) | 'manual' (bank transfer) | 'external' (link out)
+    registration_type = db.Column(db.String(20), default='native')
+    external_registration_url = db.Column(db.String(500), nullable=True)
+    external_registration_instructions = db.Column(db.Text, nullable=True)
+
+    # Manual Bank Transfer Payment Details
+    manual_payment_bank_name = db.Column(db.String(100), nullable=True)
+    manual_payment_account_name = db.Column(db.String(255), nullable=True)
+    manual_payment_account_number = db.Column(db.String(50), nullable=True)
+    manual_payment_instructions = db.Column(db.Text, nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -181,6 +192,14 @@ class Event(db.Model):
             'schedules': self.schedules or [],
             'custom_fields': self.custom_fields or [],
             'cta_button_text': self.cta_button_text or 'Get Tickets',
+            'registration_type': self.registration_type or 'native',
+            'external_registration_url': self.external_registration_url,
+            'external_registration_instructions': self.external_registration_instructions,
+            # Manual payment bank details
+            'manual_payment_bank_name': self.manual_payment_bank_name,
+            'manual_payment_account_name': self.manual_payment_account_name,
+            'manual_payment_account_number': self.manual_payment_account_number,
+            'manual_payment_instructions': self.manual_payment_instructions,
             'contact_email': self.contact_email,
             'contact_phone': self.contact_phone,
             'has_free_tickets': self.has_free_tickets,
@@ -328,6 +347,14 @@ class TicketPurchase(db.Model):
     
     # PDF ticket URL (generated after purchase)
     pdf_ticket_url = db.Column(db.String(500), nullable=True)
+
+    # Manual Bank Transfer Payment tracking
+    payment_proof_url = db.Column(db.String(500), nullable=True)
+    manual_payment_status = db.Column(db.String(30), nullable=True)  # PENDING | APPROVED | REJECTED | EXPIRED
+    expires_at = db.Column(db.DateTime, nullable=True)  # auto-expiry for pending manual payments
+    rejection_reason = db.Column(db.Text, nullable=True)
+    confirmed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    confirmed_at = db.Column(db.DateTime, nullable=True)
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -339,6 +366,7 @@ class TicketPurchase(db.Model):
     order = db.relationship('Order', backref='ticket_purchases')
     checked_in_by_user = db.relationship('User', foreign_keys=[checked_in_by])
     original_buyer = db.relationship('User', foreign_keys=[original_buyer_id])
+    confirmer = db.relationship('User', foreign_keys=[confirmed_by])
     
     def __init__(self, **kwargs):
         """Generate unique ticket code on creation"""
@@ -400,6 +428,13 @@ class TicketPurchase(db.Model):
             'is_valid': self.is_valid,
             'can_be_checked_in': self.can_be_checked_in,
             'pdf_ticket_url': self.pdf_ticket_url,
+            # Manual payment tracking
+            'payment_proof_url': self.payment_proof_url,
+            'manual_payment_status': self.manual_payment_status,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'rejection_reason': self.rejection_reason,
+            'confirmed_by': self.confirmed_by,
+            'confirmed_at': self.confirmed_at.isoformat() if self.confirmed_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
         

@@ -293,6 +293,13 @@ def create_event():
             schedules=data.get('schedules') if isinstance(data.get('schedules'), list) else [],
             custom_fields=data.get('custom_fields') if isinstance(data.get('custom_fields'), list) else [],
             cta_button_text=data.get('cta_button_text') or 'Get Tickets',
+            registration_type=data.get('registration_type', 'native') if data.get('registration_type') in ('native', 'manual', 'external') else 'native',
+            external_registration_url=data.get('external_registration_url'),
+            external_registration_instructions=data.get('external_registration_instructions'),
+            manual_payment_bank_name=data.get('manual_payment_bank_name'),
+            manual_payment_account_name=data.get('manual_payment_account_name'),
+            manual_payment_account_number=data.get('manual_payment_account_number'),
+            manual_payment_instructions=data.get('manual_payment_instructions'),
         )
         
         # Handle cover image upload (File or URL string)
@@ -412,7 +419,10 @@ def update_event(event_id):
         for field in ['timezone', 'event_type', 'event_format', 'venue_name', 'city',
                       'state', 'country', 'meeting_password', 'terms_and_conditions',
                       'contact_email', 'contact_phone', 'organizer_name', 'organizer_bio',
-                      'organizer_avatar', 'cta_button_text']:
+                      'organizer_avatar', 'cta_button_text', 'registration_type',
+                      'external_registration_url', 'external_registration_instructions',
+                      'manual_payment_bank_name', 'manual_payment_account_name',
+                      'manual_payment_account_number', 'manual_payment_instructions']:
             if data.get(field) is not None:
                 setattr(event, field, data[field])
         
@@ -1031,6 +1041,371 @@ def purchase_tickets(slug):
         db.session.rollback()
         logger.error(f"Error purchasing tickets: {e}")
         return jsonify({'message': 'Failed to purchase tickets'}), 500
+
+
+# ---------------------------------------------------------------------------
+# MANUAL PAYMENT ROUTES
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/upload/payment-proof', methods=['POST'])
+@jwt_required(optional=True)
+def upload_payment_proof():
+    """
+    Upload a payment proof screenshot / bank receipt.
+    Returns the URL of the uploaded file.
+    """
+    try:
+        file = request.files.get('file')
+        if not file or not file.filename:
+            return jsonify({'message': 'No file provided'}), 400
+
+        # Allow images and PDF
+        allowed_exts = {'png', 'jpg', 'jpeg', 'webp', 'pdf'}
+        ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
+        if ext not in allowed_exts:
+            return jsonify({'message': 'Invalid file type. Allowed: PNG, JPG, WEBP, PDF'}), 400
+
+        url = save_uploaded_file(file, subfolder='payment_proofs', is_digital=True)
+        if not url:
+            return jsonify({'message': 'Upload failed'}), 500
+
+        return jsonify({'url': url}), 200
+
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error uploading payment proof: {e}")
+        return jsonify({'message': 'Upload failed'}), 500
+
+
+@events_bp.route('/events/<slug>/purchase-manual', methods=['POST'])
+@jwt_required(optional=True)
+def purchase_manual_tickets(slug):
+    """
+    Register and submit payment proof for a manual-payment event.
+    Creates tickets in PENDING status, notifies both buyer and vendor.
+    """
+    from datetime import timedelta
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id)) if user_id else None
+
+        event = Event.query.filter_by(
+            slug=slug,
+            is_published=True,
+            is_active=True,
+            is_deleted=False
+        ).first()
+
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+
+        if event.registration_type != 'manual':
+            return jsonify({'message': 'This event does not use manual payment'}), 400
+
+        data = request.get_json() or {}
+
+        if not data.get('ticket_type_id') or not data.get('quantity'):
+            return jsonify({'message': 'ticket_type_id and quantity are required'}), 400
+
+        ticket_type = TicketType.query.filter_by(
+            id=data['ticket_type_id'],
+            event_id=event.id,
+            is_active=True
+        ).first()
+
+        if not ticket_type:
+            return jsonify({'message': 'Ticket type not found or not available'}), 404
+
+        quantity = int(data['quantity'])
+
+        if quantity < ticket_type.min_per_order:
+            return jsonify({'message': f'Minimum {ticket_type.min_per_order} tickets required'}), 400
+        if quantity > ticket_type.max_per_order:
+            return jsonify({'message': f'Maximum {ticket_type.max_per_order} tickets allowed'}), 400
+        if ticket_type.is_sold_out:
+            return jsonify({'message': 'This ticket type is sold out'}), 400
+        if ticket_type.quantity_available is not None and ticket_type.tickets_remaining < quantity:
+            return jsonify({'message': f'Only {ticket_type.tickets_remaining} tickets remaining'}), 400
+        if event.total_capacity is not None and event.tickets_remaining < quantity:
+            return jsonify({'message': f'Only {event.tickets_remaining} event tickets remaining'}), 400
+
+        # Buyer information
+        buyer_name = (data.get('buyer_name') or (user.full_name if user else '')).strip()
+        buyer_email = (data.get('buyer_email') or (user.email if user else '')).strip().lower()
+        buyer_phone = (data.get('buyer_phone') or (user.phone if user else '')).strip()
+
+        if not buyer_name:
+            return jsonify({'message': 'Full Name is required'}), 400
+        if not buyer_email or '@' not in buyer_email:
+            return jsonify({'message': 'Valid email address is required'}), 400
+
+        payment_proof_url = data.get('payment_proof_url', '').strip()
+        if not payment_proof_url:
+            return jsonify({'message': 'Payment proof is required'}), 400
+
+        custom_responses = data.get('custom_responses') or {}
+        selected_schedule_id = data.get('selected_schedule_id')
+        selected_schedule_title = data.get('selected_schedule_title')
+
+        # Validate required custom fields
+        if event.custom_fields and isinstance(event.custom_fields, list):
+            for cf in event.custom_fields:
+                if cf.get('required'):
+                    cf_id = cf.get('id')
+                    cf_label = cf.get('label') or 'Required question'
+                    val = custom_responses.get(cf_id)
+                    if val is None or str(val).strip() == '':
+                        return jsonify({'message': f'Please answer required field: {cf_label}'}), 400
+
+        total_price = float(ticket_type.price) * quantity
+        expires_at = datetime.utcnow() + timedelta(hours=48)
+
+        tickets = []
+        for _ in range(quantity):
+            ticket = TicketPurchase(
+                event_id=event.id,
+                ticket_type_id=ticket_type.id,
+                buyer_id=user.id if user else None,
+                buyer_name=buyer_name,
+                buyer_email=buyer_email,
+                buyer_phone=buyer_phone,
+                selected_schedule_id=selected_schedule_id,
+                selected_schedule_title=selected_schedule_title,
+                custom_responses=custom_responses,
+                price_paid=ticket_type.price,
+                quantity=1,
+                status='PENDING',
+                payment_proof_url=payment_proof_url,
+                manual_payment_status='PENDING',
+                expires_at=expires_at,
+            )
+            db.session.add(ticket)
+            tickets.append(ticket)
+
+        db.session.commit()
+
+        # ── Email: buyer confirmation ──────────────────────────────────────
+        try:
+            event_date_str = event.start_date.strftime('%A, %B %d, %Y') if event.start_date else 'TBA'
+            event_time_str = event.start_date.strftime('%I:%M %p') if event.start_date else 'TBA'
+            event_loc = selected_schedule_title or event.venue_address or event.city or ''
+            vendor = db.session.get(User, event.vendor_id)
+            organizer_email = event.contact_email or (vendor.email if vendor else None)
+
+            send_siiqo_email(
+                to_email=buyer_email,
+                subject=f"✅ Registration Received — {event.title}",
+                template_name="manual_payment_received_buyer",
+                buyer_name=buyer_name,
+                event_title=event.title,
+                ticket_type_name=ticket_type.name,
+                quantity=quantity,
+                total_price=f"{total_price:,.0f}",
+                event_date=event_date_str,
+                event_time=event_time_str,
+                event_location=event_loc,
+                organizer_email=organizer_email or 'support@siiqo.com',
+                year=datetime.utcnow().year,
+            )
+        except Exception as email_err:
+            logger.warning(f"Manual payment buyer email failed (non-fatal): {email_err}")
+
+        # ── Email: vendor notification ─────────────────────────────────────
+        try:
+            vendor = vendor if 'vendor' in dir() else db.session.get(User, event.vendor_id)
+            if vendor:
+                vendor_name = vendor.business_name or vendor.first_name or vendor.email
+                dashboard_url = f"https://siiqo.com/vendor/events/{event.id}/tickets"
+                send_siiqo_email(
+                    to_email=vendor.email,
+                    subject=f"🔔 New Manual Payment Submitted — {event.title}",
+                    template_name="manual_payment_notify_vendor",
+                    vendor_name=vendor_name,
+                    buyer_name=buyer_name,
+                    buyer_email=buyer_email,
+                    event_title=event.title,
+                    ticket_type_name=ticket_type.name,
+                    quantity=quantity,
+                    total_price=f"{total_price:,.0f}",
+                    dashboard_url=dashboard_url,
+                    year=datetime.utcnow().year,
+                )
+        except Exception as email_err:
+            logger.warning(f"Manual payment vendor email failed (non-fatal): {email_err}")
+
+        logger.info(f"Manual payment tickets submitted: {len(tickets)} for event {event.id} by {buyer_email}")
+
+        return jsonify({
+            'message': 'Registration submitted. Awaiting payment confirmation.',
+            'tickets': [t.to_dict() for t in tickets],
+            'pending_manual': True,
+            'expires_at': expires_at.isoformat(),
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error submitting manual payment: {e}")
+        return jsonify({'message': 'Failed to submit registration'}), 500
+
+
+@events_bp.route('/vendor/events/<int:event_id>/tickets/<int:ticket_id>/confirm-manual', methods=['POST'])
+@jwt_required()
+def confirm_manual_payment(event_id, ticket_id):
+    """
+    Vendor or Admin confirms a manual bank transfer payment.
+    Activates the ticket and sends QR/confirmation email to buyer.
+    """
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+
+        if not user:
+            return jsonify({'message': 'Unauthorized'}), 401
+
+        # Allow vendor owner OR admin
+        event = Event.query.filter_by(id=event_id, is_deleted=False).first()
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+
+        if user.role.value not in ('admin', 'superadmin') and event.vendor_id != user.id:
+            return jsonify({'message': 'Access denied'}), 403
+
+        ticket = TicketPurchase.query.filter_by(
+            id=ticket_id,
+            event_id=event_id
+        ).first()
+
+        if not ticket:
+            return jsonify({'message': 'Ticket not found'}), 404
+
+        if ticket.manual_payment_status != 'PENDING':
+            return jsonify({'message': f'Ticket is already {ticket.manual_payment_status}'}), 400
+
+        # Activate ticket
+        ticket.status = 'ACTIVE'
+        ticket.manual_payment_status = 'APPROVED'
+        ticket.confirmed_by = user.id
+        ticket.confirmed_at = datetime.utcnow()
+        ticket.expires_at = None  # Clear expiry once approved
+
+        # Increment sold counts
+        ticket.ticket_type.quantity_sold = (ticket.ticket_type.quantity_sold or 0) + 1
+        event.tickets_sold = (event.tickets_sold or 0) + 1
+
+        db.session.commit()
+
+        # Send confirmation email with ticket to buyer
+        try:
+            event_date_str = event.start_date.strftime('%A, %B %d, %Y') if event.start_date else 'TBA'
+            event_time_str = event.start_date.strftime('%I:%M %p') if event.start_date else 'TBA'
+            event_loc = ticket.selected_schedule_title or event.venue_address or event.city or ''
+            send_siiqo_email(
+                to_email=ticket.buyer_email,
+                subject=f"🎟️ Payment Confirmed — Your Ticket for {event.title}",
+                template_name="ticket_issued",
+                buyer_name=ticket.buyer_name,
+                event_title=event.title,
+                ticket_type_name=ticket.ticket_type.name if ticket.ticket_type else 'Ticket',
+                ticket_code=ticket.ticket_code,
+                quantity=ticket.quantity or 1,
+                event_date=event_date_str,
+                event_time=event_time_str,
+                event_location=event_loc,
+                event_format=event.event_format or 'in-person',
+                total_price=f"{float(ticket.price_paid):,.0f}",
+                is_free=False,
+                tickets_url='https://siiqo.com/buyer/tickets',
+                year=datetime.utcnow().year,
+            )
+        except Exception as email_err:
+            logger.warning(f"Confirm manual payment email failed (non-fatal): {email_err}")
+
+        logger.info(f"Manual payment confirmed: ticket {ticket_id} by user {user.id}")
+
+        return jsonify({
+            'message': 'Payment confirmed. Ticket activated and email sent to buyer.',
+            'ticket': ticket.to_dict(include_sensitive=True)
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error confirming manual payment: {e}")
+        return jsonify({'message': 'Failed to confirm payment'}), 500
+
+
+@events_bp.route('/vendor/events/<int:event_id>/tickets/<int:ticket_id>/reject-manual', methods=['POST'])
+@jwt_required()
+def reject_manual_payment(event_id, ticket_id):
+    """
+    Vendor or Admin rejects a manual payment submission.
+    Cancels the ticket and notifies the buyer with the reason + re-submit link.
+    """
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+
+        if not user:
+            return jsonify({'message': 'Unauthorized'}), 401
+
+        event = Event.query.filter_by(id=event_id, is_deleted=False).first()
+        if not event:
+            return jsonify({'message': 'Event not found'}), 404
+
+        if user.role.value not in ('admin', 'superadmin') and event.vendor_id != user.id:
+            return jsonify({'message': 'Access denied'}), 403
+
+        ticket = TicketPurchase.query.filter_by(
+            id=ticket_id,
+            event_id=event_id
+        ).first()
+
+        if not ticket:
+            return jsonify({'message': 'Ticket not found'}), 404
+
+        if ticket.manual_payment_status != 'PENDING':
+            return jsonify({'message': f'Ticket is already {ticket.manual_payment_status}'}), 400
+
+        data = request.get_json() or {}
+        reason = data.get('reason', '').strip() or 'Payment could not be verified.'
+
+        ticket.status = 'CANCELLED'
+        ticket.manual_payment_status = 'REJECTED'
+        ticket.rejection_reason = reason
+        ticket.confirmed_by = user.id
+        ticket.confirmed_at = datetime.utcnow()
+
+        db.session.commit()
+
+        # Send rejection email to buyer
+        try:
+            resubmit_url = f"https://siiqo.com/marketplace/events/{event.slug}"
+            organizer_email = event.contact_email or 'support@siiqo.com'
+            send_siiqo_email(
+                to_email=ticket.buyer_email,
+                subject=f"❌ Payment Not Verified — {event.title}",
+                template_name="manual_payment_rejected_buyer",
+                buyer_name=ticket.buyer_name,
+                event_title=event.title,
+                rejection_reason=reason,
+                resubmit_url=resubmit_url,
+                organizer_email=organizer_email,
+                year=datetime.utcnow().year,
+            )
+        except Exception as email_err:
+            logger.warning(f"Reject manual payment email failed (non-fatal): {email_err}")
+
+        logger.info(f"Manual payment rejected: ticket {ticket_id} by user {user.id}")
+
+        return jsonify({
+            'message': 'Payment rejected. Buyer has been notified.',
+            'ticket': ticket.to_dict()
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error rejecting manual payment: {e}")
+        return jsonify({'message': 'Failed to reject payment'}), 500
 
 
 @events_bp.route('/user/tickets', methods=['GET'])
