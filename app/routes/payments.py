@@ -161,10 +161,22 @@ def daya_initiate():
     if order.buyer_id is not None and buyer_user_id is not None and order.buyer_id != buyer_user_id:
         return jsonify({"message": "Unauthorized"}), 403
 
-    if not buyer_email and order.buyer_email:
-        buyer_email = order.buyer_email
-    if not buyer_name and order.buyer_name:
-        buyer_name = order.buyer_name
+    if not buyer_email:
+        if order.buyer_email:
+            buyer_email = order.buyer_email.strip().lower()
+        elif order.buyer and order.buyer.email:
+            buyer_email = order.buyer.email.strip().lower()
+
+    if not buyer_email or "@" not in buyer_email:
+        return jsonify({"message": "A valid email address is required to initiate payment."}), 400
+
+    if not buyer_name:
+        if order.buyer_name:
+            buyer_name = order.buyer_name.strip()
+        elif order.buyer:
+            buyer_name = f"{order.buyer.first_name or ''} {order.buyer.last_name or ''}".strip()
+        if not buyer_name:
+            buyer_name = buyer_email.split("@")[0]
 
     existing = DayaPayment.query.filter_by(
         order_id=primary_order_id,

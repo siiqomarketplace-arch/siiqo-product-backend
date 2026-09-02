@@ -805,7 +805,7 @@ def get_all_escrow_transactions():
 
     # Status map: backend canonical → frontend display key
     STATUS_MAP = {
-        EscrowStatus.PENDING_PAYMENT: "held",
+        EscrowStatus.PENDING_PAYMENT: "pending_payment",
         EscrowStatus.IN_ESCROW:       "held",
         EscrowStatus.SHIPPED:         "held",
         EscrowStatus.DELIVERED:       "held",
@@ -815,7 +815,13 @@ def get_all_escrow_transactions():
         EscrowStatus.CANCELLED:       "refunded",
     }
 
-    transactions = EscrowTransaction.query.order_by(
+    include_unpaid = request.args.get("include_unpaid", "false").lower() == "true"
+    query = EscrowTransaction.query
+    if not include_unpaid:
+        # Exclude unpaid draft checkouts so admin escrow dashboard only shows orders with funded escrow
+        query = query.filter(EscrowTransaction.status != EscrowStatus.PENDING_PAYMENT)
+
+    transactions = query.order_by(
         EscrowTransaction.created_at.desc()
     ).limit(1000).all()
 
