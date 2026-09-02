@@ -360,6 +360,24 @@ def create_app(config_name: str | None = None) -> Flask:
             except Exception:
                 db.session.rollback()
 
+            # 3b. Create article_slug_redirects table (301 redirect history)
+            try:
+                db.session.execute(_text("""
+                    CREATE TABLE IF NOT EXISTS article_slug_redirects (
+                        id          SERIAL PRIMARY KEY,
+                        article_id  INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                        old_slug    VARCHAR(300) NOT NULL UNIQUE,
+                        created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """))
+                db.session.execute(_text("""
+                    CREATE INDEX IF NOT EXISTS idx_article_slug_redirects_old_slug
+                    ON article_slug_redirects (old_slug)
+                """))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
             # 4. Check if articles table exists and has data
             _result = db.session.execute(_text("""
                 SELECT EXISTS (
