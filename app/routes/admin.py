@@ -2945,7 +2945,7 @@ def delete_bot_accounts():
 # ADMIN EVENTS ENDPOINTS
 # ---------------------------------------------------------------------------
 
-@admin_bp.route('/admin/events', methods=['GET'])
+@admin_bp.route('/events', methods=['GET'])
 @jwt_required()
 def admin_list_events():
     """
@@ -3014,7 +3014,7 @@ def admin_list_events():
         return jsonify({'message': 'Failed to list events'}), 500
 
 
-@admin_bp.route('/admin/events/<int:event_id>/tickets/<int:ticket_id>/confirm-manual', methods=['POST'])
+@admin_bp.route('/events/<int:event_id>/tickets/<int:ticket_id>/confirm-manual', methods=['POST'])
 @jwt_required()
 def admin_confirm_manual_payment(event_id, ticket_id):
     """Admin confirms a manual payment — delegates to the same logic as vendor."""
@@ -3078,7 +3078,7 @@ def admin_confirm_manual_payment(event_id, ticket_id):
         return jsonify({'message': 'Failed to confirm payment'}), 500
 
 
-@admin_bp.route('/admin/events/<int:event_id>/tickets/<int:ticket_id>/reject-manual', methods=['POST'])
+@admin_bp.route('/events/<int:event_id>/tickets/<int:ticket_id>/reject-manual', methods=['POST'])
 @jwt_required()
 def admin_reject_manual_payment(event_id, ticket_id):
     """Admin rejects a manual payment."""
@@ -3130,3 +3130,98 @@ def admin_reject_manual_payment(event_id, ticket_id):
         db.session.rollback()
         logging.error(f"[ADMIN] Error rejecting manual payment: {e}")
         return jsonify({'message': 'Failed to reject payment'}), 500
+
+
+# ---------------------------------------------------------------------------
+# ADMIN STOREFRONT DETAIL — vendor analytics on click
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/storefronts/<int:storefront_id>/detail', methods=['GET'])
+@jwt_required()
+def admin_storefront_detail(storefront_id):
+    """
+    Admin: full vendor analytics for a single storefront.
+    Returns product stats, order stats, revenue, event stats, trust tier.
+    """
+    try:
+        admin_id = _parse_admin_id(get_jwt_identity())
+        if not _get_admin(admin_id):
+            return jsonify({"message": "Admin access required"}), 403
+
+        from app.models.order import Order, OrderItem
+        from app.models.product import Product
+        from app.models.event import Event, TicketPurchase
+        from app.models.trust import VendorTrustProfile
+        from sqlalchemy import func
+
+        sf = db.session.get(Storefront, storefront_id)
+        if not sf:
+            return jsonify({"message": "Storefront not found"}), 404
+
+        vendor = db.session.get(User, sf.vendor_id)
+
+        # ── Product stats ─────────────────────────────────────────────────
+        all_products = Product.query.filter_by(storefront_id=sf.id).all()
+        active_products = [p for p in all_products if p.is_active]
+        total_product_value = sum(float(p.price or 0) * (p.stock_quantity or 0)
+                                  for p in active_products if p.product_type == 'physical')
+
+        # ── Order/revenue stats ───────────────────────────────────────────
+        orders = Order.query.filter_by(vendor_id=sf.vendor_id).all()
+        completed_orders = [o for o in orders if (o.status or '').upper() in ('COMPLETED', 'DELIVERED', 'RELEASED')]
+        total_gmv        = sum(float(o.total_amount or 0) for o in completed_orders)
+        pending_orders   = [o for o in orders if (o.status or '').upper() in ('PENDING', 'PROCESSING', 'PAID')]
+
+        # ── Event stats ───────────────────────────────────────────────────
+        events = Event.query.filter_by(vendor_id=sf.vendor_id, is_deleted=False).all()
+        live_events      = [e for e in events if e.is_published]
+        all_tickets      = TicketPurchase.query.filter(
+            TicketPurchase.event_id.in_([e.id for e in events])
+        ).all() if events else []
+        active_tickets   = [t for t in all_tickets if t.status == 'ACTIVE']
+        event_revenue    = sum(float(t.price_paid or 0) for t in active_tickets)
+
+        # ── Trust tier ────────────────────────────────────────────────────
+        trust = VendorTrustProfile.query.filter_by(vendor_id=sf.vendor_id).first()
+        trust_tier = trust.tier if trust else "BRONZE"
+
+        return jsonify({
+            "storefront": {
+                "id":             sf.id,
+                "store_name":     sf.store_name,
+                "store_slug":     sf.store_slug or sf.storefront_link,
+                "is_published":   sf.is_published,
+                "is_verified":    sf.is_verified,
+                "is_pro_verified":getattr(sf, 'is_pro_verified', False),
+                "created_at":     sf.created_at.isoformat() if sf.created_at else None,
+            },
+            "vendor": {
+                "id":            vendor.id if vendor else None,
+                "name":          (vendor.full_name or vendor.business_name or vendor.email) if vendor else None,
+                "email":         vendor.email if vendor else None,
+                "phone":         vendor.phone if vendor else None,
+                "is_active":     vendor.is_active if vendor else False,
+            },
+            "products": {
+                "total":         len(all_products),
+                "active":        len(active_products),
+                "inventory_value": round(total_product_value, 2),
+            },
+            "orders": {
+                "total":         len(orders),
+                "completed":     len(completed_orders),
+                "pending":       len(pending_orders),
+                "gmv":           round(total_gmv, 2),
+            },
+            "events": {
+                "total":         len(events),
+                "live":          len(live_events),
+                "tickets_sold":  len(active_tickets),
+                "revenue":       round(event_revenue, 2),
+            },
+            "trust_tier":    trust_tier,
+        }), 200
+
+    except Exception as e:
+        logging.error(f"[ADMIN] Error fetching storefront detail: {e}")
+        return jsonify({"message": "Failed to load storefront detail"}), 500
