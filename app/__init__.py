@@ -643,6 +643,19 @@ def create_app(config_name: str | None = None) -> Flask:
             except Exception as reminder_err:
                 logger.warning(f"Event reminder task registration skipped: {reminder_err}")
 
+            # Ticket expiry — cancel pending manual tickets after 48h (check hourly)
+            try:
+                from app.tasks.ticket_expiry_tasks import run_ticket_expiry_check
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_ticket_expiry_check),
+                    trigger=IntervalTrigger(hours=1),
+                    id='ticket_expiry_check',
+                    name='Cancel 48h-expired pending manual ticket submissions',
+                    replace_existing=True,
+                )
+            except Exception as expiry_err:
+                logger.warning(f"Ticket expiry task registration skipped: {expiry_err}")
+
             # Platform fee auto-sweep — check every 6 hours, sweep when >= threshold
             try:
                 from app.tasks.fee_sweep_tasks import run_platform_fee_sweep
