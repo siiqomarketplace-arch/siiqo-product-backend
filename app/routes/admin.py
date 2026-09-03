@@ -2939,3 +2939,194 @@ def delete_bot_accounts():
         db.session.rollback()
         logging.error(f"[ADMIN] Error deleting bot accounts: {e}")
         return jsonify({"message": f"Error deleting bot accounts: {str(e)}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# ADMIN EVENTS ENDPOINTS
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/admin/events', methods=['GET'])
+@jwt_required()
+def admin_list_events():
+    """
+    Admin-only: list ALL events across all vendors with ticket stats
+    and collect all pending manual-payment tickets.
+    """
+    try:
+        admin_id = _parse_admin_id(get_jwt_identity())
+        if not _get_admin(admin_id):
+            return jsonify({"message": "Admin access required"}), 403
+
+        from app.models.event import Event, TicketPurchase
+        from app.models.user import User, Storefront
+
+        events_q = Event.query.filter_by(is_deleted=False)\
+            .order_by(Event.created_at.desc()).all()
+
+        events_data = []
+        all_pending = []
+
+        for ev in events_q:
+            # Vendor name lookup
+            vendor = db.session.get(User, ev.vendor_id)
+            vendor_name = None
+            if vendor:
+                sf = vendor.storefront
+                vendor_name = (sf.store_name if sf else None) or vendor.business_name or vendor.email
+
+            # Ticket statistics
+            purchases = TicketPurchase.query.filter_by(event_id=ev.id).all()
+            tickets_sold   = len([p for p in purchases if p.status == 'ACTIVE'])
+            revenue        = sum(float(p.price_paid or 0) for p in purchases if p.status == 'ACTIVE')
+            pending_manual = [p for p in purchases if getattr(p, 'manual_payment_status', None) == 'PENDING']
+
+            # Collect pending tickets with event title
+            for pm in pending_manual:
+                d = pm.to_dict()
+                d['event_title'] = ev.title
+                all_pending.append(d)
+
+            events_data.append({
+                'id':                   ev.id,
+                'title':                ev.title,
+                'slug':                 ev.slug,
+                'vendor_id':            ev.vendor_id,
+                'vendor_name':          vendor_name,
+                'event_format':         ev.event_format or 'in-person',
+                'event_type':           ev.event_type or '',
+                'start_date':           ev.start_date.isoformat() if ev.start_date else None,
+                'is_published':         ev.is_published,
+                'is_deleted':           ev.is_deleted,
+                'tickets_sold':         tickets_sold,
+                'total_capacity':       ev.total_capacity,
+                'revenue':              revenue,
+                'registration_type':    ev.registration_type or 'native',
+                'pending_manual_count': len(pending_manual),
+            })
+
+        return jsonify({
+            'events':                 events_data,
+            'pending_manual_tickets': all_pending,
+        }), 200
+
+    except Exception as e:
+        logging.error(f"[ADMIN] Error listing events: {e}")
+        return jsonify({'message': 'Failed to list events'}), 500
+
+
+@admin_bp.route('/admin/events/<int:event_id>/tickets/<int:ticket_id>/confirm-manual', methods=['POST'])
+@jwt_required()
+def admin_confirm_manual_payment(event_id, ticket_id):
+    """Admin confirms a manual payment — delegates to the same logic as vendor."""
+    try:
+        admin_id = _parse_admin_id(get_jwt_identity())
+        if not _get_admin(admin_id):
+            return jsonify({"message": "Admin access required"}), 403
+
+        from app.models.event import Event, TicketPurchase
+        from app.utils.email import send_siiqo_email
+
+        ticket = TicketPurchase.query.filter_by(id=ticket_id, event_id=event_id).first()
+        if not ticket:
+            return jsonify({'message': 'Ticket not found'}), 404
+        if getattr(ticket, 'manual_payment_status', None) != 'PENDING':
+            return jsonify({'message': f'Ticket is already {ticket.manual_payment_status}'}), 400
+
+        ticket.status = 'ACTIVE'
+        ticket.manual_payment_status = 'APPROVED'
+        ticket.confirmed_by = None  # Admin has no vendor user ID
+        ticket.confirmed_at = datetime.now(timezone.utc)
+        ticket.expires_at = None
+
+        event = ticket.event
+        if ticket.ticket_type:
+            ticket.ticket_type.quantity_sold = (ticket.ticket_type.quantity_sold or 0) + 1
+        if event:
+            event.tickets_sold = (event.tickets_sold or 0) + 1
+
+        db.session.commit()
+
+        # Send confirmation email
+        try:
+            if event:
+                send_siiqo_email(
+                    to_email=ticket.buyer_email,
+                    subject=f"🎟️ Payment Confirmed — Your Ticket for {event.title}",
+                    template_name="ticket_issued",
+                    buyer_name=ticket.buyer_name,
+                    event_title=event.title,
+                    ticket_type_name=ticket.ticket_type.name if ticket.ticket_type else 'Ticket',
+                    ticket_code=ticket.ticket_code,
+                    quantity=ticket.quantity or 1,
+                    event_date=event.start_date.strftime('%A, %B %d, %Y') if event.start_date else 'TBA',
+                    event_time=event.start_date.strftime('%I:%M %p') if event.start_date else 'TBA',
+                    event_location=event.venue_address or event.city or '',
+                    event_format=event.event_format or 'in-person',
+                    total_price=f"{float(ticket.price_paid):,.0f}",
+                    is_free=False,
+                    tickets_url='https://siiqo.com/buyer/tickets',
+                    year=datetime.now(timezone.utc).year,
+                )
+        except Exception as email_err:
+            logging.warning(f"Admin confirm email failed (non-fatal): {email_err}")
+
+        return jsonify({'message': 'Payment confirmed. Ticket activated.', 'ticket': ticket.to_dict()}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[ADMIN] Error confirming manual payment: {e}")
+        return jsonify({'message': 'Failed to confirm payment'}), 500
+
+
+@admin_bp.route('/admin/events/<int:event_id>/tickets/<int:ticket_id>/reject-manual', methods=['POST'])
+@jwt_required()
+def admin_reject_manual_payment(event_id, ticket_id):
+    """Admin rejects a manual payment."""
+    try:
+        admin_id = _parse_admin_id(get_jwt_identity())
+        if not _get_admin(admin_id):
+            return jsonify({"message": "Admin access required"}), 403
+
+        from app.models.event import Event, TicketPurchase
+        from app.utils.email import send_siiqo_email
+
+        ticket = TicketPurchase.query.filter_by(id=ticket_id, event_id=event_id).first()
+        if not ticket:
+            return jsonify({'message': 'Ticket not found'}), 404
+        if getattr(ticket, 'manual_payment_status', None) != 'PENDING':
+            return jsonify({'message': f'Ticket is already {ticket.manual_payment_status}'}), 400
+
+        data   = request.get_json() or {}
+        reason = data.get('reason', '').strip() or 'Payment could not be verified.'
+
+        ticket.status                = 'CANCELLED'
+        ticket.manual_payment_status = 'REJECTED'
+        ticket.rejection_reason      = reason
+        ticket.confirmed_at          = datetime.now(timezone.utc)
+
+        db.session.commit()
+
+        # Send rejection email
+        try:
+            event = ticket.event
+            if event:
+                send_siiqo_email(
+                    to_email=ticket.buyer_email,
+                    subject=f"❌ Payment Not Verified — {event.title}",
+                    template_name="manual_payment_rejected_buyer",
+                    buyer_name=ticket.buyer_name,
+                    event_title=event.title,
+                    rejection_reason=reason,
+                    resubmit_url=f"https://siiqo.com/marketplace/events/{event.slug}",
+                    organizer_email=event.contact_email or 'support@siiqo.com',
+                    year=datetime.now(timezone.utc).year,
+                )
+        except Exception as email_err:
+            logging.warning(f"Admin reject email failed (non-fatal): {email_err}")
+
+        return jsonify({'message': 'Payment rejected. Buyer notified.'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[ADMIN] Error rejecting manual payment: {e}")
+        return jsonify({'message': 'Failed to reject payment'}), 500
