@@ -46,8 +46,11 @@ def _utcnow():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_admin(admin_id) -> AdminUser | None:
-    return db.session.get(AdminUser, int(admin_id))
+def _get_admin(admin_id) -> "AdminUser | None":
+    try:
+        return db.session.get(AdminUser, int(admin_id))
+    except (ValueError, TypeError):
+        return None
 
 
 def _require_superadmin(admin_id) -> AdminUser | None:
@@ -213,10 +216,13 @@ def admin_dashboard():
 
 
 def _parse_admin_id(identity: str) -> int:
-    """Extract numeric ID from 'admin:123' or plain '123'."""
-    if isinstance(identity, str) and identity.startswith('admin:'):
-        return int(identity.split(':', 1)[1])
-    return int(identity)
+    """Extract numeric ID from 'admin:123' or plain '123'. Returns -1 on bad input (will fail auth check)."""
+    try:
+        if isinstance(identity, str) and identity.startswith('admin:'):
+            return int(identity.split(':', 1)[1])
+        return int(identity)
+    except (ValueError, TypeError):
+        return -1
 
 
 # ---------------------------------------------------------------------------
@@ -985,6 +991,28 @@ def admin_refund_buyer(order_id):
 @jwt_required()
 def admin_verify_payment(order_id):
     """Admin manually marks a payment as received (for bank transfer cases)."""
+    from app.models.order import Order
+    admin_id = get_jwt_identity()
+    try:
+        parsed_id = _parse_admin_id(admin_id)
+    except (ValueError, TypeError):
+        return jsonify({"message": "Unauthorized"}), 401
+    if not _get_admin(parsed_id):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": f"Order #{order_id} not found"}), 404
+
+    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+    if not escrow:
+        return jsonify({"message": f"No escrow record for Order #{order_id}"}), 404
+
+    escrow.status = EscrowStatus.IN_ESCROW
+    db.session.commit()
+
+    logging.info(f"[ADMIN] Escrow verified for Order #{order_id} by admin {parsed_id}")
+    return jsonify({"message": f"Order #{order_id} marked as verified and held in escrow.", "status": "success"}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -2736,87 +2764,6 @@ def run_grants_migration_once():
 # PUBLIC TEST ENDPOINT FOR GRANTS MIGRATION (NO AUTH - REMOVE AFTER USE!)
 # ---------------------------------------------------------------------------
 
-@admin_bp.route('/init-grants-orm-direct', methods=['POST'])
-@limiter.limit("5 per hour")
-def init_grants_orm_direct():
-    """
-    TEMPORARY PUBLIC ENDPOINT - NO AUTH REQUIRED
-    Use this to initialize grants table if admin login doesn't work
-    REMOVE THIS ENDPOINT AFTER SUCCESSFUL MIGRATION!
-    """
-    try:
-        from sqlalchemy import text
-        import os
-        
-        # Check if table already has data
-        result = db.session.execute(text("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'grants'
-            )
-        """))
-        
-        table_exists = result.scalar()
-        
-        if table_exists:
-            # Check if it has data
-            count_result = db.session.execute(text("SELECT COUNT(*) FROM grants"))
-            count = count_result.scalar()
-            
-            if count > 0:
-                return jsonify({
-                    'message': 'Grants table already has data',
-                    'grants_count': count,
-                    'status': 'already_initialized'
-                }), 200
-        
-        # Read SQL migration file
-        sql_file = os.path.join(os.path.dirname(__file__), '..', '..', 'migrations', 'create_grants_table.sql')
-        logging.info(f"[PUBLIC MIGRATION] Reading {sql_file}")
-        
-        if not os.path.exists(sql_file):
-            return jsonify({
-                'message': 'Migration SQL file not found',
-                'path': sql_file,
-                'error': 'File does not exist'
-            }), 500
-        
-        with open(sql_file, 'r', encoding='utf-8') as f:
-            sql_content = f.read()
-        
-        # Execute migration
-        logging.info("[PUBLIC MIGRATION] Executing grants table creation...")
-        db.session.execute(text(sql_content))
-        db.session.commit()
-        
-        # Verify
-        result = db.session.execute(text("""
-            SELECT COUNT(*) as total,
-                   COUNT(*) FILTER (WHERE status = 'open') as open,
-                   COUNT(*) FILTER (WHERE featured = TRUE) as featured
-            FROM grants
-        """))
-        
-        row = result.fetchone()
-        
-        logging.info(f"[PUBLIC MIGRATION SUCCESS] Grants table created with {row[0]} initial records")
-        
-        return jsonify({
-            'message': 'Grants table migration completed successfully',
-            'grants_created': row[0],
-            'open_grants': row[1],
-            'featured_grants': row[2],
-            'warning': '⚠️ REMOVE THIS PUBLIC ENDPOINT IMMEDIATELY AFTER USE!'
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logging.error(f"[PUBLIC MIGRATION ERROR] {str(e)}")
-        return jsonify({
-            'message': 'Migration failed',
-            'error': str(e),
-            'sql_file_path': sql_file if 'sql_file' in locals() else 'unknown'
-        }), 500
 
 
 # ---------------------------------------------------------------------------
