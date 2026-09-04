@@ -135,7 +135,10 @@ def get_settings():
             "website": sf.website,
             "cac_reg": sf.cac_reg,
             "template_options": sf.template_options or {},
-            "social_links": sf.social_links or {},
+            "social_links": {
+                **(sf.social_links or {}),
+                "whatsapp": (sf.social_links or {}).get("whatsapp") or sf.phone or user.phone or "",
+            },
             "working_hours": sf.working_hours or {},
             "meta_title": sf.meta_title,
             "meta_description": sf.meta_description,
@@ -632,6 +635,30 @@ def update_settings():
                 except Exception:
                     pass
             setattr(sf, json_field, val)
+
+    # ── Keep WhatsApp, Phone, and Socials in lockstep ─────────────────────────
+    whatsapp_val = data.get('whatsapp') or (data.get('social_links', {}) if isinstance(data.get('social_links'), dict) else {}).get('whatsapp')
+    if 'phone' in data and not whatsapp_val:
+        whatsapp_val = data['phone']
+
+    if whatsapp_val:
+        clean_phone = str(whatsapp_val).strip()
+        sf.phone = clean_phone
+        user.phone = clean_phone
+        sl = dict(sf.social_links or {})
+        sl['whatsapp'] = clean_phone
+        sf.social_links = sl
+
+    # ── Keep Store Description and Template About in lockstep ─────────────────
+    desc_val = data.get('description') or data.get('store_description') or (data.get('template_options', {}) if isinstance(data.get('template_options'), dict) else {}).get('about_description')
+    if desc_val:
+        clean_desc = str(desc_val).strip()
+        sf.store_description = clean_desc
+        tpl = dict(sf.template_options or {})
+        tpl['about_description'] = clean_desc
+        if not tpl.get('hero_subtext') or tpl.get('hero_subtext') == tpl.get('about_description'):
+            tpl['hero_subtext'] = clean_desc[:120]
+        sf.template_options = tpl
 
     # File uploads
     logo_upload = request.files.get('store_logo') or request.files.get('logo') or request.files.get('store_image')
