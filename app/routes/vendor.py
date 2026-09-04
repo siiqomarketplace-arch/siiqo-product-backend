@@ -221,15 +221,17 @@ def get_vendor_dashboard_stats():
     sf = user.storefront
     store_view_count = sf.view_count if sf else 0
 
-    # All orders for revenue + first-sale detection
+    # Real orders = funded/active orders only (exclude PENDING abandoned checkouts and CANCELLED)
+    # total_orders: orders the vendor actually needs to act on or has acted on
+    # total_revenue: only COMPLETED orders — funds have been released to vendor
     all_orders = Order.query.filter(
         Order.vendor_id == user.id,
-        Order.status.in_(['PAID', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'PENDING_DELIVERY'])
+        Order.status.in_(['PAID', 'PROCESSING', 'PENDING_DELIVERY', 'SHIPPED', 'DELIVERED', 'COMPLETED'])
     ).all()
     total_orders = len(all_orders)
     total_revenue = sum(
         float(o.total_amount) for o in all_orders
-        if o.status in ('COMPLETED', 'PAID', 'DELIVERED', 'SHIPPED')
+        if o.status == 'COMPLETED'
     )
     is_first_sale = (total_orders == 1)
 
@@ -1657,9 +1659,16 @@ def get_vendor_dashboard_stats_legacy():
     if not user:
         return jsonify({"message": "Vendor account required"}), 403
 
-    orders = Order.query.filter_by(vendor_id=user.id).all()
+    # Bug fix: exclude PENDING (unfunded abandoned checkouts) and CANCELLED from total_orders
+    # so the vendor sees only real, actionable orders in their dashboard stats.
+    # Bug fix: revenue = COMPLETED only (funds actually released) — previously counted
+    # PAID/DELIVERED/SHIPPED/IN_ESCROW which overstates realized revenue.
+    orders = Order.query.filter(
+        Order.vendor_id == user.id,
+        Order.status.in_(['PAID', 'PROCESSING', 'PENDING_DELIVERY', 'SHIPPED', 'DELIVERED', 'COMPLETED'])
+    ).all()
     total_orders = len(orders)
-    completed_orders = [o for o in orders if o.status in ('COMPLETED', 'PAID', 'DELIVERED', 'SHIPPED', 'IN_ESCROW')]
+    completed_orders = [o for o in orders if o.status == 'COMPLETED']
     total_revenue = sum(float(o.total_amount) for o in completed_orders)
 
     # First sale check

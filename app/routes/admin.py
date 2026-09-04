@@ -741,9 +741,10 @@ def get_pending_escrow():
 
     from app.models.order import Order, OrderItem
 
+    # Bug fix: exclude PENDING_PAYMENT (abandoned/unpaid checkouts) — only show
+    # funded escrows and active disputes in the admin Escrow & Disputes panel.
     pending = EscrowTransaction.query.filter(
         EscrowTransaction.status.in_([
-            EscrowStatus.PENDING_PAYMENT,
             EscrowStatus.IN_ESCROW,
             EscrowStatus.DISPUTED,
         ])
@@ -752,7 +753,7 @@ def get_pending_escrow():
     result = []
     for e in pending:
         order = e.order
-        buyer = db.session.get(User, order.buyer_id) if order else None
+        buyer = db.session.get(User, order.buyer_id) if (order and order.buyer_id) else None
         vendor = db.session.get(User, order.vendor_id) if order else None
         vendor_store = vendor.storefront if vendor else None
 
@@ -765,6 +766,11 @@ def get_pending_escrow():
                     "price": float(item.price_at_purchase),
                 })
 
+        # Bug fix: fall back to order.buyer_name / order.buyer_email for guest checkouts
+        # (buyer_id is null for guests, so buyer User object is None)
+        resolved_buyer_name  = (buyer.full_name  if buyer else None) or (order.buyer_name  if order else None) or "Guest Buyer"
+        resolved_buyer_email = (buyer.email      if buyer else None) or (order.buyer_email if order else None) or ""
+
         result.append({
             **e.to_dict(),
             # Richer fields for dispute resolution
@@ -774,8 +780,8 @@ def get_pending_escrow():
             "payment_method": order.payment_method if order else None,
             # Buyer
             "buyer_id": buyer.id if buyer else None,
-            "buyer_name": buyer.full_name if buyer else "Unknown",
-            "buyer_email": buyer.email if buyer else "",
+            "buyer_name": resolved_buyer_name,
+            "buyer_email": resolved_buyer_email,
             # Vendor
             "vendor_id": vendor.id if vendor else None,
             "vendor_name": vendor_store.store_name if vendor_store else (vendor.full_name if vendor else "Unknown"),
@@ -3114,10 +3120,14 @@ def admin_storefront_detail(storefront_id):
                                   for p in active_products if p.product_type == 'physical')
 
         # ── Order/revenue stats ───────────────────────────────────────────
+        # Bug fix: 'RELEASED' is an EscrowTransaction status, not an Order status —
+        # removed it. Revenue = COMPLETED only (funds actually released to vendor),
+        # consistent with vendor dashboard and admin GMV stats.
         orders = Order.query.filter_by(vendor_id=sf.vendor_id).all()
-        completed_orders = [o for o in orders if (o.status or '').upper() in ('COMPLETED', 'DELIVERED', 'RELEASED')]
+        completed_orders = [o for o in orders if (o.status or '').upper() == 'COMPLETED']
         total_gmv        = sum(float(o.total_amount or 0) for o in completed_orders)
-        pending_orders   = [o for o in orders if (o.status or '').upper() in ('PENDING', 'PROCESSING', 'PAID')]
+        # pending_orders: funded/active but not yet completed — excludes bare PENDING (unpaid)
+        pending_orders   = [o for o in orders if (o.status or '').upper() in ('PAID', 'PROCESSING', 'PENDING_DELIVERY', 'SHIPPED', 'DELIVERED')]
 
         # ── Event stats ───────────────────────────────────────────────────
         events = Event.query.filter_by(vendor_id=sf.vendor_id, is_deleted=False).all()
