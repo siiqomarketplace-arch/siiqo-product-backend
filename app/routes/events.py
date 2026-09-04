@@ -220,7 +220,7 @@ def create_event():
         if not user or not storefront:
             return jsonify({'message': 'Vendor access required'}), 403
         
-        data = request.form if request.form else (request.get_json() or {})
+        data = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
         
         # Support aliases for field names sent by frontend
         title = (data.get('title') or '').strip()
@@ -360,7 +360,7 @@ def update_event(event_id):
         if not event:
             return jsonify({'message': 'Event not found'}), 404
         
-        data = request.form if request.form else (request.get_json() or {})
+        data = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
         
         # Support field name aliases from frontend
         new_title = (data.get('title') or '').strip()

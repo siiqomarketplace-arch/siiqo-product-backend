@@ -428,7 +428,7 @@ def onboard_vendor():
             "store_slug": user.storefront.store_slug,
         }), 200
 
-    data = request.form if request.form else (request.get_json() or {})
+    data = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
 
     store_name = (data.get('business_name') or data.get('store_name') or '').strip()
     if not store_name:
@@ -577,7 +577,7 @@ def update_settings():
     if not sf:
         return jsonify({"message": "Complete vendor onboarding first"}), 403
 
-    data = request.form if request.form else (request.get_json() or {})
+    data = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
 
     # Scalar fields
     field_map = {
@@ -634,15 +634,17 @@ def update_settings():
             setattr(sf, json_field, val)
 
     # File uploads
-    if 'store_logo' in request.files:
+    logo_upload = request.files.get('store_logo') or request.files.get('logo') or request.files.get('store_image')
+    if logo_upload:
         try:
-            sf.store_logo = save_uploaded_file(request.files['store_logo'], subfolder='storefronts')
+            sf.store_logo = save_uploaded_file(logo_upload, subfolder='storefronts')
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
 
-    if 'banner_url' in request.files:
+    banner_upload = request.files.get('banner_url') or request.files.get('banner') or request.files.get('store_banner')
+    if banner_upload:
         try:
-            sf.banner_url = save_uploaded_file(request.files['banner_url'], subfolder='storefronts')
+            sf.banner_url = save_uploaded_file(banner_upload, subfolder='storefronts')
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
 
