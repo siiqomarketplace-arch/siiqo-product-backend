@@ -18,8 +18,38 @@ Usage:
     python3 audit_and_cleanup_test_data.py --execute
 """
 
+import os
 import sys
 import argparse
+
+# Try loading .env automatically
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+if os.path.exists(env_path):
+    try:
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except Exception:
+        pass
+
+# Fallback defaults so standalone script runs smoothly in any CloudShell / CLI environment
+os.environ.setdefault('FLASK_ENV', 'development')
+os.environ.setdefault('SECRET_KEY', 'siiqo-standalone-audit-script-key-2026')
+os.environ.setdefault('JWT_SECRET_KEY', 'siiqo-standalone-audit-jwt-key-2026')
+os.environ.setdefault(
+    'DATABASE_URL',
+    'postgresql://postgres:BW5t2sWw0NT1KMGrCHfD%25BP6@database-1.c8zsq20ocq7p.us-east-1.rds.amazonaws.com:5432/postgres'
+)
+
 from app import create_app
 from app.extensions import db
 from app.models.user import User, Storefront
