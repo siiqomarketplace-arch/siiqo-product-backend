@@ -3562,11 +3562,15 @@ def cleanup_test_data():
     dry_run = request.json.get('dry_run', True) if request.is_json else True
 
     try:
-        from app.models.order import Order
+        from app.models.order import Order, OrderItem
         from app.models.escrow import EscrowTransaction
         from app.models.payment_link import PaymentLink
         from app.models.event import Event, TicketType, TicketPurchase
-        from app.models.withdrawal import DayaPayment
+        from app.models.withdrawal import DayaPayment, PODPayment
+        from app.models.escrow import LogisticsAssignment
+        from app.models.community import Review
+        from app.models.communication import Notification, Message
+        from app.models.finance import Invoice, Receipt
 
         TARGET_EMAILS = [
             "okerekeinno6@gmail.com",
@@ -3654,13 +3658,6 @@ def cleanup_test_data():
         deleted_orders = len(target_orders)
 
         if target_order_ids:
-            # Nullify or delete references in other tables
-            from app.models.withdrawal import PODPayment
-            from app.models.escrow import LogisticsAssignment
-            from app.models.community import Review
-            from app.models.communication import Notification, Message
-            from app.models.finance import Invoice, Receipt
-
             # Delete any ticket purchases referencing these orders that weren't caught yet
             remaining_tps = TicketPurchase.query.filter(TicketPurchase.order_id.in_(target_order_ids)).all()
             for tp in remaining_tps:
@@ -3729,6 +3726,9 @@ def cleanup_test_data():
 
     except Exception as e:
         db.session.rollback()
-        logging.error(f"[ADMIN][CLEANUP] Cleanup failed: {e}", exc_info=True)
-        return jsonify({"message": f"Cleanup failed: {str(e)}"}), 500
+        import traceback
+        tb = traceback.format_exc()
+        logging.error(f"[ADMIN][CLEANUP] Cleanup failed: {tb}")
+        return jsonify({"status": "FAILED", "error": str(e), "traceback": tb}), 200
+
 
