@@ -3647,8 +3647,11 @@ def cleanup_bizengo():
             db.session.delete(user.storefront)
 
         VendorBankAccount.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
-        # 8. Delete Ledgers, CRM, Reviews, Notifications, Messages, and Social Posts
+        # 8. Delete Ledgers, CRM, Reviews, Notifications, Messages, Social Posts, and Trust Profiles
         from app.models.social import Post, PostComment, PostLike, PostView, UserActivity, Follow
+        from app.models.trust import TrustScoreHistory, VendorTrustProfile
+        from app.models.admin import VendorSubscription
+
         user_posts = Post.query.filter_by(user_id=user.id).all()
         post_ids = [p.id for p in user_posts]
         if post_ids:
@@ -3662,6 +3665,10 @@ def cleanup_bizengo():
         PostView.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         UserActivity.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         Follow.query.filter((Follow.follower_id == user.id) | (Follow.following_id == user.id)).delete(synchronize_session=False)
+
+        TrustScoreHistory.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+        VendorTrustProfile.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+        VendorSubscription.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
 
         Ledger.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
         CustomerProfile.query.filter((CustomerProfile.vendor_id == user.id) | (CustomerProfile.buyer_id == user.id)).delete(synchronize_session=False)
