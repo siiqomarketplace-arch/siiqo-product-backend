@@ -3644,20 +3644,58 @@ def cleanup_test_data():
             for tt in ev.ticket_types:
                 tt.quantity_sold = 0
 
-        # 4. Delete orders + escrow + daya payments
+        # 4. Find all target orders
         target_orders = Order.query.filter(
             Order.vendor_id.in_(target_user_ids) |
             Order.buyer_id.in_(target_user_ids) |
             Order.buyer_email.in_(TARGET_EMAILS)
         ).all()
+        target_order_ids = [o.id for o in target_orders]
         deleted_orders = len(target_orders)
 
-        for o in target_orders:
-            if o.daya_payment:
-                db.session.delete(o.daya_payment)
-            if o.escrow:
-                db.session.delete(o.escrow)
-            db.session.delete(o)
+        if target_order_ids:
+            # Nullify or delete references in other tables
+            from app.models.withdrawal import PODPayment
+            from app.models.escrow import LogisticsAssignment
+            from app.models.community import Review
+            from app.models.communication import Notification, Message
+            from app.models.finance import Invoice, Receipt
+
+            # Delete any ticket purchases referencing these orders that weren't caught yet
+            remaining_tps = TicketPurchase.query.filter(TicketPurchase.order_id.in_(target_order_ids)).all()
+            for tp in remaining_tps:
+                db.session.delete(tp)
+                deleted_tickets += 1
+
+            # Delete POD payments
+            PODPayment.query.filter(PODPayment.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+
+            # Delete Daya payments
+            DayaPayment.query.filter(DayaPayment.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+
+            # Delete Logistics assignments
+            LogisticsAssignment.query.filter(LogisticsAssignment.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+
+            # Delete Reviews
+            Review.query.filter(Review.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+
+            # Nullify order_id on Notifications & Messages (so user messages are not lost)
+            Notification.query.filter(Notification.order_id.in_(target_order_ids)).update({"order_id": None}, synchronize_session=False)
+            Message.query.filter(Message.order_id.in_(target_order_ids)).update({"order_id": None}, synchronize_session=False)
+
+            # Delete or detach Invoices and Receipts linked to test orders
+            Invoice.query.filter(Invoice.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+            Receipt.query.filter(Receipt.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+
+            # Also delete standalone test invoices created by target vendors
+            Invoice.query.filter(Invoice.vendor_id.in_(target_user_ids)).delete(synchronize_session=False)
+
+            # Delete Escrows
+            EscrowTransaction.query.filter(EscrowTransaction.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+
+            # Delete OrderItems and Orders
+            OrderItem.query.filter(OrderItem.order_id.in_(target_order_ids)).delete(synchronize_session=False)
+            Order.query.filter(Order.id.in_(target_order_ids)).delete(synchronize_session=False)
 
         # 5. Delete payment links
         pls = PaymentLink.query.filter(
@@ -3691,5 +3729,6 @@ def cleanup_test_data():
 
     except Exception as e:
         db.session.rollback()
-        logging.error(f"[ADMIN][CLEANUP] Cleanup failed: {e}")
+        logging.error(f"[ADMIN][CLEANUP] Cleanup failed: {e}", exc_info=True)
         return jsonify({"message": f"Cleanup failed: {str(e)}"}), 500
+
