@@ -3631,6 +3631,11 @@ def cleanup_bizengo():
             TicketType.query.filter_by(event_id=ev.id).delete(synchronize_session=False)
             db.session.delete(ev)
 
+        # Delete all cart items referencing bizengo's products across all carts
+        product_ids = [p.id for p in products]
+        if product_ids:
+            CartItem.query.filter(CartItem.product_id.in_(product_ids)).delete(synchronize_session=False)
+
         cart = Cart.query.filter_by(user_id=user.id).first()
         if cart:
             CartItem.query.filter_by(cart_id=cart.id).delete(synchronize_session=False)
