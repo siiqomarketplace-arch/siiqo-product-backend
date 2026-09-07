@@ -3533,3 +3533,163 @@ def admin_storefront_detail(storefront_id):
     except Exception as e:
         logging.error(f"[ADMIN] Error fetching storefront detail: {e}")
         return jsonify({"message": "Failed to load storefront detail"}), 500
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY ONE-TIME CLEANUP ENDPOINT — REMOVE AFTER USE
+# ---------------------------------------------------------------------------
+_CLEANUP_SECRET = "siiqo-cleanup-2026-xK9mP3nQ"
+_CLEANUP_USED = False  # In-memory guard against double execution
+
+@admin_bp.route('/cleanup-test-data', methods=['POST'])
+def cleanup_test_data():
+    """
+    TEMPORARY ENDPOINT: Deletes test orders/escrow/paylinks/tickets for target accounts.
+    Protected by X-Cleanup-Secret header. Preserves events, storefronts, products.
+    REMOVE THIS ENDPOINT AFTER CLEANUP IS DONE.
+    """
+    global _CLEANUP_USED
+
+    # Secret-key guard
+    secret = request.headers.get('X-Cleanup-Secret', '')
+    if secret != _CLEANUP_SECRET:
+        return jsonify({"message": "Forbidden"}), 403
+
+    # One-time guard
+    if _CLEANUP_USED:
+        return jsonify({"message": "Cleanup already executed in this server session. Restart server if you need to run again."}), 409
+
+    dry_run = request.json.get('dry_run', True) if request.is_json else True
+
+    try:
+        from app.models.order import Order
+        from app.models.escrow import EscrowTransaction
+        from app.models.payment_link import PaymentLink
+        from app.models.event import Event, TicketType, TicketPurchase
+        from app.models.withdrawal import DayaPayment
+
+        TARGET_EMAILS = [
+            "okerekeinno6@gmail.com",
+            "tessymoses67@gmail.com",
+            "nspdnigeria@gmail.com",
+        ]
+
+        target_users = User.query.filter(User.email.in_(TARGET_EMAILS)).all()
+        if not target_users:
+            return jsonify({"message": "No target accounts found", "target_emails": TARGET_EMAILS}), 404
+
+        target_user_ids = [u.id for u in target_users]
+
+        # ── AUDIT COUNTS ─────────────────────────────────────────────────────
+        target_events = Event.query.filter(Event.vendor_id.in_(target_user_ids)).all()
+        target_event_ids = [e.id for e in target_events]
+
+        ticket_count_on_events = TicketPurchase.query.filter(
+            TicketPurchase.event_id.in_(target_event_ids)
+        ).count() if target_event_ids else 0
+
+        user_ticket_count = TicketPurchase.query.filter(
+            TicketPurchase.buyer_id.in_(target_user_ids)
+        ).count()
+
+        order_count = Order.query.filter(
+            Order.vendor_id.in_(target_user_ids) |
+            Order.buyer_id.in_(target_user_ids) |
+            Order.buyer_email.in_(TARGET_EMAILS)
+        ).count()
+
+        paylink_count = PaymentLink.query.filter(
+            PaymentLink.vendor_id.in_(target_user_ids)
+        ).count()
+
+        audit = {
+            "target_accounts": [{"id": u.id, "email": u.email} for u in target_users],
+            "orders_to_delete": order_count,
+            "payment_links_to_delete": paylink_count,
+            "ticket_purchases_to_delete": ticket_count_on_events + user_ticket_count,
+            "events_preserved": len(target_events),
+            "dry_run": dry_run,
+        }
+
+        if dry_run:
+            return jsonify({"status": "DRY_RUN", "audit": audit}), 200
+
+        # ── EXECUTION ────────────────────────────────────────────────────────
+        events_to_reset = set()
+
+        # 1. Delete ticket purchases on target events
+        deleted_tickets = 0
+        if target_event_ids:
+            tps_on_events = TicketPurchase.query.filter(
+                TicketPurchase.event_id.in_(target_event_ids)
+            ).all()
+            for tp in tps_on_events:
+                events_to_reset.add(tp.event_id)
+                db.session.delete(tp)
+                deleted_tickets += 1
+
+        # 2. Delete ticket purchases by target users
+        user_tps = TicketPurchase.query.filter(
+            TicketPurchase.buyer_id.in_(target_user_ids)
+        ).all()
+        for utp in user_tps:
+            if utp.event_id:
+                events_to_reset.add(utp.event_id)
+            db.session.delete(utp)
+            deleted_tickets += 1
+
+        # 3. Reset tickets_sold counters on events (events are PRESERVED)
+        for ev in target_events:
+            ev.tickets_sold = 0
+            for tt in ev.ticket_types:
+                tt.quantity_sold = 0
+
+        # 4. Delete orders + escrow + daya payments
+        target_orders = Order.query.filter(
+            Order.vendor_id.in_(target_user_ids) |
+            Order.buyer_id.in_(target_user_ids) |
+            Order.buyer_email.in_(TARGET_EMAILS)
+        ).all()
+        deleted_orders = len(target_orders)
+
+        for o in target_orders:
+            if o.daya_payment:
+                db.session.delete(o.daya_payment)
+            if o.escrow:
+                db.session.delete(o.escrow)
+            db.session.delete(o)
+
+        # 5. Delete payment links
+        pls = PaymentLink.query.filter(
+            PaymentLink.vendor_id.in_(target_user_ids)
+        ).all()
+        deleted_pls = len(pls)
+        for pl in pls:
+            db.session.delete(pl)
+
+        db.session.commit()
+        _CLEANUP_USED = True
+
+        logging.warning(
+            f"[ADMIN][CLEANUP] Test data cleanup executed. "
+            f"Deleted: {deleted_orders} orders, {deleted_pls} paylinks, {deleted_tickets} tickets."
+        )
+
+        return jsonify({
+            "status": "SUCCESS",
+            "deleted": {
+                "orders": deleted_orders,
+                "payment_links": deleted_pls,
+                "ticket_purchases": deleted_tickets,
+            },
+            "preserved": {
+                "events": len(target_events),
+                "events_reset_sold_counters": True,
+            },
+            "message": "Cleanup complete. REMOVE this endpoint and redeploy.",
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[ADMIN][CLEANUP] Cleanup failed: {e}")
+        return jsonify({"message": f"Cleanup failed: {str(e)}"}), 500
