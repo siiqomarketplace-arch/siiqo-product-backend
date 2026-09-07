@@ -875,6 +875,357 @@ def get_all_escrow_transactions():
     return jsonify({"data": result, "count": len(result)}), 200
 
 
+# ---------------------------------------------------------------------------
+# Admin Orders Management
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/orders', methods=['GET'])
+@jwt_required()
+def admin_get_orders():
+    admin_id = get_jwt_identity()
+    if not _get_admin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    from sqlalchemy import or_
+    from app.models.order import Order
+    from app.models.user import Storefront
+
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 30, type=int), 100)
+    status = (request.args.get('status') or '').strip().upper()
+    payment_method = (request.args.get('payment_method') or '').strip().upper()
+    search = (request.args.get('search') or '').strip()
+
+    query = Order.query
+
+    if status and status != 'ALL':
+        query = query.filter(Order.status == status)
+
+    if payment_method and payment_method != 'ALL':
+        query = query.filter(Order.payment_method.ilike(f"%{payment_method}%"))
+
+    if search:
+        search_filter = []
+        if search.isdigit():
+            search_filter.append(Order.id == int(search))
+        search_pattern = f"%{search}%"
+        search_filter.append(Order.buyer_name.ilike(search_pattern))
+        search_filter.append(Order.buyer_email.ilike(search_pattern))
+
+        matching_vendor_ids = db.session.query(Storefront.vendor_id).filter(
+            Storefront.store_name.ilike(search_pattern)
+        ).subquery()
+        search_filter.append(Order.vendor_id.in_(matching_vendor_ids))
+
+        query = query.filter(or_(*search_filter))
+
+    pagination = query.order_by(Order.created_at.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+
+    orders_data = []
+    for order in pagination.items:
+        buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+        vendor = db.session.get(User, order.vendor_id) if order.vendor_id else None
+        store = vendor.storefront if vendor else None
+
+        items = []
+        for itm in (order.items or []):
+            items.append({
+                "id": itm.id,
+                "product_id": itm.product_id,
+                "product_name": itm.product.name if itm.product else "Unknown Product",
+                "quantity": itm.quantity,
+                "price": float(itm.price_at_purchase or 0),
+                "image": itm.product.images[0].image_url if (itm.product and itm.product.images) else None,
+            })
+
+        escrow = order.escrow
+        escrow_data = {
+            "status": escrow.status if escrow else None,
+            "transaction_number": escrow.transaction_number if escrow else None,
+            "fee_amount": float(escrow.fee_amount or 0) if escrow else 0.0,
+            "released_at": escrow.released_at.isoformat() if (escrow and escrow.released_at) else None,
+        } if escrow else None
+
+        orders_data.append({
+            "id": order.id,
+            "order_number": f"#{order.id}",
+            "status": order.status,
+            "total_amount": float(order.total_amount or 0),
+            "currency": "NGN",
+            "payment_method": order.payment_method or "PAYSTACK",
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "updated_at": order.updated_at.isoformat() if order.updated_at else None,
+            "buyer": {
+                "id": buyer.id if buyer else None,
+                "name": (buyer.full_name if buyer else None) or order.buyer_name or "Guest Buyer",
+                "email": (buyer.email if buyer else None) or order.buyer_email or "",
+                "phone": (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', '') or "",
+            },
+            "vendor": {
+                "id": vendor.id if vendor else None,
+                "store_name": store.store_name if store else (vendor.full_name if vendor else "Unknown Vendor"),
+                "email": vendor.email if vendor else "",
+                "phone": vendor.phone if vendor else "",
+            },
+            "items_count": len(items),
+            "items": items,
+            "shipping_address": getattr(order, 'shipping_address', None),
+            "escrow": escrow_data,
+        })
+
+    return jsonify({
+        "status": "success",
+        "orders": orders_data,
+        "total": pagination.total,
+        "pages": pagination.pages,
+        "page": page,
+        "per_page": per_page,
+    }), 200
+
+
+@admin_bp.route('/orders/<int:order_id>', methods=['GET'])
+@jwt_required()
+def admin_get_order_detail(order_id):
+    admin_id = get_jwt_identity()
+    if not _get_admin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    from app.models.order import Order
+    from app.models.withdrawal import DayaPayment, VendorBankAccount
+
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+
+    buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+    vendor = db.session.get(User, order.vendor_id) if order.vendor_id else None
+    store = vendor.storefront if vendor else None
+    escrow = order.escrow
+
+    daya_payment = DayaPayment.query.filter_by(order_id=order.id).first()
+    vendor_bank = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first() or \
+                  VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
+
+    items = []
+    for itm in (order.items or []):
+        items.append({
+            "id": itm.id,
+            "product_id": itm.product_id,
+            "product_name": itm.product.name if itm.product else "Unknown Product",
+            "quantity": itm.quantity,
+            "price": float(itm.price_at_purchase or 0),
+            "image": itm.product.images[0].image_url if (itm.product and itm.product.images) else None,
+        })
+
+    return jsonify({
+        "status": "success",
+        "order": {
+            "id": order.id,
+            "order_number": f"#{order.id}",
+            "status": order.status,
+            "total_amount": float(order.total_amount or 0),
+            "payment_method": order.payment_method or "PAYSTACK",
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "updated_at": order.updated_at.isoformat() if order.updated_at else None,
+            "shipping_address": getattr(order, 'shipping_address', None),
+            "buyer": {
+                "id": buyer.id if buyer else None,
+                "name": (buyer.full_name if buyer else None) or order.buyer_name or "Guest Buyer",
+                "email": (buyer.email if buyer else None) or order.buyer_email or "",
+                "phone": (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', '') or "",
+            },
+            "vendor": {
+                "id": vendor.id if vendor else None,
+                "store_name": store.store_name if store else (vendor.full_name if vendor else "Unknown Vendor"),
+                "email": vendor.email if vendor else "",
+                "phone": vendor.phone if vendor else "",
+                "bank_name": vendor_bank.bank_name if vendor_bank else (store.bank_name if store else None),
+                "account_number": vendor_bank.account_number if vendor_bank else (store.account_number if store else None),
+                "account_name": vendor_bank.account_name if vendor_bank else (store.account_name if store else None),
+            },
+            "items": items,
+            "escrow": {
+                "status": escrow.status if escrow else None,
+                "transaction_number": escrow.transaction_number if escrow else None,
+                "fee_percent": float(escrow.fee_percent or 0) if escrow else 0.0,
+                "fee_amount": float(escrow.fee_amount or 0) if escrow else 0.0,
+                "released_at": escrow.released_at.isoformat() if (escrow and escrow.released_at) else None,
+                "dispute_id": escrow.dispute_id if escrow else None,
+                "dispute_reason": escrow.dispute_reason if escrow else None,
+            } if escrow else None,
+            "daya_payment": daya_payment.to_dict() if daya_payment else None,
+        }
+    }), 200
+
+
+@admin_bp.route('/orders/<int:order_id>/status', methods=['PATCH'])
+@jwt_required()
+def admin_update_order_status(order_id):
+    admin_id = get_jwt_identity()
+    admin = _get_admin(_parse_admin_id(admin_id))
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 403
+
+    from app.models.order import Order
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+
+    data = request.get_json() or {}
+    new_status = (data.get('status') or '').strip().upper()
+    valid_statuses = ['PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'CANCELLED', 'DISPUTED']
+    if new_status not in valid_statuses:
+        return jsonify({"message": f"Invalid status. Must be one of {valid_statuses}"}), 400
+
+    old_status = order.status
+    order.status = new_status
+    db.session.commit()
+
+    logger.info("[ADMIN] Admin %s updated Order #%s status from %s to %s", admin.id, order.id, old_status, new_status)
+
+    return jsonify({
+        "status": "success",
+        "message": f"Order #{order.id} status updated to {new_status}",
+        "order": {"id": order.id, "status": order.status}
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# Admin Financial Transactions Ledger
+# ---------------------------------------------------------------------------
+
+@admin_bp.route('/transactions', methods=['GET'])
+@jwt_required()
+def admin_get_transactions():
+    admin_id = get_jwt_identity()
+    if not _get_admin(_parse_admin_id(admin_id)):
+        return jsonify({"message": "Unauthorized"}), 403
+
+    from sqlalchemy import func
+    from app.models.withdrawal import DayaPayment, Withdrawal
+    from app.models.escrow import EscrowTransaction, EscrowStatus
+
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 50, type=int), 100)
+    tx_type = (request.args.get('type') or 'ALL').strip().upper()
+    search = (request.args.get('search') or '').strip()
+
+    escrows = EscrowTransaction.query.order_by(EscrowTransaction.created_at.desc()).limit(200).all()
+    daya_payments = DayaPayment.query.order_by(DayaPayment.created_at.desc()).limit(100).all()
+    withdrawals = Withdrawal.query.order_by(Withdrawal.requested_at.desc()).limit(100).all()
+
+    total_volume = float(db.session.query(func.sum(EscrowTransaction.amount)).scalar() or 0)
+    total_fees = float(db.session.query(func.sum(EscrowTransaction.fee_amount)).scalar() or 0)
+    pending_escrow = float(
+        db.session.query(func.sum(EscrowTransaction.amount))
+        .filter(EscrowTransaction.status.in_([EscrowStatus.IN_ESCROW, EscrowStatus.DISPUTED]))
+        .scalar() or 0
+    )
+    total_payouts = float(
+        db.session.query(func.sum(EscrowTransaction.amount - EscrowTransaction.fee_amount))
+        .filter(EscrowTransaction.status == EscrowStatus.RELEASED)
+        .scalar() or 0
+    )
+
+    transactions = []
+
+    for e in escrows:
+        o = e.order
+        vendor = db.session.get(User, o.vendor_id) if o else None
+        buyer = db.session.get(User, o.buyer_id) if (o and o.buyer_id) else None
+        store = vendor.storefront if vendor else None
+
+        transactions.append({
+            "id": f"ESC-{e.id}",
+            "reference": e.transaction_number,
+            "type": "ESCROW_PAYMENT" if e.status != EscrowStatus.RELEASED else "ESCROW_RELEASED",
+            "category": "Escrow",
+            "amount": float(e.amount),
+            "fee": float(e.fee_amount or 0),
+            "currency": e.currency or "NGN",
+            "provider": "PAYSTACK" if (o and (o.payment_method or '').upper() == 'PAYSTACK') else "DAYA",
+            "status": e.status,
+            "order_id": o.id if o else None,
+            "vendor_name": store.store_name if store else (vendor.full_name if vendor else "Vendor"),
+            "buyer_name": (buyer.full_name if buyer else None) or (o.buyer_name if o else None) or "Buyer",
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        })
+
+    for dp in daya_payments:
+        transactions.append({
+            "id": f"DAYA-{dp.id}",
+            "reference": dp.daya_deposit_id or f"DEP-{dp.id}",
+            "type": "CRYPTO_DEPOSIT",
+            "category": "Crypto / Daya",
+            "amount": float(dp.amount_ngn or 0),
+            "fee": 0.0,
+            "currency": "NGN",
+            "crypto_amount": dp.amount_crypto,
+            "asset": dp.asset,
+            "provider": "DAYA",
+            "status": dp.status,
+            "order_id": dp.order_id,
+            "vendor_name": "Siiqo Platform",
+            "buyer_name": dp.account_name or "Crypto Buyer",
+            "created_at": dp.created_at.isoformat() if dp.created_at else None,
+        })
+
+    for w in withdrawals:
+        v = db.session.get(User, w.vendor_id) if w.vendor_id else None
+        vs = v.storefront if v else None
+        transactions.append({
+            "id": f"WD-{w.id}",
+            "reference": w.transfer_reference or f"WD-{w.id}",
+            "type": "VENDOR_WITHDRAWAL",
+            "category": "Payout",
+            "amount": float(w.amount or 0),
+            "fee": float(w.fee_amount or 0),
+            "currency": "NGN",
+            "provider": "BANK_TRANSFER",
+            "status": w.status,
+            "order_id": None,
+            "vendor_name": vs.store_name if vs else (v.full_name if v else "Vendor"),
+            "buyer_name": "-",
+            "created_at": w.requested_at.isoformat() if w.requested_at else None,
+        })
+
+    transactions.sort(key=lambda x: x["created_at"] or "", reverse=True)
+
+    if tx_type and tx_type != "ALL":
+        transactions = [t for t in transactions if tx_type in t["type"] or tx_type in t["category"].upper()]
+
+    if search:
+        s_low = search.lower()
+        transactions = [
+            t for t in transactions
+            if s_low in str(t["reference"]).lower()
+            or s_low in str(t.get("order_id") or "")
+            or s_low in str(t["vendor_name"]).lower()
+            or s_low in str(t["buyer_name"]).lower()
+        ]
+
+    total_count = len(transactions)
+    start = (page - 1) * per_page
+    end = start + per_page
+    paginated_transactions = transactions[start:end]
+
+    return jsonify({
+        "status": "success",
+        "summary": {
+            "total_volume": total_volume,
+            "total_fees": total_fees,
+            "pending_escrow": pending_escrow,
+            "total_payouts": total_payouts,
+        },
+        "transactions": paginated_transactions,
+        "total": total_count,
+        "page": page,
+        "per_page": per_page,
+    }), 200
+
+
 @admin_bp.route('/escrow/refund/<int:order_id>', methods=['POST'])
 @jwt_required()
 @limiter.limit("20 per hour")  # Strict rate limit on financial operations

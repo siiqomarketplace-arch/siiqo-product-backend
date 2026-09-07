@@ -57,6 +57,7 @@ from app.models.order import Order, OrderItem
 from app.models.escrow import EscrowTransaction
 from app.models.payment_link import PaymentLink
 from app.models.event import Event, TicketType, TicketPurchase
+from app.models.withdrawal import DayaPayment
 
 TARGET_EMAILS = [
     "okerekeinno6@gmail.com",
@@ -218,6 +219,9 @@ def main():
 
             deleted_orders_count = len(target_orders)
             for o in target_orders:
+                # Delete linked DayaPayment if any (NOT NULL constraint — must delete before order)
+                if o.daya_payment:
+                    db.session.delete(o.daya_payment)
                 # Delete linked escrow transaction if any
                 if o.escrow:
                     db.session.delete(o.escrow)

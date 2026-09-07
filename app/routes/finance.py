@@ -50,17 +50,27 @@ def _get_or_create_branding(user_id: int) -> BrandingSettings:
 
 
 def _next_invoice_number(settings: BrandingSettings) -> str:
-    prefix = settings.invoice_prefix or 'INV'
+    prefix = settings.invoice_prefix or f"INV{settings.vendor_id}"
     num = settings.invoice_next_number or 1
+    while True:
+        cand = f"{prefix}-{num:04d}"
+        if not db.session.query(db.exists().where(Invoice.invoice_number == cand)).scalar():
+            break
+        num += 1
     settings.invoice_next_number = num + 1
-    return f"{prefix}-{num:04d}"
+    return cand
 
 
 def _next_receipt_number(settings: BrandingSettings) -> str:
-    prefix = settings.receipt_prefix or 'RCP'
+    prefix = settings.receipt_prefix or f"RCP{settings.vendor_id}"
     num = settings.receipt_next_number or 1
+    while True:
+        cand = f"{prefix}-{num:04d}"
+        if not db.session.query(db.exists().where(Receipt.receipt_number == cand)).scalar():
+            break
+        num += 1
     settings.receipt_next_number = num + 1
-    return f"{prefix}-{num:04d}"
+    return cand
 
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -311,7 +321,25 @@ from flask import current_app
 @limiter.limit("30 per minute")
 def create_invoice():
     """Create a new standalone invoice"""
-    user_id = get_jwt_identity()
+    user_id = int(get_jwt_identity())
+
+    # Enforce Siiqo Pro subscription for invoicing
+    from app.models.admin import VendorSubscription
+    sf = Storefront.query.filter_by(vendor_id=user_id).first()
+    _now = datetime.now(timezone.utc)
+    active_sub = VendorSubscription.query.filter(
+        VendorSubscription.vendor_id == user_id,
+        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
+        VendorSubscription.end_date > _now,
+    ).first()
+    is_pro = bool((sf and sf.is_pro_active) or active_sub)
+    if not is_pro:
+        return jsonify({
+            'message': 'Invoicing and billing tools require an active Siiqo Pro subscription.',
+            'upgrade_required': True,
+            'code': 'PRO_SUBSCRIPTION_REQUIRED',
+        }), 403
+
     data = request.get_json() or {}
 
     customer_name = (data.get('customer_name') or '').strip()

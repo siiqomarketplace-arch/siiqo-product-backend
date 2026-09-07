@@ -827,8 +827,9 @@ def _payout_vendor_via_daya(order, escrow):
     # ── Step 1: Move collection → withdrawal so funds are available to send ──────
     # Fetch live rate dynamically from Daya (with fallback to locked payment rate or 1500)
     current_rate = float(dp.rate) if (dp and dp.rate and float(dp.rate) > 0) else 1500.0
+    rate_asset = (dp.asset if (dp and dp.asset) else "USDT")
     try:
-        rate_data = daya_service.get_rate(asset=dp.asset if dp else "USDT", side="SELL")
+        rate_data = daya_service.get_rate(asset=rate_asset, side="SELL")
         if rate_data and rate_data.get("rate"):
             current_rate = float(rate_data["rate"])
     except Exception as _rate_exc:
@@ -943,17 +944,38 @@ def _payout_vendor_via_daya(order, escrow):
             "Cannot auto-payout. NGN%.2f is still in Daya withdrawal balance.",
             order.id, order.vendor_id, net_amount_ngn
         )
+        notif_msg = (
+            f"Your order #{order.id} is complete and payment is confirmed. "
+            "To receive your payout, please add your bank account in "
+            "Escrow & Payouts (/vendor/escrow). Contact support@siiqo.com if you need help."
+        )
         db.session.add(Notification(
             user_id=order.vendor_id,
             title="Payout Pending — Add Bank Account",
-            message=(
-                f"Your order #{order.id} is complete and payment is confirmed. "
-                "To receive your payout, please add your bank account in "
-                "Settings → Payout Settings. Contact support@siiqo.com if you need help."
-            ),
+            message=notif_msg,
             type="ESCROW",
             order_id=order.id,
         ))
+        db.session.commit()
+
+        # Send email alert to vendor if email exists
+        from app.models.user import User
+        vendor_user = order.vendor if hasattr(order, 'vendor') and order.vendor else db.session.get(User, order.vendor_id)
+        if vendor_user and vendor_user.email:
+            try:
+                from app.utils.email import send_siiqo_email
+                send_siiqo_email(
+                    to_email=vendor_user.email,
+                    subject=f"Action Required: Add bank account to receive payout for Order #{order.id}",
+                    template_name="base_notification",
+                    first_name=vendor_user.first_name or "Vendor",
+                    title="Payout Pending — Add Bank Account",
+                    message=notif_msg,
+                    cta_text="Add Bank Details",
+                    cta_url="https://siiqo.com/vendor/escrow",
+                )
+            except Exception as _em_err:
+                logger.info("[EMAIL] Could not send payout bank alert email: %s", _em_err)
         return
 
     # Attempt the NGN transfer directly — no pre-resolve needed.

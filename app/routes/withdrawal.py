@@ -1088,6 +1088,41 @@ def add_daya_bank_account():
     logging.info("[DAYA BANK REG] Vendor %s registered Daya bank: %s %s (%s)",
                  vendor_id, bank_name, account_number[-4:], bank_code)
 
+    # Auto-retry any pending stalled payouts for this vendor now that bank account is added
+    try:
+        from app.models.order import Order
+        from app.routes.payments import _payout_vendor_via_daya
+
+        # Find all orders where vendor had a stalled payout notification
+        pending_payout_notifs = Notification.query.filter_by(
+            user_id=vendor_id,
+            title="Payout Pending — Add Bank Account",
+        ).all()
+
+        for notif in pending_payout_notifs:
+            if not notif.order_id:
+                continue
+            # Check if this order was already successfully paid
+            already_sent = Notification.query.filter_by(
+                user_id=vendor_id,
+                order_id=notif.order_id,
+                title="Payment On Its Way",
+            ).first()
+            if already_sent:
+                continue
+
+            order_to_pay = db.session.get(Order, notif.order_id)
+            if not order_to_pay or not order_to_pay.escrow:
+                continue
+
+            logging.info(
+                "[DAYA RETRY] Auto-retrying stalled payout for Order #%s after bank account added by vendor %s",
+                order_to_pay.id, vendor_id,
+            )
+            _payout_vendor_via_daya(order_to_pay, order_to_pay.escrow)
+    except Exception as retry_err:
+        logging.warning("[DAYA RETRY] Error auto-retrying stalled payouts: %s", retry_err)
+
     return jsonify({
         "status": "success",
         "message": "Bank account registered successfully" + (f" — verified as {account_name}" if account_name else ""),

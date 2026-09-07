@@ -104,8 +104,7 @@ def auto_release_escrow():
             else:
                 logger.info(
                     f"  [AUTO-RELEASE] Order #{order.id} — releasing escrow record internally."
-                )               "— releasing internally"
-                        )
+                )
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = utcnow()
             order.status = 'COMPLETED'
