@@ -3647,7 +3647,19 @@ def cleanup_bizengo():
             db.session.delete(user.storefront)
 
         VendorBankAccount.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
-        VendorCryptoWallet.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+        # 8. Delete Ledgers, CRM, Reviews, Notifications, Messages, and Social Posts
+        from app.models.social import Post, PostComment, PostLike, PostView
+        user_posts = Post.query.filter_by(user_id=user.id).all()
+        post_ids = [p.id for p in user_posts]
+        if post_ids:
+            PostComment.query.filter(PostComment.post_id.in_(post_ids)).delete(synchronize_session=False)
+            PostLike.query.filter(PostLike.post_id.in_(post_ids)).delete(synchronize_session=False)
+            PostView.query.filter(PostView.post_id.in_(post_ids)).delete(synchronize_session=False)
+            Post.query.filter(Post.id.in_(post_ids)).delete(synchronize_session=False)
+
+        PostComment.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        PostLike.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        PostView.query.filter_by(user_id=user.id).delete(synchronize_session=False)
 
         Ledger.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
         CustomerProfile.query.filter((CustomerProfile.vendor_id == user.id) | (CustomerProfile.buyer_id == user.id)).delete(synchronize_session=False)
