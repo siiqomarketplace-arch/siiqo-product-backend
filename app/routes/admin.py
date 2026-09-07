@@ -3646,6 +3646,9 @@ def cleanup_bizengo():
                 db.session.delete(p)
             db.session.delete(user.storefront)
 
+        from app.models.product import Product, Catalog
+        Catalog.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
+
         VendorBankAccount.query.filter_by(vendor_id=user.id).delete(synchronize_session=False)
         # 8. Delete Ledgers, CRM, Reviews, Notifications, Messages, Social Posts, and Trust Profiles
         from app.models.social import Post, PostComment, PostLike, PostView, UserActivity, Follow
