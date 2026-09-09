@@ -97,9 +97,12 @@ def admin_login():
     - Audit logging
     - Anomaly detection (SQL injection, XSS)
     """
-    from flask_limiter.util import get_remote_address
-    
-    ip = get_remote_address()
+    try:
+        from app.extensions import get_real_client_ip
+        ip = get_real_client_ip()
+    except Exception:
+        from flask_limiter.util import get_remote_address
+        ip = get_remote_address()
     
     # Check if IP is currently blocked
     is_blocked, block_reason = brute_force.is_blocked(ip)

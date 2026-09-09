@@ -21,9 +21,29 @@ from typing import Optional, Dict, Tuple
 
 from flask import request, jsonify, session
 from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address as _limiter_get_remote_address
 from app.extensions import get_real_client_ip
 
 logger = logging.getLogger(__name__)
+
+
+def get_remote_address() -> str:
+    """
+    Safely extract real client IP behind reverse proxies (Cloudflare, AWS ALB),
+    with multiple layers of fallback to guarantee no uncaught exception or NameError.
+    """
+    try:
+        ip = get_real_client_ip()
+        if ip:
+            return ip
+    except Exception:
+        pass
+
+    try:
+        return _limiter_get_remote_address()
+    except Exception:
+        return '127.0.0.1'
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RATE LIMITER CONFIGURATION
