@@ -32,7 +32,7 @@ class User(db.Model):
     is_verified = db.Column(db.Boolean, default=False)   # email verified
     is_active = db.Column(db.Boolean, default=True)      # account not suspended
 
-    # OTP â€” shared for email verification + password reset
+    # OTP — shared for email verification + password reset
     reset_otp = db.Column(db.String(10), nullable=True)
     otp_expiry = db.Column(db.DateTime(timezone=True), nullable=True)
 
@@ -74,7 +74,7 @@ class User(db.Model):
         name = f"{self.first_name or ''} {self.last_name or ''}".strip()
         if name:
             return name
-        # Generate a friendly username from email (e.g. "john.doe@gmail.com" â†’ "john.doe")
+        # Generate a friendly username from email (e.g. "john.doe@gmail.com" → "john.doe")
         prefix = self.email.split('@')[0]
         # Replace dots/underscores/hyphens with spaces and title-case
         friendly = prefix.replace('.', ' ').replace('_', ' ').replace('-', ' ').title()
@@ -176,6 +176,13 @@ class Storefront(db.Model):
     meta_title = db.Column(db.String(255), nullable=True)
     meta_description = db.Column(db.Text, nullable=True)
 
+    # Ad Tracking Pixels — self-serve, vendor-owned
+    # Vendors paste their pixel IDs in Settings → Marketing & Ads.
+    # Siiqo injects the pixel scripts into their storefront automatically.
+    meta_pixel_id      = db.Column(db.String(50), nullable=True)   # Meta / Facebook Pixel
+    tiktok_pixel_id    = db.Column(db.String(50), nullable=True)   # TikTok Pixel
+    ga4_measurement_id = db.Column(db.String(50), nullable=True)   # Google Analytics 4 (G-XXXXXXXX)
+
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -194,7 +201,7 @@ class Storefront(db.Model):
         """True when vendor is Pro Verified and subscription has not expired."""
         now_dt = utcnow()
         return bool(
-            self.is_pro_verified and 
+            self.is_pro_verified and
             (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
         )
 
@@ -227,7 +234,7 @@ class Storefront(db.Model):
 
         now_dt = utcnow()
         is_pro_active = bool(
-            self.is_pro_verified and 
+            self.is_pro_verified and
             (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
         )
         badge_verified = bool(is_pro_active or self.verification_status == 'VERIFIED')
@@ -256,7 +263,7 @@ class Storefront(db.Model):
             "badge_verified": badge_verified,
             "pro_verified_expires_at": self.pro_verified_expires_at.isoformat() if self.pro_verified_expires_at else None,
             "view_count": self.view_count or 0,
-            # â”€â”€ vendor identity (required for chat / messaging) â”€â”€
+            # ── vendor identity (required for chat / messaging) ──
             "vendor_id": self.vendor_id,
             "user_id": self.vendor_id,
             "vendor_phone": self.phone,
@@ -265,19 +272,23 @@ class Storefront(db.Model):
                 if (self.social_links or {}).get('whatsapp') or self.phone
                 else None
             ),
-            # â”€â”€ trust fields â”€â”€
+            # ── trust fields ──
             "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
             "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
-            # â”€â”€ verification fields â”€â”€
+            # ── verification fields ──
             "account_type": self.account_type,
             "cac_reg": self.cac_reg,
             "nin_document_url": self.nin_document_url,
             "cac_document_url": self.cac_document_url,
             "verification_status": self.verification_status,
-            # â”€â”€ calculated fields â”€â”€
+            # ── calculated fields ──
             "avg_rating": avg_rating,
             "rating": avg_rating,
             "review_count": review_count,
             "latitude": lat,
             "longitude": lng,
+            # ── ad tracking pixels (self-serve) ──
+            "meta_pixel_id":      self.meta_pixel_id or None,
+            "tiktok_pixel_id":    self.tiktok_pixel_id or None,
+            "ga4_measurement_id": self.ga4_measurement_id or None,
         }

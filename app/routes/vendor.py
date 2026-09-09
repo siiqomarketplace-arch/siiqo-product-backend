@@ -601,6 +601,10 @@ def update_settings():
         'meta_title': 'meta_title',
         'meta_description': 'meta_description',
         'logo_url': 'store_logo',
+        # Ad tracking pixels — self-serve
+        'meta_pixel_id':      'meta_pixel_id',
+        'tiktok_pixel_id':    'tiktok_pixel_id',
+        'ga4_measurement_id': 'ga4_measurement_id',
     }
     for form_key, model_attr in field_map.items():
         if form_key in data:
