@@ -1,9 +1,13 @@
 # Siiqo Backend v2.0.1 - Deployment Trigger
 import os
+import logging
 from flask import Flask, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 from app.config import config
 from app.extensions import db, migrate, jwt, cors, limiter
+
+logger = logging.getLogger(__name__)
+_SCHEDULER_LOCK_FILE = None
 
 
 def create_app(config_name: str | None = None) -> Flask:
@@ -12,7 +16,7 @@ def create_app(config_name: str | None = None) -> Flask:
 
     app = Flask(__name__)
     # Trust reverse proxy headers (Cloudflare & Elastic Beanstalk ALB/Nginx)
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=2, x_proto=2, x_host=1)
     app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
 
@@ -559,21 +563,30 @@ def create_app(config_name: str | None = None) -> Flask:
     # Background scheduler — escrow auto-release and delivery reminders
     # Only starts in worker 1 (the first gunicorn worker) to avoid duplicate
     # jobs firing across all 4 workers.
-    # Gunicorn sets the env var WORKER_ID via --worker-class; we detect by
-    # checking os.getpid() vs the parent. The reliable cross-platform approach
-    # is to use a file-based lock so only ONE process actually starts the
-    # scheduler regardless of how many workers gunicorn spawns.
+    # We use a persistent file-based lock so only ONE process actually starts
+    # the scheduler regardless of how many workers gunicorn spawns.
     # Set DISABLE_SCHEDULER=true in .env to turn off entirely.
     # -----------------------------------------------------------------------
+    global _SCHEDULER_LOCK_FILE
     _scheduler_lock_acquired = False
     if not app.config.get('TESTING') and not os.environ.get('DISABLE_SCHEDULER'):
-        import fcntl, tempfile
         try:
-            _lock_file = open(os.path.join(tempfile.gettempdir(), 'siiqo_scheduler.lock'), 'w')
-            fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            import fcntl, tempfile
+            lock_path = os.path.join(tempfile.gettempdir(), 'siiqo_scheduler.lock')
+            _lock = open(lock_path, 'a')
+            fcntl.flock(_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _SCHEDULER_LOCK_FILE = _lock
+            app._scheduler_lock_file = _lock
             _scheduler_lock_acquired = True
+            logger.info(f"[SCHEDULER] Acquired exclusive lock (PID {os.getpid()}) — starting background scheduler.")
         except (IOError, OSError):
-            pass  # Another worker already holds the lock — skip scheduler
+            # Another Gunicorn worker process already holds the lock — skip scheduler
+            logger.info(f"[SCHEDULER] PID {os.getpid()} skipped scheduler startup (already active in primary worker).")
+        except ImportError:
+            # Platform without fcntl (e.g. Windows in local development)
+            if not _SCHEDULER_LOCK_FILE:
+                _scheduler_lock_acquired = True
+                _SCHEDULER_LOCK_FILE = True
 
     if _scheduler_lock_acquired:
         try:

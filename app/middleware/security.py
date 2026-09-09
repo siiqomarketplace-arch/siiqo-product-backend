@@ -21,7 +21,7 @@ from typing import Optional, Dict, Tuple
 
 from flask import request, jsonify, session
 from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+from app.extensions import get_real_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def get_redis_url():
 
 
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=get_real_client_ip,
     storage_uri=get_redis_url(),
     default_limits=["2000 per hour", "100 per minute"],
     strategy="fixed-window",

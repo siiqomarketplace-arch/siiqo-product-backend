@@ -261,6 +261,7 @@ def get_storefronts():
 # ---------------------------------------------------------------------------
 
 @public_bp.route('/store/<string:slug>', methods=['GET'])
+@limiter.limit("120 per minute")
 def get_storefront_details(slug):
     s = Storefront.query.filter_by(store_slug=slug).first()
     if not s:

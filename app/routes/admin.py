@@ -879,6 +879,21 @@ def get_all_escrow_transactions():
 # Admin Orders Management
 # ---------------------------------------------------------------------------
 
+def _extract_product_image(product):
+    """Safely extract product image URL whether images is list of strings, dicts, or objects."""
+    if not product:
+        return None
+    images = getattr(product, 'images', None)
+    if not images or not isinstance(images, (list, tuple)) or len(images) == 0:
+        return None
+    first = images[0]
+    if isinstance(first, str):
+        return first
+    if isinstance(first, dict):
+        return first.get('image_url') or first.get('url') or None
+    return getattr(first, 'image_url', None) or getattr(first, 'url', None) or str(first)
+
+
 @admin_bp.route('/orders', methods=['GET'])
 @jwt_required()
 def admin_get_orders():
@@ -937,7 +952,7 @@ def admin_get_orders():
                 "product_name": itm.product.name if itm.product else "Unknown Product",
                 "quantity": itm.quantity,
                 "price": float(itm.price_at_purchase or 0),
-                "image": itm.product.images[0].image_url if (itm.product and itm.product.images) else None,
+                "image": _extract_product_image(itm.product),
             })
 
         escrow = order.escrow
@@ -1016,7 +1031,7 @@ def admin_get_order_detail(order_id):
             "product_name": itm.product.name if itm.product else "Unknown Product",
             "quantity": itm.quantity,
             "price": float(itm.price_at_purchase or 0),
-            "image": itm.product.images[0].image_url if (itm.product and itm.product.images) else None,
+            "image": _extract_product_image(itm.product),
         })
 
     return jsonify({
