@@ -3,6 +3,7 @@ import logging
 public.py — Public marketplace routes (no auth required)
 """
 from flask import Blueprint, request, jsonify
+from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 from app.extensions import db, limiter
 from app.models.product import Product, Category
@@ -383,7 +384,10 @@ def get_sitemap_data():
         .join(User, Storefront.vendor_id == User.id)
         .filter(
             Product.is_active == True,
-            Product.stock_quantity > 0,
+            or_(
+                Product.stock_quantity > 0,
+                Product.product_type.in_(['digital', 'service'])
+            ),
             Storefront.is_published == True,
             User.is_active == True,
         )
