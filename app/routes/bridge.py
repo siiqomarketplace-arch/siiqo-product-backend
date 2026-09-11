@@ -444,6 +444,10 @@ def buyer_order_history():
                         escrow_check.status = EscrowStatus.IN_ESCROW
                         escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
                         o.status = 'PAID'
+                        from app.routes.escrow import _deliver_digital_products, _deliver_service_products, _deliver_event_tickets
+                        if not _deliver_digital_products(o, escrow_check):
+                            if not _deliver_service_products(o, escrow_check):
+                                _deliver_event_tickets(o, escrow_check)
                         db.session.commit()
                 except Exception as sync_err:
                     logging.warning(f"Payment sync failed for order #{o.id}: {sync_err}")
@@ -468,6 +472,12 @@ def buyer_order_history():
             "booking_link": (item.product.booking_link if item.product else None),
         } for item in (o.items or [])]
 
+        is_all_digital = bool(items) and all(item.get("product_type") == "digital" for item in items)
+        if is_all_digital and o.status == 'PAID' and escrow:
+            from app.routes.escrow import _deliver_digital_products
+            _deliver_digital_products(o, escrow)
+            db.session.commit()
+
         result.append({
             "id": o.id,
             "order_id": o.id,
@@ -490,10 +500,11 @@ def buyer_order_history():
             "store_name": (vendor_store.store_name if vendor_store else None),
             "vendor_id": o.vendor_id,
             "items": items,
+            "is_digital": is_all_digital,
             # Escrow fields
             "escrow_status": escrow.status if escrow else None,
             "transaction_number": escrow.transaction_number if escrow else None,
-            "delivery_otp": escrow.escrow_code if escrow else None,
+            "delivery_otp": None if is_all_digital else (escrow.escrow_code if escrow else None),
             "logistics": o.logistics_provider_id if hasattr(o, 'logistics_provider_id') else None,
             "city": o.delivery_city if hasattr(o, 'delivery_city') else None,
         })
@@ -521,11 +532,17 @@ def get_buyer_order_detail(order_id):
         "booking_link": (item.product.booking_link if item.product else None),
     } for item in (order.items or [])]
 
+    is_all_digital = bool(items) and all(item.get("product_type") == "digital" for item in items)
+
     vendor = db.session.get(User, order.vendor_id)
     vendor_store = vendor.storefront if vendor else None
     buyer = db.session.get(User, int(user_id))
 
     escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    if is_all_digital and order.status == 'PAID' and escrow:
+        from app.routes.escrow import _deliver_digital_products
+        _deliver_digital_products(order, escrow)
+        db.session.commit()
 
     from app.models.escrow import LogisticsAssignment
     assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
@@ -535,11 +552,13 @@ def get_buyer_order_detail(order_id):
         "order": {
             "id": order.id,
             "status": order.status,
+            "is_digital": is_all_digital,
             "total_amount": float(order.total_amount),
             "tracking_number": order.tracking_number,
             "items": items,
             "buyer_name": buyer.full_name if buyer else "",
-            "buyer_phone": buyer.phone if buyer else "",
+            "buyer_email": (buyer.email if buyer else "") or getattr(order, 'buyer_email', None) or order.delivery_email or "",
+            "buyer_phone": (buyer.phone if buyer else "") or getattr(order, 'buyer_phone', None) or order.delivery_phone or "",
             "delivery_address": (
                 f"{order.delivery_address}, {order.delivery_city or ''}, {order.delivery_state or ''}".strip(', ')
                 if order.delivery_address
@@ -553,8 +572,8 @@ def get_buyer_order_detail(order_id):
                 else ((vendor_store.city or "Lagos") if vendor_store else "Lagos")
             ),
             "escrow": escrow.to_dict() if escrow else None,
-            # Convenience alias so both buyer order pages get the OTP directly
-            "delivery_otp": escrow.escrow_code if escrow else None,
+            # Convenience alias so both buyer order pages get the OTP directly (omitted for digital)
+            "delivery_otp": None if is_all_digital else (escrow.escrow_code if escrow else None),
             "logistics_assignment_id": assignment.id if assignment else None,
         },
     }), 200
@@ -1177,20 +1196,25 @@ def paystack_webhook():
                     (item.product.product_type if item.product else 'physical') in ('digital', 'service')
                     for item in order.items
                 )
-                buyer = db.session.get(User, order.buyer_id)
-                if buyer and buyer.email:
+                buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+                buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+                buyer_name = (buyer.full_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
+                buyer_phone = (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or getattr(order, 'delivery_phone', None) or ""
+
+                if buyer_email:
                     try:
                         send_siiqo_email(
-                            to_email=buyer.email,
+                            to_email=buyer_email,
                             subject=f"Order Confirmation #{order.id} - Siiqo",
                             template_name="order_confirmation",
-                            first_name=buyer.first_name or "there",
+                            first_name=(buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "there",
                             order_id=order.id,
                             payment_method="PAYSTACK",
                             is_digital_or_service=is_digital_or_service,
                         )
                     except Exception as e:
                         logging.warning(f"[EMAIL] buyer order confirm failed #{order.id}: {e}")
+
                 vendor = db.session.get(User, order.vendor_id)
                 if vendor and vendor.email:
                     try:
@@ -1203,6 +1227,9 @@ def paystack_webhook():
                             total_amount=f"₦{float(order.total_amount):,.2f}",
                             payment_method="PAYSTACK",
                             is_digital_or_service=is_digital_or_service,
+                            buyer_name=buyer_name,
+                            buyer_email=buyer_email or "",
+                            buyer_phone=buyer_phone,
                         )
                     except Exception as e:
                         logging.warning(f"[EMAIL] vendor order email failed #{order.id}: {e}")

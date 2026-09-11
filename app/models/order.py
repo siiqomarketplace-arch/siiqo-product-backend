@@ -47,6 +47,7 @@ class Order(db.Model):
     # Guest checkout fields
     buyer_email = db.Column(db.String(255), nullable=True)
     buyer_name = db.Column(db.String(255), nullable=True)
+    buyer_phone = db.Column(db.String(50), nullable=True)
     is_guest = db.Column(db.Boolean, default=False)
     
     # Logistics information

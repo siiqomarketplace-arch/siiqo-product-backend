@@ -555,18 +555,47 @@ def initiate_escrow():
 @escrow_bp.route('/status', methods=['GET'])
 @jwt_required(optional=True)
 def escrow_status():
-    txn_number = request.args.get('txn')
-    order_id = request.args.get('order_id')
+    txn_param = request.args.get('txn') or request.args.get('reference') or request.args.get('trxref') or request.args.get('txnref')
+    order_id_param = request.args.get('order_id') or request.args.get('ref')
 
-    if txn_number:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=txn_number).first()
-    elif order_id:
-        escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
-    else:
-        return jsonify({"message": "txn or order_id required"}), 400
+    escrow = None
+
+    if txn_param:
+        escrow = EscrowTransaction.query.filter_by(transaction_number=txn_param).first()
+
+    if not escrow and order_id_param:
+        if str(order_id_param).isdigit():
+            escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_param)).first()
+        else:
+            escrow = EscrowTransaction.query.filter_by(transaction_number=str(order_id_param)).first()
+
+    if not escrow and txn_param and str(txn_param).isdigit():
+        escrow = EscrowTransaction.query.filter_by(order_id=int(txn_param)).first()
 
     if not escrow:
         return jsonify({"message": "Transaction not found"}), 404
+
+    # If escrow is still PENDING_PAYMENT, proactively verify with Paystack
+    if escrow.status == EscrowStatus.PENDING_PAYMENT and escrow.transaction_number:
+        try:
+            from app.services.escrow.paystack_provider import PaystackProvider
+            verification = PaystackProvider().verify_transaction(escrow.transaction_number)
+            if verification.get("success"):
+                escrow.status = EscrowStatus.IN_ESCROW
+                escrow.paid_at = _utcnow()
+                escrow.payscrow_transaction_id = escrow.transaction_number
+                if escrow.order:
+                    escrow.order.status = 'PAID'
+                    db.session.flush()
+
+                    is_digital = _deliver_digital_products(escrow.order, escrow)
+                    if not is_digital:
+                        _deliver_service_products(escrow.order, escrow)
+
+                db.session.commit()
+                logging.info(f"[ESCROW STATUS] Proactively verified & activated transaction {escrow.transaction_number}")
+        except Exception as _sync_err:
+            logging.warning(f"[ESCROW STATUS] Paystack verification check failed: {_sync_err}")
 
     return jsonify(escrow.to_dict()), 200
 
@@ -696,7 +725,9 @@ def payscrow_webhook():
                     logging.warning(f"[EMAIL] buyer confirm email failed Order #{order.id}: {e}")
 
             vendor = db.session.get(User, order.vendor_id)
-            if vendor:
+            if vendor and vendor.email:
+                b_name = (buyer.full_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
+                b_phone = (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or getattr(order, 'delivery_phone', None) or ""
                 try:
                     send_siiqo_email(
                         to_email=vendor.email,
@@ -707,6 +738,9 @@ def payscrow_webhook():
                         total_amount=f"₦{float(order.total_amount):,.2f}",
                         payment_method="ESCROW",
                         is_digital_or_service=is_digital_or_service,
+                        buyer_name=b_name,
+                        buyer_email=buyer_email or "",
+                        buyer_phone=b_phone,
                     )
                 except Exception as e:
                     logging.warning(f"[EMAIL] vendor email failed Order #{order.id}: {e}")

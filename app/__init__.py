@@ -151,6 +151,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ALTER COLUMN buyer_id DROP NOT NULL",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_email VARCHAR(255)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(255)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_phone VARCHAR(50)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_guest BOOLEAN DEFAULT FALSE",
                 # ── Daya Payments Guest Support ──────────────────────────────
                 "ALTER TABLE daya_payments ALTER COLUMN buyer_id DROP NOT NULL",

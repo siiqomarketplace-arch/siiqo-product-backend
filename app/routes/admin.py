@@ -862,7 +862,18 @@ def get_all_escrow_transactions():
             "id": txn.transaction_number,
             "order_id": order.id,
             "vendor_id": str(order.vendor_id),
-            "buyer_id": str(order.buyer_id),
+            "buyer_id": str(order.buyer_id) if order.buyer_id else "guest",
+            # Prefer registered buyer account; fall back to guest-checkout fields
+            "buyer_name": (
+                order.buyer.full_name if order.buyer else None
+            ) or order.buyer_name or "Guest Buyer",
+            "buyer_email": (
+                order.buyer.email if order.buyer else None
+            ) or order.buyer_email or "",
+            "buyer_phone": (
+                order.buyer.phone if order.buyer else None
+            ) or order.delivery_phone or "",
+            "is_guest": bool(order.is_guest or not order.buyer_id),
             "product": product_name,
             "total_amount": float(txn.amount),
             "platform_fee": float(txn.fee_amount or 0),
@@ -979,7 +990,7 @@ def admin_get_orders():
                 "id": buyer.id if buyer else None,
                 "name": (buyer.full_name if buyer else None) or order.buyer_name or "Guest Buyer",
                 "email": (buyer.email if buyer else None) or order.buyer_email or "",
-                "phone": (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', '') or "",
+                "phone": (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or order.delivery_phone or "",
             },
             "vendor": {
                 "id": vendor.id if vendor else None,
@@ -1052,7 +1063,7 @@ def admin_get_order_detail(order_id):
                 "id": buyer.id if buyer else None,
                 "name": (buyer.full_name if buyer else None) or order.buyer_name or "Guest Buyer",
                 "email": (buyer.email if buyer else None) or order.buyer_email or "",
-                "phone": (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', '') or "",
+                "phone": (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or order.delivery_phone or "",
             },
             "vendor": {
                 "id": vendor.id if vendor else None,

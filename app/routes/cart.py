@@ -419,6 +419,13 @@ def checkout():
 
         guest_email = (data.get('delivery_email') or data.get('email') or (data.get('customer', {}).get('email')) or (user.email if user else '')).strip().lower()
         guest_name = (data.get('delivery_name') or (data.get('customer', {}).get('name')) or (user.full_name if user else '')).strip()
+        guest_phone = (data.get('delivery_phone') or data.get('phone') or (data.get('customer', {}).get('phone')) or (user.phone if user else '') or '').strip()
+
+        if user and not getattr(user, 'phone', None) and guest_phone:
+            try:
+                user.phone = guest_phone
+            except Exception:
+                pass
 
         new_order = Order(
             buyer_id=int(user_id) if user_id else None,
@@ -428,13 +435,14 @@ def checkout():
             payment_method=payment_method,
             buyer_email=guest_email,
             buyer_name=guest_name,
+            buyer_phone=guest_phone or None,
             is_guest=(user_id is None),
             logistics_provider_id=logistics_provider_id,
             logistics_fee=logistics_fee,
             delivery_address=data.get('delivery_address') if has_physical_items else 'Digital Delivery',
             delivery_city=data.get('delivery_city') if has_physical_items else None,
             delivery_state=data.get('delivery_state') if has_physical_items else None,
-            delivery_phone=data.get('delivery_phone') if has_physical_items else None,
+            delivery_phone=guest_phone or None,
             delivery_name=guest_name or (data.get('customer', {}).get('name') if data.get('customer') else None),
         )
         db.session.add(new_order)
@@ -499,7 +507,10 @@ def checkout():
                         first_name=vendor.first_name or "Vendor",
                         order_id=new_order.id,
                         total_amount=f"NGN{total:,.2f}",
-                        payment_method="POD"
+                        payment_method="POD",
+                        buyer_name=guest_name or "Customer",
+                        buyer_email=guest_email or "",
+                        buyer_phone=guest_phone or "",
                     )
                 except Exception:
                     pass

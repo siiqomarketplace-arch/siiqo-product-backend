@@ -1318,12 +1318,18 @@ def get_orders():
         "buyer_id": o.buyer_id,
         "buyer": {
             "id": o.buyer_id,
-            "name": o.buyer.full_name if o.buyer else "Unknown",
-            "email": o.buyer.email if o.buyer else "",
-            "phone": o.buyer.phone if o.buyer else "",
+            # Prefer account data; fall back to guest-checkout fields
+            "name": (o.buyer.full_name if o.buyer else None) or o.buyer_name or "Guest Buyer",
+            "email": (o.buyer.email if o.buyer else None) or o.buyer_email or "",
+            "phone": (o.buyer.phone if o.buyer else None) or getattr(o, 'buyer_phone', None) or o.delivery_phone or "",
         },
+        # Raw guest fields exposed separately so frontend can always access them
+        "buyer_email": (o.buyer.email if o.buyer else None) or o.buyer_email or "",
+        "buyer_name": (o.buyer.full_name if o.buyer else None) or o.buyer_name or "",
+        "buyer_phone": (o.buyer.phone if o.buyer else None) or getattr(o, 'buyer_phone', None) or o.delivery_phone or "",
+        "is_guest": bool(o.is_guest or not o.buyer_id),
         "shipping_address": {
-            "name": o.delivery_name or (o.buyer.full_name if o.buyer else "Unknown"),
+            "name": o.delivery_name or (o.buyer.full_name if o.buyer else None) or o.buyer_name or "Guest Buyer",
             "street": o.delivery_address or "N/A",
             "city": o.delivery_city or "",
             "state": o.delivery_state or "",
@@ -1336,6 +1342,8 @@ def get_orders():
             "name": item.product.name if item.product else "Unknown",
             "quantity": item.quantity,
             "price": str(item.price_at_purchase),
+            # Include product_type so frontend can detect digital/service orders
+            "product_type": (item.product.product_type if item.product else "physical") or "physical",
         } for item in o.items],
     } for o in orders]
 

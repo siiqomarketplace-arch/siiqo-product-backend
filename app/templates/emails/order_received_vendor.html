@@ -77,6 +77,21 @@
             </div>
             {% endif %}
 
+            {% if buyer_email or buyer_phone %}
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px 24px; margin: 24px 0; text-align: left;">
+                <h3 style="margin: 0 0 12px 0; font-size: 13px; font-weight: 800; color: #0f172a; text-transform: uppercase; letter-spacing: 0.05em;">👤 Buyer Contact Information</h3>
+                {% if buyer_name %}
+                <p style="margin: 4px 0; font-size: 14px; color: #334155;"><strong>Name:</strong> {{ buyer_name }}</p>
+                {% endif %}
+                {% if buyer_email %}
+                <p style="margin: 4px 0; font-size: 14px; color: #334155;"><strong>Email:</strong> <a href="mailto:{{ buyer_email }}" style="color: #3b82f6; text-decoration: none; font-weight: 600;">{{ buyer_email }}</a></p>
+                {% endif %}
+                {% if buyer_phone %}
+                <p style="margin: 4px 0; font-size: 14px; color: #334155;"><strong>Phone:</strong> <a href="tel:{{ buyer_phone }}" style="color: #3b82f6; text-decoration: none; font-weight: 600;">{{ buyer_phone }}</a></p>
+                {% endif %}
+            </div>
+            {% endif %}
+
             <p>Log in to your vendor dashboard to view the full order details, delivery address, and coordinate shipping with the buyer.</p>
             <a href="https://siiqo.com/vendor/orders" class="btn">View Order Dashboard</a>
         </div>
