@@ -444,6 +444,19 @@ def daya_status():
         except Exception as exc:
             logger.warning("[DAYA STATUS] Poll failed for order %s: %s", order_id, exc)
 
+    if dp.status == "COMPLETED":
+        # Self-healing: If payment already completed (e.g. from webhook) but order
+        # failed to confirm due to transient error/crash, re-trigger confirmation now
+        try:
+            from app.models.order import Order
+            _ord = db.session.get(Order, order_id)
+            if _ord and _ord.status not in ("PAID", "COMPLETED", "RELEASED"):
+                logger.info("[DAYA STATUS] Order %s is %s but DayaPayment is COMPLETED — retrying confirmation",
+                            order_id, _ord.status)
+                _handle_crypto_payment_confirmed(order_id, dp)
+        except Exception as exc:
+            logger.warning("[DAYA STATUS] Retry confirmation failed for order %s: %s", order_id, exc)
+
     return jsonify({
         "orderId": str(order_id),
         "status":  dp.status,
@@ -785,13 +798,14 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 type="ESCROW",
                 order_id=order_id,
             ))
-            db.session.add(Notification(
-                user_id=order.buyer_id,
-                title="Payment Confirmed",
-                message=buyer_notif_msg,
-                type="ORDER",
-                order_id=order_id,
-            ))
+            if order.buyer_id:
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Payment Confirmed",
+                    message=buyer_notif_msg,
+                    type="ORDER",
+                    order_id=order_id,
+                ))
 
         db.session.commit()
         logger.info("[DAYA CONFIRM] Order %s confirmed (digital=%s service=%s)",

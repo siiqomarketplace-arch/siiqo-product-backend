@@ -1415,13 +1415,14 @@ def update_order_status(order_id):
         'PENDING_DELIVERY': 'is pending delivery',
     }
     label = status_labels.get(new_status, f'status updated to {new_status}')
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title=f"Order #{order_id} Update",
-        message=f"Your order #{order_id} from {user.storefront.store_name if user.storefront else 'vendor'} {label}.",
-        type="ORDER",
-        order_id=order_id,
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title=f"Order #{order_id} Update",
+            message=f"Your order #{order_id} from {user.storefront.store_name if user.storefront else 'vendor'} {label}.",
+            type="ORDER",
+            order_id=order_id,
+        ))
 
     try:
         db.session.commit()

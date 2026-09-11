@@ -511,13 +511,14 @@ def confirm_pod_payment(order_id):
     )
     
     # Notify buyer
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title='Order Completed',
-        message=f'Order #{order.id} has been completed. Thank you for shopping!',
-        type='ORDER',
-        order_id=order.id
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title='Order Completed',
+            message=f'Order #{order.id} has been completed. Thank you for shopping!',
+            type='ORDER',
+            order_id=order.id
+        ))
     
     db.session.commit()
     

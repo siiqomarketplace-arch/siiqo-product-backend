@@ -375,22 +375,23 @@ def checkout():
 
     orders_created = []
 
-    buyer_order_count = Order.query.filter_by(buyer_id=user_id).count()
-    if buyer_order_count < 100:
-        from app.models.partnerships import Referral
-        existing_ref = Referral.query.filter_by(referred_id=user_id).first()
-        if not existing_ref and referral_code:
-            referrer = User.query.filter_by(referral_code=referral_code).first()
-            if referrer and referrer.id != int(user_id):
-                existing_ref = Referral(
-                    referrer_id=referrer.id,
-                    referred_id=user_id,
-                    referral_code_used=referral_code,
-                    status='PENDING',
-                    reward_earned=0.0,
-                )
-                db.session.add(existing_ref)
-                db.session.flush()
+    if user_id:
+        buyer_order_count = Order.query.filter_by(buyer_id=user_id).count()
+        if buyer_order_count < 100:
+            from app.models.partnerships import Referral
+            existing_ref = Referral.query.filter_by(referred_id=user_id).first()
+            if not existing_ref and referral_code:
+                referrer = User.query.filter_by(referral_code=referral_code).first()
+                if referrer and referrer.id != int(user_id):
+                    existing_ref = Referral(
+                        referrer_id=referrer.id,
+                        referred_id=user_id,
+                        referral_code_used=referral_code,
+                        status='PENDING',
+                        reward_earned=0.0,
+                    )
+                    db.session.add(existing_ref)
+                    db.session.flush()
 
     logistics_selections = data.get('logistics_selections', [])
 

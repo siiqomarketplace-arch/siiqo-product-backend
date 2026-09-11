@@ -133,13 +133,14 @@ def auto_release_escrow():
             ))
             
             # Notify buyer
-            db.session.add(Notification(
-                user_id=order.buyer_id,
-                title="Order Complete",
-                message=f"Order #{order.id} is complete. Funds have been released to the vendor. Thank you for shopping on Siiqo!",
-                type="ORDER",
-                order_id=order.id,
-            ))
+            if order.buyer_id:
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Order Complete",
+                    message=f"Order #{order.id} is complete. Funds have been released to the vendor. Thank you for shopping on Siiqo!",
+                    type="ORDER",
+                    order_id=order.id,
+                ))
             
             db.session.commit()
             
@@ -160,14 +161,16 @@ def auto_release_escrow():
                 except Exception as e:
                     logger.warning(f"[EMAIL WARN] Failed to send payout release email to vendor: {e}")
 
-            buyer = db.session.get(User, order.buyer_id)
-            if buyer and buyer.email:
+            buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+            buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+            if buyer_email:
+                buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Buyer"
                 try:
                     send_siiqo_email(
-                        to_email=buyer.email,
+                        to_email=buyer_email,
                         subject="Siiqo - Order Completed",
                         template_name="system_notice",
-                        first_name=buyer.first_name or "Buyer",
+                        first_name=buyer_name,
                         notice_text=f"Thank you! Order #{order.id} is now complete. The funds have been released to the vendor. We hope you enjoyed shopping on Siiqo!"
                     )
                 except Exception as e:
@@ -239,13 +242,14 @@ def send_delivery_reminders():
                 continue  # Already reminded in last 24 hours
             
             # Send reminder
-            db.session.add(Notification(
-                user_id=order.buyer_id,
-                title="Confirm Your Delivery",
-                message=f"Please confirm delivery of Order #{order.id}. Funds will be auto-released in 24 hours if not confirmed.",
-                type="ORDER",
-                order_id=order.id,
-            ))
+            if order.buyer_id:
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Confirm Your Delivery",
+                    message=f"Please confirm delivery of Order #{order.id}. Funds will be auto-released in 24 hours if not confirmed.",
+                    type="ORDER",
+                    order_id=order.id,
+                ))
             
             db.session.commit()
             reminded_count += 1
@@ -294,13 +298,14 @@ def check_pending_payments():
             order.status = 'CANCELLED'
             
             # Notify buyer
-            db.session.add(Notification(
-                user_id=order.buyer_id,
-                title="Order Cancelled",
-                message=f"Order #{order.id} was cancelled due to non-payment within 1 hour.",
-                type="ORDER",
-                order_id=order.id,
-            ))
+            if order.buyer_id:
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Order Cancelled",
+                    message=f"Order #{order.id} was cancelled due to non-payment within 1 hour.",
+                    type="ORDER",
+                    order_id=order.id,
+                ))
             
             db.session.commit()
             cancelled_count += 1

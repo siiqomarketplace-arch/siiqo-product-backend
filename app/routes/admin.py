@@ -1314,7 +1314,7 @@ def admin_refund_buyer(order_id):
         order.status = 'CANCELLED'
 
     # Notify buyer — they get their money back
-    if order:
+    if order and order.buyer_id:
         db.session.add(Notification(
             user_id=order.buyer_id,
             title="Refund Processed",
@@ -1432,13 +1432,14 @@ def admin_fix_crypto_order(order_id):
     escrow.released_at = escrow.released_at or datetime.now(timezone.utc)
 
     # Send notifications
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title="Order Completed",
-        message=f"Your crypto payment for Order #{order_id} is confirmed and the order is complete.",
-        type="ORDER",
-        order_id=order_id,
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Order Completed",
+            message=f"Your crypto payment for Order #{order_id} is confirmed and the order is complete.",
+            type="ORDER",
+            order_id=order_id,
+        ))
     db.session.add(Notification(
         user_id=order.vendor_id,
         title="Order Complete",
@@ -1549,13 +1550,14 @@ def admin_release_funds(order_id):
             order_id=order.id,
         ))
         # Also notify buyer
-        db.session.add(Notification(
-            user_id=order.buyer_id,
-            title="Order Complete",
-            message=f"Order #{order.id} has been resolved by Siiqo support. The order is now complete.",
-            type="ORDER",
-            order_id=order.id,
-        ))
+        if order.buyer_id:
+            db.session.add(Notification(
+                user_id=order.buyer_id,
+                title="Order Complete",
+                message=f"Order #{order.id} has been resolved by Siiqo support. The order is now complete.",
+                type="ORDER",
+                order_id=order.id,
+            ))
 
     db.session.commit()
 

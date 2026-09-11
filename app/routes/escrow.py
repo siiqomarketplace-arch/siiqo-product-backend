@@ -149,15 +149,16 @@ def _deliver_digital_products(order, escrow):
         db.session.add(Receipt(order_id=order.id))
 
     # Notify buyer with download link(s)
-    buyer = db.session.get(User, order.buyer_id)
+    buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
     download_msg = f"Your download link(s) for Order #{order.id} are ready."
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title="Your Digital Download is Ready! 🎉",
-        message=download_msg,
-        type="ORDER",
-        order_id=order.id,
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Your Digital Download is Ready! 🎉",
+            message=download_msg,
+            type="ORDER",
+            order_id=order.id,
+        ))
     db.session.add(Notification(
         user_id=order.vendor_id,
         title="Digital Order Complete",
@@ -166,13 +167,15 @@ def _deliver_digital_products(order, escrow):
         order_id=order.id,
     ))
 
-    if buyer and buyer.email:
+    buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+    if buyer_email:
+        buyer_first_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "there"
         try:
             send_siiqo_email(
-                to_email=buyer.email,
+                to_email=buyer_email,
                 subject=f"Your Digital Download – Order #{order.id} | Siiqo",
                 template_name="system_notice",
-                first_name=buyer.first_name or "there",
+                first_name=buyer_first_name,
                 notice_text=(
                     f"Great news! Your payment for Order #{order.id} is confirmed.\n\n"
                     f"Here are your download link(s):\n\n{download_lines}\n\n"
@@ -289,15 +292,16 @@ def _deliver_service_products(order, escrow):
         db.session.add(Receipt(order_id=order.id))
 
     # Notify buyer with booking link(s)
-    buyer = db.session.get(User, order.buyer_id)
+    buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
     booking_msg = f"Your booking link(s) for Order #{order.id} are ready."
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title="Your Service Booking Link is Ready! 📅",
-        message=booking_msg,
-        type="ORDER",
-        order_id=order.id,
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Your Service Booking Link is Ready! 📅",
+            message=booking_msg,
+            type="ORDER",
+            order_id=order.id,
+        ))
     db.session.add(Notification(
         user_id=order.vendor_id,
         title="Service Order Complete",
@@ -306,13 +310,15 @@ def _deliver_service_products(order, escrow):
         order_id=order.id,
     ))
 
-    if buyer and buyer.email:
+    buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+    if buyer_email:
+        buyer_first_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "there"
         try:
             send_siiqo_email(
-                to_email=buyer.email,
+                to_email=buyer_email,
                 subject=f"Book Your Service – Order #{order.id} | Siiqo",
                 template_name="system_notice",
-                first_name=buyer.first_name or "there",
+                first_name=buyer_first_name,
                 notice_text=(
                     f"Great news! Your payment for Order #{order.id} is confirmed.\n\n"
                     f"Please use the link(s) below to book your appointment:\n\n{booking_lines}\n\n"
@@ -639,13 +645,14 @@ def payscrow_webhook():
                                 order_id=order.id,
                             ))
 
-                        db.session.add(Notification(
-                            user_id=order.buyer_id,
-                            title="Payment Confirmed",
-                            message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
-                            type="ORDER",
-                            order_id=order.id,
-                        ))
+                        if order.buyer_id:
+                            db.session.add(Notification(
+                                user_id=order.buyer_id,
+                                title="Payment Confirmed",
+                                message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
+                                type="ORDER",
+                                order_id=order.id,
+                            ))
                         db.session.add(Notification(
                             user_id=order.vendor_id,
                             title="Payment Received in Escrow",
@@ -666,14 +673,16 @@ def payscrow_webhook():
                 (item.product.product_type if item.product else 'physical') in ('digital', 'service')
                 for item in order.items
             )
-            buyer = db.session.get(User, order.buyer_id)
-            if buyer:
+            buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+            buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+            if buyer_email:
+                buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "there"
                 try:
                     send_siiqo_email(
-                        to_email=buyer.email,
+                        to_email=buyer_email,
                         subject=f"Order Confirmation #{order.id} - Siiqo",
                         template_name="order_confirmation",
-                        first_name=buyer.first_name or "there",
+                        first_name=buyer_name,
                         order_id=order.id,
                         payment_method="ESCROW",
                         is_digital_or_service=is_digital_or_service,
@@ -1000,13 +1009,14 @@ def release_escrow():
         type="ESCROW",
         order_id=order.id,
     ))
-    db.session.add(Notification(
-        user_id=order.buyer_id,
-        title="Order Complete",
-        message=f"Order #{order.id} is complete. Thank you for shopping on Siiqo!",
-        type="ORDER",
-        order_id=order.id,
-    ))
+    if order.buyer_id:
+        db.session.add(Notification(
+            user_id=order.buyer_id,
+            title="Order Complete",
+            message=f"Order #{order.id} is complete. Thank you for shopping on Siiqo!",
+            type="ORDER",
+            order_id=order.id,
+        ))
 
     db.session.commit()
 
@@ -1035,14 +1045,16 @@ def release_escrow():
         except Exception as e:
             logging.warning(f"[EMAIL WARN] payout release email failed: {e}")
 
-    buyer = db.session.get(User, order.buyer_id)
-    if buyer and buyer.email:
+    buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+    buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+    if buyer_email:
+        buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Buyer"
         try:
             send_siiqo_email(
-                to_email=buyer.email,
+                to_email=buyer_email,
                 subject="Siiqo - Order Completed",
                 template_name="system_notice",
-                first_name=buyer.first_name or "Buyer",
+                first_name=buyer_name,
                 notice_text=(
                     f"Thank you! Order #{order.id} is now complete. "
                     "Funds have been released to the vendor."

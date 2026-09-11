@@ -1136,16 +1136,17 @@ def paystack_webhook():
                                 order_id=order.id,
                             ))
 
-                        db.session.add(Notification(
-                            user_id=order.buyer_id,
-                            title="Payment Confirmed",
-                            message=(
-                                f"Your payment for Order #{order.id} is confirmed. "
-                                "Funds held by Siiqo until you confirm delivery."
-                            ),
-                            type="ORDER",
-                            order_id=order.id,
-                        ))
+                        if order.buyer_id:
+                            db.session.add(Notification(
+                                user_id=order.buyer_id,
+                                title="Payment Confirmed",
+                                message=(
+                                    f"Your payment for Order #{order.id} is confirmed. "
+                                    "Funds held by Siiqo until you confirm delivery."
+                                ),
+                                type="ORDER",
+                                order_id=order.id,
+                            ))
                         db.session.add(Notification(
                             user_id=order.vendor_id,
                             title="New Paid Order",
