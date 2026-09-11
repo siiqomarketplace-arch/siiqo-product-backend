@@ -80,6 +80,14 @@ class EscrowTransaction(db.Model):
                 (item.product.product_type if item.product else 'physical') in ('digital', 'service')
                 for item in self.order.items
             ) if self.order else False,
+            "digital_downloads": [
+                {
+                    "product_name": (item.product.name if item.product else "Digital Item"),
+                    "file_url": (item.product.file_url if item.product else None),
+                }
+                for item in (self.order.items if self.order else [])
+                if (item.product and item.product.product_type == 'digital' and item.product.file_url)
+            ] if (self.status == EscrowStatus.RELEASED or (self.order and self.order.status == 'COMPLETED')) else [],
         }
 
 

@@ -95,12 +95,17 @@ class PaystackProvider(BaseEscrowProvider):
 
         # ── buyer info ──────────────────────────────────────────────────
         buyer = orders[0].buyer
-        buyer_email = buyer.email if buyer else "buyer@siiqo.com"
+        buyer_email = (
+            (buyer.email if buyer else None)
+            or getattr(orders[0], 'buyer_email', None)
+            or "buyer@siiqo.com"
+        )
         buyer_name = (
             f"{buyer.first_name or ''} {buyer.last_name or ''}".strip()
-            if buyer else "Siiqo Buyer"
+            if buyer
+            else getattr(orders[0], 'buyer_name', None) or "Siiqo Buyer"
         )
-        buyer_phone = _format_phone(buyer.phone if buyer else None)
+        buyer_phone = _format_phone((buyer.phone if buyer else None) or getattr(orders[0], 'delivery_phone', None))
 
         # ── fee accounting ───────────────────────────────────────────────
         # Platform fee: 3.0% for Pro Verified vendors, 5.0% standard.

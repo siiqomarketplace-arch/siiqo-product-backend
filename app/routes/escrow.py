@@ -37,9 +37,13 @@ def _active_provider() -> str:
 
 def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, description: str):
     """Write a CREDIT entry to the vendor's ledger."""
-    # Calculate running balance
     from sqlalchemy import func
     from app.models.finance import Ledger as L
+    existing = L.query.filter_by(vendor_id=vendor_id, reference_id=reference_id, transaction_type='CREDIT').first()
+    if existing:
+        logging.info(f"[LEDGER] Already credited vendor {vendor_id} for ref {reference_id} — skipping duplicate")
+        return
+    # Calculate running balance
     credits = db.session.query(func.sum(L.amount)).filter_by(
         vendor_id=vendor_id, transaction_type='CREDIT'
     ).scalar() or 0
@@ -459,8 +463,9 @@ def initiate_escrow():
         return jsonify({"message": "Orders not found"}), 404
 
     for order in orders:
-        if order.buyer_id != int(user_id):
-            return jsonify({"message": "Unauthorized"}), 403
+        if order.buyer_id:
+            if not user_id or str(order.buyer_id) != str(user_id):
+                return jsonify({"message": "Unauthorized"}), 403
 
     # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
     # Paystack cannot hold escrow for physical products — company does not hold
@@ -548,7 +553,7 @@ def initiate_escrow():
 # ---------------------------------------------------------------------------
 
 @escrow_bp.route('/status', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def escrow_status():
     txn_number = request.args.get('txn')
     order_id = request.args.get('order_id')

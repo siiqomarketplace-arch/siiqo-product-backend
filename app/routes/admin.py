@@ -1400,21 +1400,27 @@ def admin_verify_payment(order_id):
 @jwt_required()
 def admin_fix_crypto_order(order_id):
     """
-    Admin route to fix crypto orders stuck in PENDING status.
-    Marks the order and its EscrowTransaction as COMPLETED/RELEASED.
-    Use when order was paid via Daya but backend crashed before committing.
+    Admin route to fix crypto/Daya/escrow orders stuck in PENDING status,
+    or re-trigger digital delivery, vendor ledger credit & vendor payout.
     """
     from app.models.order import Order
+    from app.models.communication import Notification
+    from app.routes.events import activate_tickets_for_order
+    from app.routes.escrow import _deliver_digital_products, _deliver_service_products, _credit_vendor_ledger
+    from app.routes.payments import _payout_vendor_via_daya
+    from app.utils.email import send_siiqo_email
+
     admin_id = get_jwt_identity()
-    if not _get_admin(_parse_admin_id(admin_id)):
+    try:
+        parsed_id = _parse_admin_id(admin_id)
+    except (ValueError, TypeError):
+        return jsonify({"message": "Unauthorized"}), 401
+    if not _get_admin(parsed_id):
         return jsonify({"message": "Unauthorized"}), 403
 
     order = db.session.get(Order, order_id)
     if not order:
         return jsonify({"message": f"Order #{order_id} not found"}), 404
-
-    if order.payment_method not in ("CRYPTO", "crypto"):
-        return jsonify({"message": f"Order #{order_id} is not a crypto order"}), 400
 
     escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
     if not escrow:
@@ -1423,30 +1429,116 @@ def admin_fix_crypto_order(order_id):
     old_order_status  = order.status
     old_escrow_status = escrow.status
 
-    # Mark order as COMPLETED
-    order.status = 'COMPLETED'
+    # Mark as PAID and escrow as IN_ESCROW as base state before releasing
+    order.status = 'PAID'
+    escrow.status = EscrowStatus.IN_ESCROW
+    escrow.paid_at = escrow.paid_at or _utcnow()
+    db.session.flush()
 
-    # Mark escrow as RELEASED
-    from datetime import datetime, timezone
-    escrow.status      = EscrowStatus.RELEASED
-    escrow.released_at = escrow.released_at or datetime.now(timezone.utc)
+    # 1. Event Ticket Order?
+    is_ticket = activate_tickets_for_order(order_id)
+    if is_ticket:
+        net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+        escrow.status = EscrowStatus.RELEASED
+        escrow.released_at = escrow.released_at or _utcnow()
+        order.status = 'COMPLETED'
+        _credit_vendor_ledger(
+            vendor_id=order.vendor_id,
+            amount=net_amount,
+            reference_id=escrow.transaction_number,
+            description=f"Admin-released payout for Event Order #{order.id}",
+        )
+        try:
+            _payout_vendor_via_daya(order, escrow)
+        except Exception as e:
+            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+
+    # 2. Digital Order?
+    is_digital = _deliver_digital_products(order, escrow)
+    is_service = False
+    if not is_digital and not is_ticket:
+        is_service = _deliver_service_products(order, escrow)
+
+    # 3. Pay Link Digital/Service?
+    if not is_digital and not is_service and not is_ticket and order.payment_link_id:
+        from app.models.payment_link import PaymentLink as _PL
+        _link = db.session.get(_PL, order.payment_link_id)
+        _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
+        if _ltype in ('digital', 'service'):
+            net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+            escrow.status = EscrowStatus.RELEASED
+            escrow.released_at = escrow.released_at or _utcnow()
+            order.status = 'COMPLETED'
+            if _link:
+                _link.status = 'PAID'
+            _credit_vendor_ledger(
+                vendor_id=order.vendor_id,
+                amount=net_amount,
+                reference_id=escrow.transaction_number,
+                description=f"Admin-released payout for {_ltype.title()} PayLink #{order.id}",
+            )
+            try:
+                _payout_vendor_via_daya(order, escrow)
+            except Exception as e:
+                logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+            is_digital = (_ltype == 'digital')
+            is_service = (_ltype == 'service')
+
+    # 4. Physical Order (or fallback)
+    if not is_digital and not is_service and not is_ticket:
+        net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+        escrow.status = EscrowStatus.RELEASED
+        escrow.released_at = escrow.released_at or _utcnow()
+        order.status = 'COMPLETED'
+        _credit_vendor_ledger(
+            vendor_id=order.vendor_id,
+            amount=net_amount,
+            reference_id=escrow.transaction_number,
+            description=f"Admin-released payout for Order #{order.id}",
+        )
+        try:
+            _payout_vendor_via_daya(order, escrow)
+        except Exception as e:
+            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+
+    # If digital or service order, trigger Daya vendor payout if crypto/Daya
+    if is_digital or is_service:
+        try:
+            _payout_vendor_via_daya(order, escrow)
+        except Exception as e:
+            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
 
     # Send notifications
     if order.buyer_id:
         db.session.add(Notification(
             user_id=order.buyer_id,
             title="Order Completed",
-            message=f"Your crypto payment for Order #{order_id} is confirmed and the order is complete.",
+            message=f"Your payment for Order #{order_id} is confirmed and the order is complete.",
             type="ORDER",
             order_id=order_id,
         ))
     db.session.add(Notification(
         user_id=order.vendor_id,
         title="Order Complete",
-        message=f"Order #{order_id} has been marked complete by admin.",
+        message=f"Order #{order_id} has been marked complete and funds released by admin.",
         type="ESCROW",
         order_id=order_id,
     ))
+
+    # Also email guest buyer if not already sent by _deliver_digital_products
+    buyer_email = (order.buyer.email if order.buyer else None) or getattr(order, 'buyer_email', None)
+    if buyer_email and not is_digital:
+        buyer_first_name = (order.buyer.first_name if order.buyer else None) or getattr(order, 'buyer_name', None) or "there"
+        try:
+            send_siiqo_email(
+                to_email=buyer_email,
+                subject=f"Order #{order.id} Confirmed | Siiqo",
+                template_name="system_notice",
+                first_name=buyer_first_name,
+                notice_text=f"Your payment for Order #{order.id} has been confirmed.",
+            )
+        except Exception as e:
+            logging.warning(f"[ADMIN FIX] guest confirmation email warning: {e}")
 
     db.session.commit()
 
@@ -1456,26 +1548,12 @@ def admin_fix_crypto_order(order_id):
     )
 
     return jsonify({
-        "message": f"Order #{order_id} fixed successfully",
+        "message": f"Order #{order_id} fixed and completed successfully. Vendor credited and buyer notified.",
         "order_status": "COMPLETED",
         "escrow_status": "RELEASED",
         "previous_order_status": old_order_status,
         "previous_escrow_status": old_escrow_status,
     }), 200
-    admin_id = get_jwt_identity()
-    if not _require_superadmin(_parse_admin_id(admin_id)):
-        return jsonify({"message": "SuperAdmin required"}), 403
-
-    escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
-    if not escrow:
-        return jsonify({"message": "Escrow transaction not found"}), 404
-
-    escrow.status = EscrowStatus.IN_ESCROW
-    escrow.paid_at = _utcnow()
-    if escrow.order:
-        escrow.order.status = 'PAID'
-    db.session.commit()
-    return jsonify({"message": "Payment verified. Escrow is now active.", "status": "success"}), 200
 
 
 @admin_bp.route('/escrow/release/<int:order_id>', methods=['POST'])
@@ -1489,9 +1567,6 @@ def admin_release_funds(order_id):
     escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
     if not escrow:
         return jsonify({"message": "Escrow transaction not found"}), 404
-
-    if escrow.status == EscrowStatus.RELEASED:
-        return jsonify({"message": "Funds already released"}), 400
 
     # Call PayScrow's applycode to actually move the money — required for DISPUTED orders
     # where funds are frozen on PayScrow's side.
@@ -1519,11 +1594,8 @@ def admin_release_funds(order_id):
                 logging.warning(
                     f"[ADMIN RELEASE] PayScrow applycode returned non-success for Order #{order_id}: {resp.text}"
                 )
-                # Do NOT hard-fail — admin may be resolving a dispute where PayScrow
-                # already released on their side. Continue with DB update.
         except Exception as e:
             logging.error(f"[ADMIN RELEASE] PayScrow applycode error for Order #{order_id}: {e}")
-            # Non-fatal: still update our DB so the order is not stuck forever.
     else:
         logging.warning(
             f"[ADMIN RELEASE] Order #{order_id} has no payscrow_transaction_id or escrow_code — "
@@ -1542,6 +1614,18 @@ def admin_release_funds(order_id):
             reference_id=escrow.transaction_number,
             description=f"Admin-released payout for Order #{order.id}",
         )
+
+        # Also trigger digital delivery if digital
+        from app.routes.escrow import _deliver_digital_products
+        is_dig = _deliver_digital_products(order, escrow)
+
+        # Trigger Daya payout if order used Daya/crypto
+        try:
+            from app.routes.payments import _payout_vendor_via_daya
+            _payout_vendor_via_daya(order, escrow)
+        except Exception as payout_err:
+            logging.warning(f"[ADMIN RELEASE] Daya payout warning: {payout_err}")
+
         db.session.add(Notification(
             user_id=order.vendor_id,
             title="Funds Released by Admin",
@@ -1558,6 +1642,21 @@ def admin_release_funds(order_id):
                 type="ORDER",
                 order_id=order.id,
             ))
+        else:
+            # Guest buyer
+            buyer_email = getattr(order, 'buyer_email', None)
+            if buyer_email and not is_dig:
+                try:
+                    from app.utils.email import send_siiqo_email
+                    send_siiqo_email(
+                        to_email=buyer_email,
+                        subject=f"Order #{order.id} Resolved | Siiqo",
+                        template_name="system_notice",
+                        first_name=getattr(order, 'buyer_name', None) or "there",
+                        notice_text=f"Your payment and order #{order.id} have been completed by support.",
+                    )
+                except Exception:
+                    pass
 
     db.session.commit()
 
