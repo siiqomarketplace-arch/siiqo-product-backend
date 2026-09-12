@@ -38,8 +38,8 @@ class Config:
     SQLALCHEMY_ENGINE_OPTIONS = {
         "pool_pre_ping": True,       # Detect stale connections
         "pool_recycle": 300,         # Recycle connections every 5 min
-        "pool_size": 10,
-        "max_overflow": 20,
+        "pool_size": 5,              # Clamped per worker to protect RDS max_connections
+        "max_overflow": 8,           # Controlled burst limit
     }
 
     # CORS
@@ -53,6 +53,7 @@ class Config:
 
     # Rate Limiting — use Redis in production
     RATELIMIT_STORAGE_URI = os.environ.get('REDIS_URL', 'memory://')
+    RATELIMIT_SWALLOW_ERRORS = True  # Protect live users if rate limiter store experiences latency
 
     # Third-Party
     PAYSCROW_API_KEY = os.environ.get('PAYSCROW_API_KEY')
