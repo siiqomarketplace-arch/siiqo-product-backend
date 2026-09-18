@@ -655,6 +655,25 @@ def checkout():
             CartItem.id.in_(checked_out_item_ids)
         ).delete(synchronize_session=False)
 
+    # ── Non-blocking telemetry: log checkout funnel signal ──────────────────
+    try:
+        from app.services.event_logger import log_platform_event
+        for order_info in orders_created:
+            log_platform_event(
+                event_name="checkout_started",
+                user_id=int(user_id) if user_id else None,
+                business_id=order_info.get("vendor_id"),
+                order_id=order_info.get("order_id"),
+                source="cart",
+                properties={
+                    "payment_method": order_info.get("payment_method"),
+                    "total_amount": order_info.get("total_amount"),
+                    "escrow_txn": order_info.get("escrow_txn"),
+                }
+            )
+    except Exception as _tel_err:
+        logging.warning(f"[TELEMETRY WARN] checkout_started event failed: {_tel_err}")
+
     try:
         db.session.commit()
     except Exception as e:

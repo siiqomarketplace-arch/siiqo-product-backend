@@ -1000,6 +1000,27 @@ def release_escrow():
     except Exception as ex:
         logging.error(f"[REFERRAL ERR] Escrow release referral reward failed: {ex}")
 
+    try:
+        from app.services.event_logger import log_platform_event, log_trust_evidence
+        log_platform_event(
+            event_name="order_completed",
+            order_id=order.id,
+            business_id=order.vendor_id,
+            user_id=order.buyer_id,
+            source="escrow",
+            properties={"amount": str(escrow.amount), "transaction_number": escrow.transaction_number}
+        )
+        log_trust_evidence(
+            business_id=order.vendor_id,
+            evidence_type="order_fulfilled",
+            provenance="siiqo_transaction_verified",
+            source="escrow_transactions",
+            source_id=str(escrow.id),
+            properties={"order_id": order.id, "amount": str(escrow.amount)}
+        )
+    except Exception as ev_err:
+        logging.error(f"[TELEMETRY ERR] Failed to log order completion evidence: {ev_err}")
+
     # ── First-sale celebration ─────────────────────────────────────────────
     try:
         from app.models.order import Order as _Order

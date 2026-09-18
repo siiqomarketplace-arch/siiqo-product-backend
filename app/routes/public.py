@@ -437,10 +437,20 @@ def get_sitemap_data():
 @limiter.limit("30 per minute")
 def search():
     q = (request.args.get('q') or '').strip()
+    session_id = request.headers.get('X-Session-ID') or request.args.get('session_id')
     if not q or len(q) < 2:
-        return jsonify({"products": [], "storefronts": []}), 200
+        return jsonify({"products": [], "storefronts": [], "intent": None}), 200
 
-    products = (
+    from app.services.intent_parser import parse_buyer_intent
+    from app.services.event_logger import log_platform_event
+
+    intent = parse_buyer_intent(q)
+    keyword = intent.get("keyword") or q
+    city = intent.get("city")
+    max_price = intent.get("max_price")
+
+    # ── 1. Products Query (Intent-Aware) ──
+    prod_query = (
         Product.query
         .join(Storefront)
         .filter(
@@ -450,20 +460,76 @@ def search():
                 Product.product_type.in_(['digital', 'service', 'event'])
             ),
             Storefront.is_published == True,
-            Product.name.ilike(f'%{q}%') | Product.description.ilike(f'%{q}%')
+            Product.name.ilike(f'%{keyword}%') | Product.description.ilike(f'%{keyword}%')
         )
-        .limit(20)
-        .all()
     )
+    if city:
+        prod_query = prod_query.filter(
+            db.or_(
+                Product.location.ilike(f'%{city}%'),
+                Storefront.city.ilike(f'%{city}%'),
+                Storefront.state.ilike(f'%{city}%'),
+                Storefront.address.ilike(f'%{city}%')
+            )
+        )
+    if max_price:
+        prod_query = prod_query.filter(Product.price <= max_price)
 
-    storefronts = (
+    products = prod_query.limit(24).all()
+
+    # ── 2. Storefronts Query (Intent-Aware) ──
+    sf_query = (
         Storefront.query
         .filter(
             Storefront.is_published == True,
-            Storefront.store_name.ilike(f'%{q}%') | Storefront.store_description.ilike(f'%{q}%')
+            Storefront.store_name.ilike(f'%{keyword}%') | Storefront.store_description.ilike(f'%{keyword}%')
         )
-        .limit(10)
-        .all()
+    )
+    if city:
+        sf_query = sf_query.filter(
+            db.or_(
+                Storefront.city.ilike(f'%{city}%'),
+                Storefront.state.ilike(f'%{city}%'),
+                Storefront.address.ilike(f'%{city}%')
+            )
+        )
+    storefronts = sf_query.limit(12).all()
+
+    # ── 3. Graceful Fallback if strict intent filters returned 0 ──
+    if not products and not storefronts and (city or max_price):
+        # Relax city/price constraints to see if products/stores exist elsewhere
+        fallback_products = (
+            Product.query.join(Storefront)
+            .filter(
+                Product.is_active == True,
+                Storefront.is_published == True,
+                Product.name.ilike(f'%{keyword}%') | Product.description.ilike(f'%{keyword}%')
+            ).limit(12).all()
+        )
+        fallback_storefronts = (
+            Storefront.query.filter(
+                Storefront.is_published == True,
+                Storefront.store_name.ilike(f'%{keyword}%') | Storefront.store_description.ilike(f'%{keyword}%')
+            ).limit(6).all()
+        )
+        if fallback_products or fallback_storefronts:
+            products = fallback_products
+            storefronts = fallback_storefronts
+            intent["fallback_applied"] = True
+
+    # ── 4. Telemetry: Log search and capture zero-results ──
+    is_zero_result = (len(products) == 0 and len(storefronts) == 0)
+    log_platform_event(
+        event_name="search_performed",
+        session_id=session_id,
+        source="marketplace",
+        properties={
+            "query": q,
+            "parsed_intent": intent,
+            "products_count": len(products),
+            "storefronts_count": len(storefronts),
+            "zero_results": is_zero_result,
+        }
     )
 
     return jsonify({
@@ -478,9 +544,43 @@ def search():
             "location": p.location,
             "latitude": p.latitude,
             "longitude": p.longitude,
+            "product_type": p.product_type or "physical",
         } for p in products],
         "storefronts": [s.to_public_dict() for s in storefronts],
+        "intent": intent,
+        "zero_results": is_zero_result,
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# POST /marketplace/telemetry — Client Event Ingestion
+# ---------------------------------------------------------------------------
+
+@public_bp.route('/telemetry', methods=['POST'])
+@limiter.limit("120 per minute")
+def record_telemetry():
+    """Ingests client-side platform events (search clicks, views, funnels)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        event_name = data.get('event_name')
+        if not event_name:
+            return jsonify({"status": "ignored", "reason": "missing event_name"}), 400
+
+        from app.services.event_logger import log_platform_event
+        log_platform_event(
+            event_name=event_name,
+            session_id=data.get('session_id'),
+            user_id=data.get('user_id'),
+            business_id=data.get('business_id'),
+            storefront_id=data.get('storefront_id'),
+            product_id=data.get('product_id'),
+            order_id=data.get('order_id'),
+            source=data.get('source') or 'web',
+            properties=data.get('properties') or {},
+        )
+        return jsonify({"status": "recorded"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 200  # Return 200 to prevent breaking client
 
 
 # ---------------------------------------------------------------------------
