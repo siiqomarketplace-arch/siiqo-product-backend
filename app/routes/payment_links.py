@@ -52,6 +52,7 @@ def create_payment_link():
     product_type = (data.get('product_type') or 'service').lower()
     if product_type not in ('physical', 'digital', 'service'):
         product_type = 'service'
+    file_url = (data.get('file_url') or '').strip() or None
 
     if not title:
         return jsonify({"message": "Title is required"}), 400
@@ -88,6 +89,7 @@ def create_payment_link():
         status='ACTIVE',
         slug=slug,
         product_type=product_type,
+        file_url=file_url,
     )
 
     db.session.add(new_link)
@@ -456,6 +458,8 @@ def pay_payment_link(link_id):
                 "confirmation_url": conf_url,
                 "buyer_phone": buyer_phone,
                 "buyer_email": buyer_email if has_real_email else "",
+                "file_url": link.file_url,
+                "product_type": link_product_type,
                 "daya": {
                     "bank_name": dp.bank_name,
                     "account_number": dp.account_number,
@@ -516,4 +520,6 @@ def pay_payment_link(link_id):
             "confirmation_url": conf_url,
             "buyer_phone": buyer_phone,
             "buyer_email": buyer_email if has_real_email else "",
+            "file_url": link.file_url,
+            "product_type": link_product_type,
         }), 200

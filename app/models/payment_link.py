@@ -17,6 +17,7 @@ class PaymentLink(db.Model):
     # physical → Daya only (bank transfer / crypto). NEVER Paystack.
     # digital / service → Paystack (card) + Daya (bank transfer / crypto)
     product_type = db.Column(db.String(20), default='service', nullable=False)
+    file_url = db.Column(db.String(500), nullable=True) # Optional digital file or service/booking link
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     vendor = db.relationship('User', foreign_keys=[vendor_id])
@@ -33,5 +34,6 @@ class PaymentLink(db.Model):
             "status": self.status,
             "slug": self.slug,
             "product_type": self.product_type or "service",
+            "file_url": self.file_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

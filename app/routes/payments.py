@@ -465,6 +465,15 @@ def daya_status():
     is_existing = bool(_o and not _o.is_guest) if _o else False
     conf_url = f"https://siiqo.com/order-confirm/{order_id}?token={generate_order_token(order_id)}"
 
+    pl_file_url = None
+    pl_product_type = None
+    if _o and _o.payment_link_id:
+        from app.models.payment_link import PaymentLink
+        pl = db.session.get(PaymentLink, _o.payment_link_id)
+        if pl:
+            pl_file_url = pl.file_url
+            pl_product_type = pl.product_type
+
     return jsonify({
         "orderId": str(order_id),
         "status":  dp.status,
@@ -473,6 +482,8 @@ def daya_status():
         "buyer_phone": b_phone,
         "buyer_email": b_email,
         "is_existing_account": is_existing,
+        "file_url": pl_file_url,
+        "product_type": pl_product_type,
     }), 200
 
 

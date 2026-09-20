@@ -83,8 +83,9 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_email_sent BOOLEAN DEFAULT FALSE",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
-                # ── Payment link product type ────────────────────────────────────
+                # ── Payment link product type & digital file ─────────────────────
                 "ALTER TABLE payment_links ADD COLUMN IF NOT EXISTS product_type VARCHAR(20) DEFAULT 'service'",
+                "ALTER TABLE payment_links ADD COLUMN IF NOT EXISTS file_url VARCHAR(500)",
                 # ── Invoice standalone billing columns ───────────────────────────
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255)",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255)",
