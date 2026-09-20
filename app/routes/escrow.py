@@ -1375,25 +1375,45 @@ def generate_order_token(order_id: int) -> str:
 
 
 @escrow_bp.route('/order-details-by-token', methods=['GET'])
+@jwt_required(optional=True)
 def get_order_details_by_token():
     """
-    Public token-authenticated endpoint for guest delivery confirmation page.
-    Query params: order_id, token
+    Public token-authenticated or user-authenticated endpoint for delivery confirmation page.
+    Query params: order_id, token (optional if authenticated as buyer/vendor/admin)
     """
     order_id = request.args.get('order_id', type=int)
     token = (request.args.get('token') or '').strip()
+    user_id = get_jwt_identity()
 
-    if not order_id or not token:
-        return jsonify({"message": "order_id and token are required"}), 400
-
-    expected_token = generate_order_token(order_id)
-    if not hmac.compare_digest(expected_token, token):
-        return jsonify({"message": "Invalid or expired confirmation link"}), 403
+    if not order_id:
+        return jsonify({"message": "order_id is required"}), 400
 
     from app.models.order import Order
     order = db.session.get(Order, order_id)
     if not order:
         return jsonify({"message": "Order not found"}), 404
+
+    token_valid = False
+    if token:
+        expected_token = generate_order_token(order_id)
+        token_valid = hmac.compare_digest(expected_token, token)
+
+    is_authorized_user = False
+    if user_id:
+        try:
+            u_id = int(user_id)
+            if u_id == order.buyer_id or u_id == order.vendor_id:
+                is_authorized_user = True
+            else:
+                from app.models.user import User, UserRole
+                u = db.session.get(User, u_id)
+                if u and u.role == UserRole.ADMIN:
+                    is_authorized_user = True
+        except Exception:
+            pass
+
+    if not token_valid and not is_authorized_user:
+        return jsonify({"message": "Invalid or missing confirmation security token. Please check your link or log in."}), 403
 
     vendor_name = "Vendor"
     if order.vendor and hasattr(order.vendor, 'storefront') and order.vendor.storefront:
@@ -1426,26 +1446,25 @@ def get_order_details_by_token():
 
 
 @escrow_bp.route('/confirm-delivery-by-token', methods=['POST'])
+@jwt_required(optional=True)
 def confirm_delivery_by_token():
     """
-    Public token-authenticated delivery confirmation.
-    Releases escrow and triggers vendor payout without requiring buyer login.
+    Delivery confirmation endpoint.
+    Authenticated via token OR buyer JWT.
+    Releases escrow and triggers vendor payout.
     """
     data = request.get_json() or {}
     order_id = data.get('order_id')
     token = (data.get('token') or '').strip()
+    user_id = get_jwt_identity()
 
-    if not order_id or not token:
-        return jsonify({"message": "order_id and token are required"}), 400
+    if not order_id:
+        return jsonify({"message": "order_id is required"}), 400
 
     try:
         order_id = int(order_id)
     except (ValueError, TypeError):
         return jsonify({"message": "Invalid order_id"}), 400
-
-    expected_token = generate_order_token(order_id)
-    if not hmac.compare_digest(expected_token, token):
-        return jsonify({"message": "Invalid or expired confirmation token"}), 403
 
     from app.models.order import Order
     from app.models.escrow import EscrowTransaction
@@ -1453,6 +1472,28 @@ def confirm_delivery_by_token():
     order = db.session.get(Order, order_id)
     if not order:
         return jsonify({"message": "Order not found"}), 404
+
+    token_valid = False
+    if token:
+        expected_token = generate_order_token(order_id)
+        token_valid = hmac.compare_digest(expected_token, token)
+
+    is_buyer = False
+    if user_id:
+        try:
+            u_id = int(user_id)
+            if u_id == order.buyer_id:
+                is_buyer = True
+            else:
+                from app.models.user import User, UserRole
+                u = db.session.get(User, u_id)
+                if u and u.role == UserRole.ADMIN:
+                    is_buyer = True
+        except Exception:
+            pass
+
+    if not token_valid and not is_buyer:
+        return jsonify({"message": "Invalid or expired confirmation token. Only the buyer can confirm package receipt."}), 403
 
     escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
     if not escrow:
