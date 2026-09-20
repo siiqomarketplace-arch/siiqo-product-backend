@@ -1109,14 +1109,24 @@ def admin_update_order_status(order_id):
         return jsonify({"message": f"Invalid status. Must be one of {valid_statuses}"}), 400
 
     old_status = order.status
-    order.status = new_status
-    db.session.commit()
+    if new_status == 'COMPLETED':
+        from app.models.escrow import EscrowTransaction
+        from app.routes.escrow import execute_order_escrow_release
+        escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+        if escrow:
+            execute_order_escrow_release(order, escrow, source=f"admin-{admin.id}")
+        else:
+            order.status = 'COMPLETED'
+            db.session.commit()
+    else:
+        order.status = new_status
+        db.session.commit()
 
     logger.info("[ADMIN] Admin %s updated Order #%s status from %s to %s", admin.id, order.id, old_status, new_status)
 
     return jsonify({
         "status": "success",
-        "message": f"Order #{order.id} status updated to {new_status}",
+        "message": f"Order #{order.id} status updated to {new_status} and payout processed",
         "order": {"id": order.id, "status": order.status}
     }), 200
 

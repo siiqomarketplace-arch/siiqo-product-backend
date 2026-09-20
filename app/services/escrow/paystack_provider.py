@@ -410,23 +410,117 @@ def create_paystack_subaccount(
     if not key:
         return {"success": False, "error_message": "Paystack API key not configured."}
 
-    # Map NIBSS / CBN institution codes to Paystack settlement bank codes
-    NIBSS_TO_PAYSTACK_BANKS = {
-        "100004": "999992",  # OPay (Paycom)
-        "999992": "999992",  # OPay
-        "100033": "999991",  # PalmPay
-        "999991": "999991",  # PalmPay
-        "090405": "50515",   # Moniepoint MFB
-        "50515": "50515",    # Moniepoint MFB
-        "090267": "50211",   # Kuda Bank
-        "50211": "50211",    # Kuda Bank
-        "090551": "51318",   # FairMoney MFB
-        "51318": "51318",    # FairMoney MFB
-        "090110": "565",     # VFD Microfinance Bank
-        "565": "565",        # VFD Microfinance Bank
-        "090251": "50383",   # Carbon
-        "50383": "50383",    # Carbon
+# Map NIBSS / CBN institution codes to Paystack settlement bank codes
+NIBSS_TO_PAYSTACK_BANKS = {
+    "100004": "999992",  # OPay (Paycom)
+    "999992": "999992",  # OPay
+    "100033": "999991",  # PalmPay
+    "999991": "999991",  # PalmPay
+    "090405": "50515",   # Moniepoint MFB
+    "50515": "50515",    # Moniepoint MFB
+    "090267": "50211",   # Kuda Bank
+    "50211": "50211",    # Kuda Bank
+    "090551": "51318",   # FairMoney MFB
+    "51318": "51318",    # FairMoney MFB
+    "090110": "565",     # VFD Microfinance Bank
+    "565": "565",        # VFD Microfinance Bank
+    "090251": "50383",   # Carbon
+    "50383": "50383",    # Carbon
+}
+
+PAYSTACK_TO_NIBSS_BANKS = {
+    "999992": "100004",  # OPay
+    "999991": "100033",  # PalmPay
+    "50515": "50515",    # Moniepoint
+    "50211": "50211",    # Kuda
+    "51318": "51318",    # FairMoney
+    "565": "565",        # VFD
+    "50383": "50383",    # Carbon
+}
+
+
+def ensure_paystack_transfer_recipient(
+    account_number: str,
+    bank_code: str,
+    account_name: str = "Vendor",
+) -> dict:
+    """
+    Creates or retrieves a Paystack transfer recipient (RCP_xxxx),
+    translating NIBSS/CBN codes (e.g. 100004 -> 999992 for OPay) automatically.
+    """
+    key = _paystack_key()
+    if not key:
+        return {"success": False, "error_message": "Paystack API key not configured."}
+
+    paystack_bank_code = NIBSS_TO_PAYSTACK_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
+    resolved_name = (account_name or "").strip()
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
     }
+
+    # If name is placeholder or empty, attempt resolve
+    if not resolved_name or resolved_name.lower() in ("vendor", "bank"):
+        try:
+            res_resp = requests.get(
+                f"{PAYSTACK_BASE_URL}/bank/resolve",
+                headers=headers,
+                params={"account_number": account_number, "bank_code": paystack_bank_code},
+                timeout=10,
+            )
+            res_data = res_resp.json()
+            if res_data.get("status") and res_data.get("data", {}).get("account_name"):
+                resolved_name = res_data["data"]["account_name"]
+        except Exception as _e:
+            logging.warning(f"[ENSURE RECIPIENT] Resolve warning: {_e}")
+
+    if not resolved_name:
+        resolved_name = "Siiqo Vendor"
+
+    payload = {
+        "type": "nuban",
+        "name": resolved_name,
+        "account_number": account_number,
+        "bank_code": paystack_bank_code,
+        "currency": "NGN",
+    }
+
+    try:
+        resp = requests.post(
+            f"{PAYSTACK_BASE_URL}/transferrecipient",
+            json=payload,
+            headers=headers,
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get("status") and data.get("data", {}).get("recipient_code"):
+            recipient_code = data["data"]["recipient_code"]
+            logging.info(f"[ENSURE RECIPIENT] Created {recipient_code} for {account_number} ({paystack_bank_code})")
+            return {
+                "success": True,
+                "recipient_code": recipient_code,
+                "account_name": resolved_name,
+            }
+        else:
+            msg = data.get("message", "Failed to create recipient")
+            logging.error(f"[ENSURE RECIPIENT] Error creating recipient: {data}")
+            return {"success": False, "error_message": msg}
+    except Exception as exc:
+        logging.error(f"[ENSURE RECIPIENT] Exception: {exc}")
+        return {"success": False, "error_message": str(exc)}
+
+
+def create_paystack_subaccount(
+    business_name: str,
+    bank_code: str,
+    account_number: str,
+    description: str = "",
+) -> dict:
+    key = _paystack_key()
+    if not key:
+        return {"success": False, "error_message": "Paystack API key not configured."}
+
     settlement_bank = NIBSS_TO_PAYSTACK_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
 
     payload = {
@@ -475,3 +569,4 @@ def create_paystack_subaccount(
         "subaccount_code": subaccount_code,
         "error_message": None,
     }
+

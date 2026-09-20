@@ -763,28 +763,137 @@ def _paystack_payout_vendor(order, escrow):
             vendor_id=order.vendor_id
         ).first()
 
-    if bank_acc and bank_acc.recipient_code:
-        from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-        import uuid
-        transfer_result = paystack_transfer_to_vendor(
-            recipient_code=bank_acc.recipient_code,
-            amount_ngn=net_amount,
-            reference=f"PAYOUT-{order.id}-{uuid.uuid4().hex[:6].upper()}",
-            reason=f"Siiqo payout for Order #{order.id}",
-        )
-        if not transfer_result.get("success"):
-            logging.error(
-                f"[PAYSTACK TRANSFER] Failed for Order #{order.id}: "
-                f"{transfer_result.get('error_message')}"
+    if bank_acc:
+        if not bank_acc.recipient_code and bank_acc.account_number and bank_acc.bank_code:
+            # Self-healing payout: create Paystack transfer recipient on-the-fly
+            try:
+                from app.services.escrow.paystack_provider import ensure_paystack_transfer_recipient
+                rec_res = ensure_paystack_transfer_recipient(
+                    account_number=bank_acc.account_number,
+                    bank_code=bank_acc.bank_code,
+                    account_name=bank_acc.account_name or "Vendor",
+                )
+                if rec_res.get("success"):
+                    bank_acc.recipient_code = rec_res["recipient_code"]
+                    if not bank_acc.account_name or bank_acc.account_name == "Vendor":
+                        bank_acc.account_name = rec_res.get("account_name") or bank_acc.account_name
+                    db.session.commit()
+                    logging.info(
+                        f"[PAYSTACK SELF-HEALING] Auto-created recipient {bank_acc.recipient_code} "
+                        f"for vendor {order.vendor_id} on Order #{order.id}"
+                    )
+            except Exception as _heal_exc:
+                logging.warning(f"[PAYSTACK SELF-HEALING] Failed to auto-create recipient: {_heal_exc}")
+
+        if bank_acc.recipient_code:
+            from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+            import uuid
+            transfer_result = paystack_transfer_to_vendor(
+                recipient_code=bank_acc.recipient_code,
+                amount_ngn=net_amount,
+                reference=f"PAYOUT-{order.id}-{uuid.uuid4().hex[:6].upper()}",
+                reason=f"Siiqo payout for Order #{order.id}",
             )
-            return False
-        return True
-    else:
-        logging.warning(
-            f"[RELEASE] Vendor {order.vendor_id} has no recipient_code. "
-            "Crediting ledger only — no Paystack transfer."
-        )
+            if not transfer_result.get("success"):
+                logging.error(
+                    f"[PAYSTACK TRANSFER] Failed for Order #{order.id}: "
+                    f"{transfer_result.get('error_message')}"
+                )
+                return False
+            return True
+
+    logging.warning(
+        f"[RELEASE] Vendor {order.vendor_id} has no valid bank account or recipient_code. "
+        "Crediting ledger only — no Paystack transfer."
+    )
+    return False
+
+
+def execute_order_escrow_release(order, escrow, source="admin"):
+    """
+    Unified, idempotent order completion & payout pipeline.
+    1. Sets escrow.status = RELEASED
+    2. Credits vendor ledger balance
+    3. Fires transfer payout (Paystack or Daya based on order gateway)
+    4. Sets order.status = 'COMPLETED'
+    5. Sends notifications to buyer & vendor
+    """
+    if not order or not escrow:
         return False
+
+    if escrow.status == EscrowStatus.RELEASED:
+        order.status = 'COMPLETED'
+        db.session.commit()
+        return True
+
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    escrow.status = EscrowStatus.RELEASED
+    escrow.released_at = _utcnow()
+    order.status = 'COMPLETED'
+
+    _credit_vendor_ledger(
+        vendor_id=order.vendor_id,
+        amount=net_amount,
+        reference_id=escrow.transaction_number or f"ORD-{order.id}",
+        description=f"Payout for Order #{order.id} ({source})",
+    )
+
+    # Determine payout channel: Daya (crypto/NGN onramp) vs Paystack
+    is_daya_order = (
+        order.payment_method in ('CRYPTO', 'DAYA', 'USDT', 'USDC')
+        or getattr(escrow, 'gateway', None) == 'DAYA'
+        or getattr(order, 'crypto_hash', None)
+    )
+
+    if is_daya_order:
+        try:
+            from app.routes.payments import _payout_vendor_via_daya
+            _payout_vendor_via_daya(order, escrow)
+        except Exception as _d_err:
+            logging.warning(f"[ESCROW RELEASE] Daya payout error for Order #{order.id}: {_d_err}")
+    else:
+        # Paystack channel
+        vendor_already_paid_via_split = False
+        try:
+            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first() or \
+                       VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
+            if bank_acc and bank_acc.paystack_subaccount_code:
+                vendor_already_paid_via_split = True
+            else:
+                from app.models.user import Storefront
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.paystack_subaccount_code:
+                    vendor_already_paid_via_split = True
+        except Exception as _sub_err:
+            logging.warning(f"[ESCROW RELEASE] Subaccount check warning: {_sub_err}")
+
+        if not vendor_already_paid_via_split:
+            _paystack_payout_vendor(order, escrow)
+
+    # In-app notifications
+    try:
+        from app.models.communication import Notification
+        if order.buyer_id:
+            db.session.add(Notification(
+                user_id=order.buyer_id,
+                title="Order Completed",
+                message=f"Order #{order.id} is marked complete.",
+                type="ORDER",
+                order_id=order.id,
+            ))
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Payment Released",
+            message=f"Payment of ₦{net_amount:,.2f} for Order #{order.id} has been released to your account.",
+            type="ESCROW",
+            order_id=order.id,
+        ))
+    except Exception as _notif_err:
+        logging.warning(f"[ESCROW RELEASE] Notification warning: {_notif_err}")
+
+    db.session.commit()
+    logging.info(f"[ESCROW RELEASE] Released Order #{order.id} and paid vendor {order.vendor_id} via {source}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1250,3 +1359,116 @@ def raise_dispute():
         "disputeId": escrow.dispute_id,
         "message": "Dispute raised. Funds are frozen. Our team will review within 48 hours.",
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# TOKEN-BASED GUEST DELIVERY CONFIRMATION
+# Allows guest buyers to view order summary and confirm receipt in 1 click
+# without requiring an account or login.
+# ---------------------------------------------------------------------------
+
+def generate_order_token(order_id: int) -> str:
+    secret = (os.environ.get("SECRET_KEY") or "siiqo-secret-key-salt-2026").encode()
+    return hmac.new(secret, f"order-confirm-{order_id}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+@escrow_bp.route('/order-details-by-token', methods=['GET'])
+def get_order_details_by_token():
+    """
+    Public token-authenticated endpoint for guest delivery confirmation page.
+    Query params: order_id, token
+    """
+    order_id = request.args.get('order_id', type=int)
+    token = (request.args.get('token') or '').strip()
+
+    if not order_id or not token:
+        return jsonify({"message": "order_id and token are required"}), 400
+
+    expected_token = generate_order_token(order_id)
+    if not hmac.compare_digest(expected_token, token):
+        return jsonify({"message": "Invalid or expired confirmation link"}), 403
+
+    from app.models.order import Order
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+
+    vendor_name = "Vendor"
+    if order.vendor and hasattr(order.vendor, 'storefront') and order.vendor.storefront:
+        vendor_name = order.vendor.storefront.store_name
+    elif order.vendor:
+        vendor_name = order.vendor.first_name or "Vendor"
+
+    items_list = []
+    for it in order.items:
+        items_list.append({
+            "name": it.product.name if it.product else "Item",
+            "quantity": it.quantity,
+            "price": float(it.price or 0),
+        })
+
+    return jsonify({
+        "status": "success",
+        "order": {
+            "id": order.id,
+            "status": order.status,
+            "total_amount": float(order.total_amount),
+            "buyer_name": order.buyer_name,
+            "buyer_email": order.buyer_email,
+            "buyer_phone": order.buyer_phone,
+            "vendor_name": vendor_name,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "items": items_list,
+        }
+    }), 200
+
+
+@escrow_bp.route('/confirm-delivery-by-token', methods=['POST'])
+def confirm_delivery_by_token():
+    """
+    Public token-authenticated delivery confirmation.
+    Releases escrow and triggers vendor payout without requiring buyer login.
+    """
+    data = request.get_json() or {}
+    order_id = data.get('order_id')
+    token = (data.get('token') or '').strip()
+
+    if not order_id or not token:
+        return jsonify({"message": "order_id and token are required"}), 400
+
+    try:
+        order_id = int(order_id)
+    except (ValueError, TypeError):
+        return jsonify({"message": "Invalid order_id"}), 400
+
+    expected_token = generate_order_token(order_id)
+    if not hmac.compare_digest(expected_token, token):
+        return jsonify({"message": "Invalid or expired confirmation token"}), 403
+
+    from app.models.order import Order
+    from app.models.escrow import EscrowTransaction
+
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+
+    escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    if not escrow:
+        return jsonify({"message": "No escrow record found for this order"}), 404
+
+    if escrow.status == EscrowStatus.RELEASED or order.status == 'COMPLETED':
+        return jsonify({
+            "status": "success",
+            "message": "Order is already completed and received. Thank you!",
+            "already_completed": True,
+        }), 200
+
+    success = execute_order_escrow_release(order, escrow, source="guest_buyer_token")
+    if not success:
+        return jsonify({"message": "Could not complete release. Please contact support."}), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Delivery confirmed! Payment has been released to the vendor. Thank you for shopping on Siiqo.",
+    }), 200
+

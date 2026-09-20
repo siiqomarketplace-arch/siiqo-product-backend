@@ -87,6 +87,11 @@ def add_bank_account():
     if not bank_code or not account_number:
         return jsonify({'message': 'bank_code and account_number required'}), 400
     
+    # Normalize bank codes for Paystack and CBN/Daya
+    from app.services.escrow.paystack_provider import NIBSS_TO_PAYSTACK_BANKS, PAYSTACK_TO_NIBSS_BANKS
+    paystack_bank_code = NIBSS_TO_PAYSTACK_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
+    cbn_bank_code = PAYSTACK_TO_NIBSS_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
+
     # Verify account with Paystack
     is_test_mode = PAYSTACK_SECRET_KEY.startswith('sk_test_')
     try:
@@ -107,7 +112,7 @@ def add_bank_account():
             resolve_url = f'{PAYSTACK_BASE_URL}/bank/resolve'
             resolve_params = {
                 'account_number': account_number,
-                'bank_code': bank_code
+                'bank_code': paystack_bank_code
             }
             resolve_response = requests.get(resolve_url, headers=headers, params=resolve_params, timeout=10)
             resolve_data = resolve_response.json()
@@ -123,7 +128,7 @@ def add_bank_account():
             'type': 'nuban',
             'name': account_name,
             'account_number': account_number,
-            'bank_code': bank_code,
+            'bank_code': paystack_bank_code,
             'currency': 'NGN'
         }
         recipient_response = requests.post(recipient_url, headers=headers, json=recipient_payload, timeout=10)
@@ -138,19 +143,28 @@ def add_bank_account():
         existing = VendorBankAccount.query.filter_by(
             vendor_id=vendor_id,
             account_number=account_number,
-            bank_code=bank_code
         ).first()
         
         if existing:
-            return jsonify({'message': 'This bank account is already added'}), 400
+            # Update recipient_code and details on existing record
+            existing.recipient_code = recipient_code
+            existing.bank_name = bank_name or existing.bank_name
+            existing.bank_code = cbn_bank_code or existing.bank_code
+            existing.account_name = account_name or existing.account_name
+            db.session.commit()
+            return jsonify({
+                'status': 'success',
+                'message': 'Bank account updated successfully',
+                'account': existing.to_dict()
+            }), 200
         
-        # 4. Create bank account record
+        # 4. Create bank account record (save CBN code for Daya + recipient_code for Paystack)
         is_first = VendorBankAccount.query.filter_by(vendor_id=vendor_id).count() == 0
         
         bank_account = VendorBankAccount(
             vendor_id=vendor_id,
             bank_name=bank_name,
-            bank_code=bank_code,
+            bank_code=cbn_bank_code,
             account_number=account_number,
             account_name=account_name,
             recipient_code=recipient_code,
@@ -1032,16 +1046,42 @@ def add_daya_bank_account():
         # Transfer still includes account_name if we have it, which bypasses
         # Daya's internal resolution on payout anyway.
 
-    # Step 2: Check for duplicate (same account_number + bank_code for this vendor)
+    # Step 2: Create Paystack transfer recipient (translates CBN code -> Paystack code)
+    recipient_code = None
+    try:
+        from app.services.escrow.paystack_provider import ensure_paystack_transfer_recipient
+        rec_res = ensure_paystack_transfer_recipient(
+            account_number=account_number,
+            bank_code=bank_code,
+            account_name=account_name or bank_name,
+        )
+        if rec_res.get("success"):
+            recipient_code = rec_res.get("recipient_code")
+            if not account_name and rec_res.get("account_name"):
+                account_name = rec_res["account_name"]
+            logging.info("[DAYA BANK REG] Paystack recipient created: %s", recipient_code)
+    except Exception as _rec_err:
+        logging.warning("[DAYA BANK REG] Could not create Paystack recipient: %s", _rec_err)
+
+    # Step 3: Check for duplicate (same account_number for this vendor)
     existing = VendorBankAccount.query.filter_by(
         vendor_id=vendor_id,
         account_number=account_number,
-        bank_code=bank_code,
     ).first()
     if existing:
-        return jsonify({"message": "This bank account is already registered"}), 400
+        # If existing is missing recipient_code or details, update it
+        if recipient_code and not existing.recipient_code:
+            existing.recipient_code = recipient_code
+        if bank_code:
+            existing.bank_code = bank_code
+        if bank_name:
+            existing.bank_name = bank_name
+        if account_name:
+            existing.account_name = account_name
+        db.session.commit()
+        return jsonify({"status": "success", "message": "Bank account updated successfully", "account": existing.to_dict()}), 200
 
-    # Step 3: Save with Daya-native bank code
+    # Step 4: Save with Daya-native bank code and Paystack recipient_code
     is_first = VendorBankAccount.query.filter_by(vendor_id=vendor_id).count() == 0
 
     bank_account = VendorBankAccount(
@@ -1050,7 +1090,7 @@ def add_daya_bank_account():
         bank_code=bank_code,           # CBN/Daya code — works on Daya transfers
         account_number=account_number,
         account_name=account_name,
-        recipient_code=None,           # No Paystack recipient for Daya-path accounts
+        recipient_code=recipient_code, # Paystack recipient — works on Paystack transfers
         is_verified=bool(account_name),
         verified_at=_utcnow() if account_name else None,
         is_default=is_first,

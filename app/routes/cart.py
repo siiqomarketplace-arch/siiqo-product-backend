@@ -658,9 +658,11 @@ def checkout():
     # ── Non-blocking telemetry: log checkout funnel signal ──────────────────
     try:
         from app.services.event_logger import log_platform_event
+        checkout_session_id = data.get("session_id") or request.headers.get("X-Session-ID")
         for order_info in orders_created:
             log_platform_event(
                 event_name="checkout_started",
+                session_id=checkout_session_id,
                 user_id=int(user_id) if user_id else None,
                 business_id=order_info.get("vendor_id"),
                 order_id=order_info.get("order_id"),

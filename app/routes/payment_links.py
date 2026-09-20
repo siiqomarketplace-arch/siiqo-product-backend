@@ -183,14 +183,23 @@ def pay_payment_link(link_id):
     buyer_email = (data.get('buyer_email') or '').strip().lower()
     buyer_phone = (data.get('buyer_phone') or '').strip()
 
-    if not buyer_name or not buyer_email or not buyer_phone:
-        return jsonify({"message": "buyer_name, buyer_email, and buyer_phone are required"}), 400
+    link_product_type = getattr(link, 'product_type', 'service') or 'service'
+
+    if not buyer_name:
+        buyer_name = "Guest Buyer"
+
+    # Only physical products strictly require a phone number for courier delivery
+    if link_product_type == 'physical' and not buyer_phone:
+        return jsonify({"message": "Phone number is required for physical delivery."}), 400
+
+    has_real_email = bool(buyer_email and '@' in buyer_email)
+    if not has_real_email:
+        buyer_email = f"guest-{uuid.uuid4().hex[:10]}@guest.siiqo.local"
 
     # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
     # Pay Links for physical products must never route to Paystack.
     # payment_method must be 'bank_transfer' or 'crypto' for physical links.
     payment_method = (data.get('payment_method') or 'card').lower()
-    link_product_type = getattr(link, 'product_type', 'service') or 'service'
 
     if link_product_type == 'physical' and payment_method == 'card':
         return jsonify({
@@ -225,7 +234,7 @@ def pay_payment_link(link_id):
         # Create a light guest user — password unknown to buyer until they claim account
         buyer_user = User(
             email=buyer_email,
-            phone=buyer_phone,
+            phone=buyer_phone or None,
             role=UserRole.BUYER,
             is_verified=True,  # guest accounts bypass verification
         )
@@ -245,6 +254,10 @@ def pay_payment_link(link_id):
         status='PENDING',
         payment_method='ESCROW',
         payment_link_id=link.id,
+        buyer_name=buyer_name,
+        buyer_email=buyer_email if has_real_email else None,
+        buyer_phone=buyer_phone or None,
+        is_guest=not existing_account,
     )
     db.session.add(new_order)
     db.session.flush()
@@ -279,8 +292,8 @@ def pay_payment_link(link_id):
     )
 
     # Send a "claim your account" / OTP email to the guest buyer NOW (before payment)
-    # so they have credentials ready when they return from the payment gateway.
-    if not existing_account:
+    # only if a real email was provided.
+    if not existing_account and has_real_email:
         import random
         from datetime import timedelta
         otp = str(random.randint(100000, 999999))

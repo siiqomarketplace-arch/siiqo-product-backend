@@ -22,6 +22,7 @@ from app.utils.upload import save_uploaded_file
 from app.utils.email import send_siiqo_email
 from app.utils.algolia_sync import sync_product_to_algolia, delete_product_from_algolia
 from app.utils.scraper import scrape_product_url, analyze_storefront_url
+from app.routes.escrow import generate_order_token
 
 vendor_bp = Blueprint('vendor', __name__)
 
@@ -1328,6 +1329,7 @@ def get_orders():
         "buyer_name": (o.buyer.full_name if o.buyer else None) or o.buyer_name or "",
         "buyer_phone": (o.buyer.phone if o.buyer else None) or getattr(o, 'buyer_phone', None) or o.delivery_phone or "",
         "is_guest": bool(o.is_guest or not o.buyer_id),
+        "confirmation_url": f"https://siiqo.com/order-confirm/{o.id}?token={generate_order_token(o.id)}",
         "shipping_address": {
             "name": o.delivery_name or (o.buyer.full_name if o.buyer else None) or o.buyer_name or "Guest Buyer",
             "street": o.delivery_address or "N/A",
