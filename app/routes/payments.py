@@ -457,10 +457,22 @@ def daya_status():
         except Exception as exc:
             logger.warning("[DAYA STATUS] Retry confirmation failed for order %s: %s", order_id, exc)
 
+    from app.models.order import Order
+    from app.routes.escrow import generate_order_token
+    _o = db.session.get(Order, order_id)
+    b_phone = (_o.buyer_phone or getattr(_o, 'delivery_phone', None)) if _o else None
+    b_email = _o.buyer_email if _o else None
+    is_existing = bool(_o and not _o.is_guest) if _o else False
+    conf_url = f"https://siiqo.com/order-confirm/{order_id}?token={generate_order_token(order_id)}"
+
     return jsonify({
         "orderId": str(order_id),
         "status":  dp.status,
         "paidAt":  dp.updated_at.isoformat() if dp.status == "COMPLETED" else None,
+        "confirmation_url": conf_url,
+        "buyer_phone": b_phone,
+        "buyer_email": b_email,
+        "is_existing_account": is_existing,
     }), 200
 
 

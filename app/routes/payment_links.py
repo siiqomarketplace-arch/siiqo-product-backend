@@ -14,6 +14,7 @@ from app.models.order import Order, OrderItem
 from app.models.escrow import EscrowTransaction, EscrowStatus
 from app.models.payment_link import PaymentLink
 from app.models.withdrawal import VendorBankAccount
+from app.routes.escrow import generate_order_token
 
 payment_links_bp = Blueprint('payment_links', __name__)
 
@@ -257,6 +258,8 @@ def pay_payment_link(link_id):
         buyer_name=buyer_name,
         buyer_email=buyer_email if has_real_email else None,
         buyer_phone=buyer_phone or None,
+        delivery_phone=buyer_phone or None,
+        delivery_name=buyer_name,
         is_guest=not existing_account,
     )
     db.session.add(new_order)
@@ -443,11 +446,16 @@ def pay_payment_link(link_id):
             db.session.commit()
 
             amount_usd = round(final_amount_ngn / rate, 6)
+            conf_url = f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}"
             return jsonify({
                 "success": True,
                 "payment_method": payment_method,
                 "order_id": new_order.id,
                 "amount": str(amount),
+                "existing_account": existing_account,
+                "confirmation_url": conf_url,
+                "buyer_phone": buyer_phone,
+                "buyer_email": buyer_email if has_real_email else "",
                 "daya": {
                     "bank_name": dp.bank_name,
                     "account_number": dp.account_number,
@@ -496,6 +504,7 @@ def pay_payment_link(link_id):
         db.session.add(new_escrow)
         db.session.commit()
 
+        conf_url = f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}"
         return jsonify({
             "success": True,
             "paymentLink": result.get('payment_link'),
@@ -503,4 +512,8 @@ def pay_payment_link(link_id):
             "amount": str(amount),
             "status": EscrowStatus.PENDING_PAYMENT,
             "order_id": new_order.id,
+            "existing_account": existing_account,
+            "confirmation_url": conf_url,
+            "buyer_phone": buyer_phone,
+            "buyer_email": buyer_email if has_real_email else "",
         }), 200

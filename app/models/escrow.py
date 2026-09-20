@@ -88,6 +88,13 @@ class EscrowTransaction(db.Model):
                 for item in (self.order.items if self.order else [])
                 if (item.product and item.product.product_type == 'digital' and item.product.file_url)
             ] if (self.status == EscrowStatus.RELEASED or (self.order and self.order.status == 'COMPLETED')) else [],
+            "confirmation_url": (
+                f"https://siiqo.com/order-confirm/{self.order_id}?token="
+                f"{__import__('app.routes.escrow', fromlist=['generate_order_token']).generate_order_token(self.order_id)}"
+            ) if self.order_id else None,
+            "buyer_phone": (self.order.buyer_phone or getattr(self.order, 'delivery_phone', None)) if self.order else None,
+            "buyer_email": self.order.buyer_email if self.order else None,
+            "is_guest": bool(self.order.is_guest) if self.order else True,
         }
 
 

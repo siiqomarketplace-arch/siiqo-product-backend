@@ -18,6 +18,7 @@ from app.models.communication import Notification
 from app.models.withdrawal import PODPayment, VendorBankAccount
 from app.utils.email import send_siiqo_email
 from app.utils.telegram import send_telegram_message
+from app.routes.escrow import generate_order_token
 
 cart_bp = Blueprint('cart', __name__)
 
@@ -421,6 +422,14 @@ def checkout():
         guest_name = (data.get('delivery_name') or (data.get('customer', {}).get('name')) or (user.full_name if user else '')).strip()
         guest_phone = (data.get('delivery_phone') or data.get('phone') or (data.get('customer', {}).get('phone')) or (user.phone if user else '') or '').strip()
 
+        effective_buyer_id = int(user_id) if user_id else None
+        is_guest_order = (user_id is None)
+        if not effective_buyer_id and guest_email:
+            existing_user = User.query.filter(db.func.lower(User.email) == guest_email).first()
+            if existing_user:
+                effective_buyer_id = existing_user.id
+                is_guest_order = False
+
         if user and not getattr(user, 'phone', None) and guest_phone:
             try:
                 user.phone = guest_phone
@@ -428,7 +437,7 @@ def checkout():
                 pass
 
         new_order = Order(
-            buyer_id=int(user_id) if user_id else None,
+            buyer_id=effective_buyer_id,
             vendor_id=vid,
             total_amount=total,
             status='PENDING',
@@ -436,7 +445,7 @@ def checkout():
             buyer_email=guest_email,
             buyer_name=guest_name,
             buyer_phone=guest_phone or None,
-            is_guest=(user_id is None),
+            is_guest=is_guest_order,
             logistics_provider_id=logistics_provider_id,
             logistics_fee=logistics_fee,
             delivery_address=data.get('delivery_address') if has_physical_items else 'Digital Delivery',
@@ -545,6 +554,10 @@ def checkout():
                 "total_amount": str(total),
                 "escrow_txn": txn_number,
                 "payment_method": "CRYPTO",
+                "confirmation_url": f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}",
+                "buyer_phone": guest_phone,
+                "buyer_email": guest_email,
+                "is_existing_account": not is_guest_order,
             })
 
         else:  # ESCROW (default)
@@ -565,6 +578,10 @@ def checkout():
                 "total_amount": str(total),
                 "escrow_txn": txn_number,
                 "payment_method": "ESCROW",
+                "confirmation_url": f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}",
+                "buyer_phone": guest_phone,
+                "buyer_email": guest_email,
+                "is_existing_account": not is_guest_order,
             })
 
         db.session.add(Invoice(
