@@ -2769,6 +2769,7 @@ def admin_retry_payout(order_id):
 
 
 @admin_bp.route('/payout/retry-all-failed', methods=['POST'])
+@admin_bp.route('/payout/retry-daya', methods=['POST'])
 @jwt_required()
 def admin_retry_all_failed_payouts():
     """
@@ -2794,19 +2795,38 @@ def admin_retry_all_failed_payouts():
     # We use a dry-run flag to preview without actually sending.
     dry_run = request.get_json().get("dry_run", False) if request.get_json() else False
 
-    completed_crypto_orders = (
+    DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'USDT', 'USDC', 'DAYA_BANK_TRANSFER')
+
+    # Find all completed orders paid via Daya
+    completed_daya_orders = (
         db.session.query(Order, EscrowTransaction)
         .join(EscrowTransaction, EscrowTransaction.order_id == Order.id)
         .filter(
-            Order.payment_method == "CRYPTO",
+            Order.payment_method.in_(DAYA_PAYMENT_METHODS),
             Order.status.in_(["COMPLETED", "PAID"]),
-            EscrowTransaction.status == EscrowStatus.RELEASED,
         )
         .all()
     )
 
+    # Also catch orders whose escrow txn starts with DYA- or DAYA-
+    daya_escrow_orders = (
+        db.session.query(Order, EscrowTransaction)
+        .join(EscrowTransaction, EscrowTransaction.order_id == Order.id)
+        .filter(
+            Order.payment_method.notin_(DAYA_PAYMENT_METHODS),
+            Order.status.in_(["COMPLETED", "PAID"]),
+            (
+                EscrowTransaction.transaction_number.like('DYA-%') |
+                EscrowTransaction.payscrow_transaction_id.like('DAYA-%')
+            ),
+        )
+        .all()
+    )
+
+    all_candidates = {o.id: (o, e) for o, e in (completed_daya_orders + daya_escrow_orders)}
+
     results = []
-    for order, escrow in completed_crypto_orders:
+    for order_id, (order, escrow) in sorted(all_candidates.items()):
         bank_acc = VendorBankAccount.query.filter_by(
             vendor_id=order.vendor_id, is_default=True
         ).first() or VendorBankAccount.query.filter_by(
@@ -2818,6 +2838,7 @@ def admin_retry_all_failed_payouts():
         entry = {
             "order_id": order.id,
             "vendor_id": order.vendor_id,
+            "payment_method": order.payment_method,
             "amount_ngn": net_amount_ngn,
             "bank_code": bank_acc.bank_code if bank_acc else None,
             "account_number": bank_acc.account_number if bank_acc else None,
@@ -2839,36 +2860,35 @@ def admin_retry_all_failed_payouts():
             results.append(entry)
             continue
 
-        # Attempt payout
-        payout_ref = f"ADMIN-SWEEP-{order.id}-{uuid.uuid4().hex[:8].upper()}"
-        entry["reference"] = payout_ref
+        # Ensure ledger credit exists (idempotent)
+        ledger_credit = Ledger.query.filter_by(
+            vendor_id=order.vendor_id,
+            transaction_type='CREDIT',
+        ).filter(
+            Ledger.reference_id.in_([
+                escrow.transaction_number or '',
+                f"ORD-{order.id}",
+            ])
+        ).first()
 
-        try:
-            result = daya_service.transfer_ngn_to_vendor(
-                amount_ngn=net_amount_ngn,
-                bank_code=bank_acc.bank_code,
-                account_number=bank_acc.account_number,
-                account_name=bank_acc.account_name or "",
-                reference=payout_ref,
-                order_id=order.id,
+        if not ledger_credit:
+            from app.routes.escrow import _credit_vendor_ledger
+            _credit_vendor_ledger(
+                vendor_id=order.vendor_id,
+                amount=net_amount_ngn,
+                reference_id=escrow.transaction_number or f"ORD-{order.id}",
+                description=f"Backfill payout credit for Order #{order.id}",
             )
-            if result.get("success"):
-                entry["status"] = "SUCCESS"
-                db.session.add(Notification(
-                    user_id=order.vendor_id,
-                    title="Payment On Its Way",
-                    message=(
-                        f"Order #{order.id} payout processed. "
-                        f"NGN{net_amount_ngn:,.2f} is being transferred to your bank account."
-                    ),
-                    type="ESCROW",
-                    order_id=order.id,
-                ))
-            else:
-                entry["status"] = "FAILED"
-                entry["error"] = result.get("error_message")
+            db.session.flush()
+
+        # Attempt payout via Daya
+        try:
+            from app.routes.payments import _payout_vendor_via_daya
+            _payout_vendor_via_daya(order, escrow)
+            entry["status"] = "SUCCESS"
         except Exception as exc:
-            entry["status"] = "ERROR"
+            db.session.rollback()
+            entry["status"] = "FAILED"
             entry["error"] = str(exc)
 
         results.append(entry)
