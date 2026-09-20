@@ -1388,61 +1388,70 @@ def get_order_details_by_token():
     if not order_id:
         return jsonify({"message": "order_id is required"}), 400
 
-    from app.models.order import Order
-    order = db.session.get(Order, order_id)
-    if not order:
-        return jsonify({"message": "Order not found"}), 404
+    try:
+        from app.models.order import Order
+        order = db.session.get(Order, order_id)
+        if not order:
+            return jsonify({"message": "Order not found"}), 404
 
-    token_valid = False
-    if token:
-        expected_token = generate_order_token(order_id)
-        token_valid = hmac.compare_digest(expected_token, token)
+        token_valid = False
+        if token:
+            expected_token = generate_order_token(order_id)
+            token_valid = hmac.compare_digest(expected_token, token)
 
-    is_authorized_user = False
-    if user_id:
-        try:
-            u_id = int(user_id)
-            if u_id == order.buyer_id or u_id == order.vendor_id:
-                is_authorized_user = True
-            else:
-                from app.models.user import User, UserRole
-                u = db.session.get(User, u_id)
-                if u and u.role == UserRole.ADMIN:
+        is_authorized_user = False
+        if user_id:
+            try:
+                u_id = int(user_id)
+                if u_id == order.buyer_id or u_id == order.vendor_id:
                     is_authorized_user = True
+                else:
+                    from app.models.user import User, UserRole
+                    u = db.session.get(User, u_id)
+                    if u and u.role == UserRole.ADMIN:
+                        is_authorized_user = True
+            except Exception:
+                pass
+
+        if not token_valid and not is_authorized_user:
+            return jsonify({"message": "Invalid or missing confirmation security token. Please check your link or log in."}), 403
+
+        vendor_name = "Vendor"
+        try:
+            if order.vendor and hasattr(order.vendor, 'storefront') and order.vendor.storefront:
+                vendor_name = order.vendor.storefront.store_name
+            elif order.vendor:
+                vendor_name = order.vendor.first_name or "Vendor"
         except Exception:
-            pass
+            vendor_name = "Vendor"
 
-    if not token_valid and not is_authorized_user:
-        return jsonify({"message": "Invalid or missing confirmation security token. Please check your link or log in."}), 403
+        items_list = []
+        for it in order.items:
+            unit_price = getattr(it, 'price_at_purchase', getattr(it, 'price', 0))
+            items_list.append({
+                "name": it.product.name if it.product else "Item",
+                "quantity": it.quantity,
+                "price": float(unit_price or 0),
+            })
 
-    vendor_name = "Vendor"
-    if order.vendor and hasattr(order.vendor, 'storefront') and order.vendor.storefront:
-        vendor_name = order.vendor.storefront.store_name
-    elif order.vendor:
-        vendor_name = order.vendor.first_name or "Vendor"
-
-    items_list = []
-    for it in order.items:
-        items_list.append({
-            "name": it.product.name if it.product else "Item",
-            "quantity": it.quantity,
-            "price": float(it.price or 0),
-        })
-
-    return jsonify({
-        "status": "success",
-        "order": {
-            "id": order.id,
-            "status": order.status,
-            "total_amount": float(order.total_amount),
-            "buyer_name": order.buyer_name,
-            "buyer_email": order.buyer_email,
-            "buyer_phone": order.buyer_phone,
-            "vendor_name": vendor_name,
-            "created_at": order.created_at.isoformat() if order.created_at else None,
-            "items": items_list,
-        }
-    }), 200
+        return jsonify({
+            "status": "success",
+            "order": {
+                "id": order.id,
+                "status": order.status,
+                "total_amount": float(order.total_amount),
+                "buyer_name": order.buyer_name,
+                "buyer_email": order.buyer_email,
+                "buyer_phone": order.buyer_phone,
+                "vendor_name": vendor_name,
+                "created_at": order.created_at.isoformat() if order.created_at else None,
+                "items": items_list,
+            }
+        }), 200
+    except Exception as e:
+        import traceback
+        logging.error(f"[ESCROW] Error loading order details for order #{order_id}: {e}\n{traceback.format_exc()}")
+        return jsonify({"message": f"Could not load order #{order_id}: {str(e)}"}), 500
 
 
 @escrow_bp.route('/confirm-delivery-by-token', methods=['POST'])
