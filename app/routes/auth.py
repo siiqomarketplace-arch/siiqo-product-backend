@@ -213,6 +213,20 @@ def verify_email():
     user.otp_expiry = None
     db.session.commit()
 
+    # Auto-link any prior guest orders made with this email (Option A: clean guest checkout)
+    try:
+        from app.models.order import Order
+        linked_count = Order.query.filter(
+            Order.buyer_email.ilike(user.email),
+            Order.buyer_id.is_(None),
+        ).update({"buyer_id": user.id, "is_guest": False}, synchronize_session=False)
+        if linked_count:
+            db.session.commit()
+            logging.info("[AUTH] Linked %d past guest order(s) to new account %s", linked_count, user.email)
+    except Exception as _link_err:
+        db.session.rollback()
+        logging.warning("[AUTH] Guest order linking failed for %s: %s", user.email, _link_err)
+
     # Send welcome email now that user is verified
     try:
         send_siiqo_email(

@@ -2345,12 +2345,30 @@ def send_email_broadcast():
     else:
         recipients = User.query.filter_by(is_subscribed_to_broadcasts=True).all()
 
-    sent, failed = 0, 0
+    sent, failed, skipped = 0, 0, 0
     import hashlib
     from flask import current_app
     secret = current_app.config.get('SECRET_KEY', 'default-key')
 
+    def _is_valid_broadcast_email(email: str) -> bool:
+        """Return False for placeholder / ghost addresses that should never receive broadcasts."""
+        if not email or '@' not in email:
+            return False
+        domain = email.rsplit('@', 1)[-1].lower()
+        # Reject local / fake domains (e.g. @guest.siiqo.local, @example.com, .local TLD)
+        if domain.endswith('.local') or domain in ('example.com', 'test.com', 'localhost'):
+            return False
+        # Must have at least one dot in the domain (real TLD present)
+        if '.' not in domain:
+            return False
+        return True
+
     for user in recipients:
+
+        if not _is_valid_broadcast_email(getattr(user, 'email', '')):
+            skipped += 1
+            continue
+
         try:
             token = hashlib.sha256(f"{user.email}{secret}".encode()).hexdigest()[:16]
             base_url = request.host_url.rstrip('/')
@@ -2378,6 +2396,7 @@ def send_email_broadcast():
             "total_recipients": len(recipients),
             "sent": sent,
             "failed": failed,
+            "skipped_invalid": skipped,
         },
     }), 200
 

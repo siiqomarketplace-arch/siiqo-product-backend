@@ -196,8 +196,6 @@ def pay_payment_link(link_id):
         return jsonify({"message": "Phone number is required for physical delivery."}), 400
 
     has_real_email = bool(buyer_email and '@' in buyer_email)
-    if not has_real_email:
-        buyer_email = f"guest-{uuid.uuid4().hex[:10]}@guest.siiqo.local"
 
     # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
     # Pay Links for physical products must never route to Paystack.
@@ -228,30 +226,14 @@ def pay_payment_link(link_id):
         except Exception:
             return jsonify({"message": "Invalid amount format"}), 400
 
-    # Resolve buyer account: if exists, link to it; otherwise find/create a buyer user record
+    # Resolve buyer account: if exists, link to it; otherwise leave buyer_id as None (Option A: clean guest checkout)
     from app.models.user import User
-    buyer_user = User.query.filter_by(email=buyer_email).first()
+    buyer_user = User.query.filter_by(email=buyer_email).first() if has_real_email else None
     existing_account = buyer_user is not None  # track if this is a pre-existing Siiqo account
 
-    if not buyer_user:
-        # Create a light guest user — password unknown to buyer until they claim account
-        buyer_user = User(
-            email=buyer_email,
-            phone=buyer_phone or None,
-            role=UserRole.BUYER,
-            is_verified=True,  # guest accounts bypass verification
-        )
-        buyer_user.set_password(uuid.uuid4().hex)
-        parts = buyer_name.split(' ', 1)
-        buyer_user.first_name = parts[0]
-        if len(parts) > 1:
-            buyer_user.last_name = parts[1]
-        db.session.add(buyer_user)
-        db.session.flush()
-
-    # Create Direct Order
+    # Create Direct Order (buyer_id=None for guest, matching cart.py and events.py)
     new_order = Order(
-        buyer_id=buyer_user.id,
+        buyer_id=buyer_user.id if buyer_user else None,
         vendor_id=link.vendor_id,
         total_amount=amount,
         status='PENDING',
@@ -292,34 +274,28 @@ def pay_payment_link(link_id):
     return_url = (
         f"{site_url}/pay/success"
         f"?order_id={new_order.id}"
-        f"&email={urllib.parse.quote(buyer_email)}"
+        f"&email={urllib.parse.quote(buyer_email if has_real_email else '')}"
         f"&existing={str(existing_account).lower()}"
     )
 
-    # Send a "claim your account" / OTP email to the guest buyer NOW (before payment)
-    # only if a real email was provided.
+    # Send receipt & order tracking email to the guest buyer if a real email was provided
     if not existing_account and has_real_email:
-        import random
-        from datetime import timedelta
-        otp = str(random.randint(100000, 999999))
-        buyer_user.reset_otp = otp
-        buyer_user.otp_expiry = _utcnow() + timedelta(minutes=30)
-        db.session.flush()
         try:
             from app.utils.email import send_siiqo_email
+            order_token = generate_order_token(new_order.id)
             send_siiqo_email(
                 to_email=buyer_email,
-                subject="Your Siiqo Order — Set a Password to Track It",
+                subject=f"Your Siiqo Order #{new_order.id} — Receipt & Delivery Tracking",
                 template_name="guest_claim_account",
-                first_name=buyer_user.first_name or "there",
+                first_name=buyer_name.split(' ')[0] if buyer_name else "there",
                 order_id=new_order.id,
                 vendor_name=link.vendor.storefront.store_name if link.vendor and link.vendor.storefront else "Vendor",
                 amount=f"₦{float(amount):,.2f}",
-                claim_url=f"{site_url}/auth/reset-password-otp?email={urllib.parse.quote(buyer_email)}&otp={otp}&redirect=/user-profile&mode=claim",
-                otp=otp,
+                claim_url=f"{site_url}/auth/signup?email={urllib.parse.quote(buyer_email)}&redirect=/user-profile",
+                otp=order_token[:6].upper(),
             )
         except Exception as e:
-            logging.warning(f"[PAYLINK] Guest claim-account email failed for {buyer_email}: {e}")
+            logging.warning(f"[PAYLINK] Guest receipt email warning for {buyer_email}: {e}")
 
     # Initiate payment gateway transaction
     from app.services.escrow import get_escrow_provider
@@ -430,7 +406,7 @@ def pay_payment_link(link_id):
 
             dp = DayaPayment(
                 order_id=new_order.id,
-                buyer_id=buyer_user.id,
+                buyer_id=buyer_user.id if buyer_user else None,
                 payment_type=daya_type,
                 daya_funding_account_id=str(fa.get('id') or ''),
                 daya_rate_id=rate_id,
