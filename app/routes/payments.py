@@ -381,11 +381,11 @@ def daya_status():
     if buyer_user_id and dp.buyer_id != int(buyer_user_id):
         return jsonify({"message": "Unauthorized"}), 403
 
-    if dp.status in ("COMPLETED", "FAILED"):
+    if dp.status == "FAILED":
         return jsonify({
             "orderId": str(order_id),
             "status":  dp.status,
-            "paidAt":  dp.updated_at.isoformat() if dp.status == "COMPLETED" else None,
+            "paidAt":  None,
         }), 200
 
     if dp.rate_expires_at and dp.rate_expires_at < _utcnow() and dp.status == "PENDING":
@@ -473,6 +473,15 @@ def daya_status():
         if pl:
             pl_file_url = pl.file_url
             pl_product_type = pl.product_type
+    elif _o and _o.items:
+        has_phys = any((getattr(it.product, 'product_type', '') or 'physical').lower() == 'physical' for it in _o.items if it.product)
+        has_serv = any((getattr(it.product, 'product_type', '') or '').lower() == 'service' for it in _o.items if it.product)
+        if has_phys:
+            pl_product_type = 'physical'
+        elif has_serv:
+            pl_product_type = 'service'
+        else:
+            pl_product_type = 'digital'
 
     return jsonify({
         "orderId": str(order_id),
