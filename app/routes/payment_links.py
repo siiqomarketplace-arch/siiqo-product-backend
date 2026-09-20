@@ -278,62 +278,36 @@ def pay_payment_link(link_id):
         f"&existing={str(existing_account).lower()}"
     )
 
-    # Send receipt & order tracking email to the guest buyer if a real email was provided
-    if not existing_account and has_real_email:
-        try:
-            from app.utils.email import send_siiqo_email
-            order_token = generate_order_token(new_order.id)
-            send_siiqo_email(
-                to_email=buyer_email,
-                subject=f"Your Siiqo Order #{new_order.id} — Receipt & Delivery Tracking",
-                template_name="guest_claim_account",
-                first_name=buyer_name.split(' ')[0] if buyer_name else "there",
-                order_id=new_order.id,
-                vendor_name=link.vendor.storefront.store_name if link.vendor and link.vendor.storefront else "Vendor",
-                amount=f"₦{float(amount):,.2f}",
-                claim_url=f"{site_url}/auth/signup?email={urllib.parse.quote(buyer_email)}&redirect=/user-profile",
-                otp=order_token[:6].upper(),
-            )
-        except Exception as e:
-            logging.warning(f"[PAYLINK] Guest receipt email warning for {buyer_email}: {e}")
-
     # Initiate payment gateway transaction
     from app.services.escrow import get_escrow_provider
 
     if payment_method in ('bank_transfer', 'crypto'):
         # ── DAYA path ─────────────────────────────────────────────────────────
+        # IMPORTANT: Daya is called FIRST. Order/escrow are only committed to DB
+        # AFTER Daya succeeds. This prevents phantom orders on failed Daya calls.
         daya_type = 'crypto_direct' if payment_method == 'crypto' else 'ngn_onramp'
-        # Create order and escrow first, then initiate Daya funding account
         new_order.payment_method = 'CRYPTO'
-        new_escrow = EscrowTransaction(
-            order_id=new_order.id,
-            transaction_number=f"ESC-{uuid.uuid4().hex[:12].upper()}",
-            status=EscrowStatus.PENDING_PAYMENT,
-            amount=float(amount),
-            fee_percent=fee_percent,
-            fee_amount=float(fee_amount),
-        )
-        db.session.add(new_escrow)
-        db.session.commit()
 
-        # Initiate Daya funding account
         try:
             from app.services import daya_service as _daya
             import time
 
-            # 1. Split buyer name safely
-            name_parts = buyer_name.strip().split(' ', 1)
-            first_name = name_parts[0] if name_parts else (buyer_user.first_name or buyer_email.split('@')[0])
-            last_name = name_parts[1] if len(name_parts) > 1 else (buyer_user.last_name or "")
+            # 1. Safe name split — never access buyer_user attributes (may be None for guests)
+            name_parts = buyer_name.strip().split(' ', 1) if buyer_name else []
+            first_name = name_parts[0] if name_parts else buyer_email.split('@')[0] if buyer_email else "Guest"
+            last_name  = name_parts[1] if len(name_parts) > 1 else ""
 
-            # 2. Get or create Daya customer
+            # 2. Daya requires a real email — use synthetic noreply if buyer skipped email
+            daya_email = buyer_email if has_real_email else f"paylink-{new_order.id}@noreply.siiqo.app"
+
+            # 3. Get or create Daya customer
             customer_id = _daya.get_or_create_customer(
-                email=buyer_email,
+                email=daya_email,
                 first_name=first_name,
                 last_name=last_name,
             )
 
-            # 3. Get a firm exchange rate
+            # 4. Get a firm exchange rate
             rate_side = "SELL" if daya_type == 'crypto_direct' else "BUY"
             rate_data = _daya.get_rate(asset="USDT", side=rate_side)
             rate = float(rate_data.get("rate", 1500))
@@ -342,7 +316,7 @@ def pay_payment_link(link_id):
 
             idempotency_key = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}"
 
-            # 4. Create the funding account based on type with retry
+            # 5. Create the funding account (with one retry)
             if daya_type == 'crypto_direct':
                 try:
                     fa = _daya.create_crypto_funding_account(
@@ -354,19 +328,17 @@ def pay_payment_link(link_id):
                         developer_fee_pct="0",
                     )
                 except RuntimeError as first_exc:
-                    logging.warning(f"[PAYLINK DAYA] First crypto account attempt failed ({first_exc}), retrying...")
+                    logging.warning(f"[PAYLINK DAYA] First crypto attempt failed ({first_exc}), retrying...")
                     time.sleep(0.5)
-                    idempotency_key_retry = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}-r2"
                     fa = _daya.create_crypto_funding_account(
                         customer_id=str(customer_id),
                         asset="USDT",
                         network="TRC20",
                         rate_id=rate_id,
-                        idempotency_key=idempotency_key_retry,
+                        idempotency_key=f"{idempotency_key}-r2",
                         developer_fee_pct="0",
                     )
             else:
-                # NGN onramp — Daya returns the exact NGN amount buyer must send
                 try:
                     fa = _daya.create_ngn_funding_account(
                         customer_id=str(customer_id),
@@ -376,24 +348,30 @@ def pay_payment_link(link_id):
                         developer_fee_pct="0",
                     )
                 except RuntimeError as first_exc:
-                    logging.warning(f"[PAYLINK DAYA] First NGN virtual account attempt failed ({first_exc}), retrying...")
+                    logging.warning(f"[PAYLINK DAYA] First NGN attempt failed ({first_exc}), retrying...")
                     time.sleep(0.5)
-                    idempotency_key_retry = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}-r2"
                     fa = _daya.create_ngn_funding_account(
                         customer_id=str(customer_id),
                         amount_ngn=int(round(float(amount))),
                         rate_id=rate_id,
-                        idempotency_key=idempotency_key_retry,
+                        idempotency_key=f"{idempotency_key}-r2",
                         developer_fee_pct="0",
                     )
 
-            # Bank/wallet details are nested under fa["instructions"][0]
+            # ── Daya succeeded — NOW commit order + escrow + DayaPayment ──────
+            new_escrow = EscrowTransaction(
+                order_id=new_order.id,
+                transaction_number=f"ESC-{uuid.uuid4().hex[:12].upper()}",
+                status=EscrowStatus.PENDING_PAYMENT,
+                amount=float(amount),
+                fee_percent=fee_percent,
+                fee_amount=float(fee_amount),
+            )
+            db.session.add(new_escrow)
+
             instructions = fa.get("instructions", [{}])[0]
-            daya_amount = fa.get("amount")
-            if daya_type == 'ngn_onramp' and daya_amount:
-                final_amount_ngn = float(daya_amount)
-            else:
-                final_amount_ngn = float(amount)
+            daya_amount  = fa.get("amount")
+            final_amount_ngn = float(daya_amount) if (daya_type == 'ngn_onramp' and daya_amount) else float(amount)
 
             from app.models.withdrawal import DayaPayment
             from datetime import datetime as _dt_parse
@@ -421,7 +399,26 @@ def pay_payment_link(link_id):
                 network=instructions.get('network') or fa.get('chain') or fa.get('network'),
             )
             db.session.add(dp)
-            db.session.commit()
+            db.session.commit()  # ← single commit: order + escrow + DayaPayment together
+
+            # ── Send guest receipt email only after everything is persisted ───
+            if not existing_account and has_real_email:
+                try:
+                    from app.utils.email import send_siiqo_email
+                    order_token = generate_order_token(new_order.id)
+                    send_siiqo_email(
+                        to_email=buyer_email,
+                        subject=f"Your Siiqo Order #{new_order.id} — Receipt & Delivery Tracking",
+                        template_name="guest_claim_account",
+                        first_name=first_name,
+                        order_id=new_order.id,
+                        vendor_name=link.vendor.storefront.store_name if link.vendor and link.vendor.storefront else "Vendor",
+                        amount=f"₦{float(amount):,.2f}",
+                        claim_url=f"{site_url}/auth/signup?email={urllib.parse.quote(buyer_email)}&redirect=/user-profile",
+                        otp=order_token[:6].upper(),
+                    )
+                except Exception as email_err:
+                    logging.warning(f"[PAYLINK] Guest receipt email failed for {buyer_email}: {email_err}")
 
             amount_usd = round(final_amount_ngn / rate, 6)
             conf_url = f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}"
