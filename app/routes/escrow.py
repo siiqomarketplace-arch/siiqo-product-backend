@@ -840,11 +840,16 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         description=f"Payout for Order #{order.id} ({source})",
     )
 
-    # Determine payout channel: Daya (crypto/NGN onramp) vs Paystack
+    # Determine payout channel: Daya (crypto/NGN bank-transfer onramp) vs Paystack
+    # IMPORTANT: 'DAYA_BANK_TRANSFER' is set by payments.py when buyer pays via Daya
+    # NGN virtual account. It MUST be included here or payout is silently skipped.
+    DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'USDT', 'USDC', 'DAYA_BANK_TRANSFER')
     is_daya_order = (
-        order.payment_method in ('CRYPTO', 'DAYA', 'USDT', 'USDC')
+        (order.payment_method or '') in DAYA_PAYMENT_METHODS
         or getattr(escrow, 'gateway', None) == 'DAYA'
         or getattr(order, 'crypto_hash', None)
+        or (escrow.transaction_number or '').startswith('DYA-')
+        or (escrow.payscrow_transaction_id or '').startswith('DAYA-')
     )
 
     if is_daya_order:
@@ -997,15 +1002,24 @@ def release_escrow():
         }), 400
 
     # ── Provider-specific fund release ───────────────────────────────────────
-    is_paystack_order = (
-        (order.payment_method or '').upper() == 'PAYSTACK' or 
-        (escrow.transaction_number and escrow.transaction_number.startswith('ORD-'))
+    # All Daya-originated payments: crypto direct, USDT/USDC, and NGN bank
+    # transfer via Daya virtual account (payment_method='DAYA_BANK_TRANSFER').
+    DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'USDT', 'USDC', 'DAYA_BANK_TRANSFER')
+    is_daya_order = (
+        (order.payment_method or '') in DAYA_PAYMENT_METHODS
+        or (escrow.transaction_number or '').startswith('DYA-')
+        or (escrow.payscrow_transaction_id or '').startswith('DAYA-')
     )
 
-    is_crypto_order = (order.payment_method or '').upper() == 'CRYPTO'
+    is_paystack_order = (
+        not is_daya_order and (
+            (order.payment_method or '').upper() == 'PAYSTACK'
+            or (escrow.transaction_number and escrow.transaction_number.startswith('ORD-'))
+        )
+    )
 
-    if is_crypto_order:
-        # ── Daya payout — funds are in Siiqo's Daya collection balance ──────
+    if is_daya_order:
+        # ── Daya payout — funds are in Siiqo's Daya collection/withdrawal balance ──
         from app.routes.payments import _payout_vendor_via_daya
         _payout_vendor_via_daya(order, escrow)
     elif is_paystack_order:
