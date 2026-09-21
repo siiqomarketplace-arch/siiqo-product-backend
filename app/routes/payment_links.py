@@ -119,10 +119,14 @@ def get_vendor_payment_links():
     # Calculate stats per link
     result = []
     for link in links:
-        total_payouts = db.session.query(db.func.sum(Order.total_amount)).filter_by(
-            payment_link_id=link.id, status='COMPLETED'
+        total_payouts = db.session.query(db.func.sum(Order.total_amount)).filter(
+            Order.payment_link_id == link.id,
+            Order.status.in_(['PAID', 'SHIPPED', 'DELIVERED', 'COMPLETED'])
         ).scalar() or 0
-        total_orders = Order.query.filter_by(payment_link_id=link.id).count()
+        total_orders = Order.query.filter(
+            Order.payment_link_id == link.id,
+            Order.status.in_(['PAID', 'SHIPPED', 'DELIVERED', 'COMPLETED'])
+        ).count()
         
         d = link.to_dict()
         d['total_revenue'] = str(total_payouts)
