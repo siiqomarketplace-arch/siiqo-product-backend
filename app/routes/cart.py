@@ -403,7 +403,7 @@ def checkout():
         )
         vendor_user = db.session.get(User, vid)
         is_pro = bool(vendor_user and vendor_user.storefront and vendor_user.storefront.is_pro_active)
-        fee_percent = 3.00 if is_pro else 5.00
+        fee_percent = 3.00  # Flat 3% Safe Pay fee for all vendors
         fee_amount = total * (fee_percent / 100)
         has_physical_items = is_physical
         logistics_fee = 0.0
@@ -535,7 +535,7 @@ def checkout():
             # For crypto, create an escrow transaction record in PENDING_PAYMENT state.
             # The DayaPayment record is created by /payments/daya/initiate AFTER checkout.
             # When Daya confirms payment, _handle_crypto_payment_confirmed() updates both.
-            fee_rate = 0.03 if (new_order.vendor and new_order.vendor.storefront and new_order.vendor.storefront.is_pro_active) else 0.05
+            fee_rate = 0.03  # Flat 3% Safe Pay fee for all vendors
             txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
             new_escrow = EscrowTransaction(
                 order_id=new_order.id,

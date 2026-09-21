@@ -265,7 +265,7 @@ def pay_payment_link(link_id):
     _is_v_pro = bool(
         _sf and _sf.is_pro_verified and (not _sf.pro_verified_expires_at or _sf.pro_verified_expires_at > _now)
     )
-    fee_percent = 3.00 if _is_v_pro else 5.00
+    fee_percent = 3.00  # Flat 3% Safe Pay fee for all vendors
     fee_amount = amount * Decimal(str(fee_percent / 100.0))
 
     # Build the return URL so buyer lands on a proper success/tracking page
