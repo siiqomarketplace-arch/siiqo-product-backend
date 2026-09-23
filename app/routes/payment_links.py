@@ -290,7 +290,13 @@ def pay_payment_link(link_id):
         # IMPORTANT: Daya is called FIRST. Order/escrow are only committed to DB
         # AFTER Daya succeeds. This prevents phantom orders on failed Daya calls.
         daya_type = 'crypto_direct' if payment_method == 'crypto' else 'ngn_onramp'
-        new_order.payment_method = 'CRYPTO'
+        # Set the correct payment_method on the order immediately so it is
+        # accurate from creation — not just after confirmation.
+        # Bug fix: the old code set 'CRYPTO' for both paths; bank transfer orders
+        # were only corrected inside _handle_crypto_payment_confirmed which runs
+        # only on successful payment. Unconfirmed bank-transfer orders stayed
+        # labelled 'CRYPTO' permanently.
+        new_order.payment_method = 'CRYPTO' if payment_method == 'crypto' else 'DAYA_BANK_TRANSFER'
 
         try:
             from app.services import daya_service as _daya

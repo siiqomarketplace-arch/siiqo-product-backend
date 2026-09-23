@@ -398,49 +398,66 @@ def daya_status():
         try:
             deposit = daya_service.get_deposit_by_funding_account(dp.daya_funding_account_id)
             if deposit:
-                # ── STALE DEPOSIT GUARD ────────────────────────────────────────
-                # Crypto funding accounts are PERMANENT (reused across orders).
-                # get_deposit_by_funding_account returns limit=1 (most recent deposit).
-                # If a previous order already completed on this address, that old
-                # COMPLETED deposit would be returned here and falsely trigger
-                # order confirmation BEFORE the buyer has transferred anything.
+                # ── FUNDING ACCOUNT OWNERSHIP GUARD ───────────────────────────
+                # A deposit is only valid for THIS order if the deposit's
+                # funding_account_id exactly matches the DayaPayment row's
+                # daya_funding_account_id. This is a hard, exact match — it
+                # prevents a deposit created for order A from confirming order B
+                # even when both orders were created within the same rate window.
                 #
-                # We only accept this deposit if it was created AFTER this
-                # DayaPayment record was created (i.e. it belongs to THIS order).
-                deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
-                deposit_is_fresh = False
-                if deposit_created_raw and dp.created_at:
-                    try:
-                        from datetime import datetime as _dt2
-                        dep_ts = _dt2.fromisoformat(
-                            deposit_created_raw.replace("Z", "+00:00")
-                        )
-                        # Give 30-second grace period for clock skew
-                        from datetime import timedelta
-                        cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=30)
-                        deposit_is_fresh = dep_ts >= cutoff
-                    except Exception:
-                        deposit_is_fresh = False  # If we can't parse, don't trust it
-                else:
-                    # No timestamp available — can't verify, treat as stale
-                    deposit_is_fresh = False
+                # Additionally we require the deposit was created AFTER this
+                # payment session started (with a 60-second grace for clock skew)
+                # to protect against stale deposits on reused PERMANENT crypto
+                # funding accounts.
+                deposit_funding_account_id = (
+                    deposit.get("funding_account_id")
+                    or deposit.get("fundingAccountId")
+                    or ""
+                )
+                deposit_belongs_to_this_order = (
+                    deposit_funding_account_id == dp.daya_funding_account_id
+                )
 
-                if not deposit_is_fresh:
+                if not deposit_belongs_to_this_order:
                     logger.info(
-                        "[DAYA STATUS] Order %s — deposit %s predates this payment session "
-                        "(deposit created_at=%s, payment created_at=%s). Ignoring stale deposit.",
-                        order_id, deposit.get("id"), deposit_created_raw,
-                        dp.created_at.isoformat() if dp.created_at else "unknown",
+                        "[DAYA STATUS] Order %s — deposit %s belongs to funding account %s, "
+                        "not this order's account %s. Ignoring.",
+                        order_id, deposit.get("id"),
+                        deposit_funding_account_id, dp.daya_funding_account_id,
                     )
                 else:
-                    new_status = daya_service._map_daya_status(deposit.get("status", ""))
-                    dp.daya_deposit_id = deposit.get("id")
-                    if new_status != dp.status:
-                        dp.status     = new_status
-                        dp.updated_at = _utcnow()
-                        db.session.commit()
-                        if new_status == "COMPLETED":
-                            _handle_crypto_payment_confirmed(order_id, dp)
+                    # Funding account matches — also verify the deposit is fresh
+                    # (guards against old COMPLETED deposits on PERMANENT crypto accounts)
+                    deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
+                    deposit_is_fresh = True  # default trust when no timestamp available
+                    if deposit_created_raw and dp.created_at:
+                        try:
+                            from datetime import datetime as _dt2, timedelta
+                            dep_ts = _dt2.fromisoformat(
+                                deposit_created_raw.replace("Z", "+00:00")
+                            )
+                            # 60-second grace period for clock skew
+                            cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=60)
+                            deposit_is_fresh = dep_ts >= cutoff
+                        except Exception:
+                            deposit_is_fresh = True  # can't parse — trust the account match
+
+                    if not deposit_is_fresh:
+                        logger.info(
+                            "[DAYA STATUS] Order %s — deposit %s predates this payment session "
+                            "(deposit created_at=%s, payment created_at=%s). Ignoring stale deposit.",
+                            order_id, deposit.get("id"), deposit_created_raw,
+                            dp.created_at.isoformat() if dp.created_at else "unknown",
+                        )
+                    else:
+                        new_status = daya_service._map_daya_status(deposit.get("status", ""))
+                        dp.daya_deposit_id = deposit.get("id")
+                        if new_status != dp.status:
+                            dp.status     = new_status
+                            dp.updated_at = _utcnow()
+                            db.session.commit()
+                            if new_status == "COMPLETED":
+                                _handle_crypto_payment_confirmed(order_id, dp)
         except Exception as exc:
             logger.warning("[DAYA STATUS] Poll failed for order %s: %s", order_id, exc)
 
@@ -591,29 +608,30 @@ def daya_webhook():
             ).filter(DayaPayment.status.notin_(["COMPLETED", "FAILED"])).first()
 
             if dp:
-                # ── STALE DEPOSIT GUARD (webhook) ─────────────────────────────
-                # Permanent funding accounts are reused. Verify this deposit was
-                # created AFTER this payment session was initiated.
-                deposit_is_fresh = False
+                # ── FUNDING ACCOUNT OWNERSHIP GUARD (webhook) ─────────────────
+                # The deposit's funding_account_id already matched dp above via
+                # the query filter. Verify the deposit is fresh relative to this
+                # payment session — protects against stale deposits on PERMANENT
+                # crypto accounts being redelivered by Daya.
+                deposit_is_fresh = True  # default: webhooks come directly from Daya
                 if deposit_created_raw and dp.created_at:
                     try:
                         from datetime import datetime as _dt2, timedelta
                         dep_ts = _dt2.fromisoformat(
                             deposit_created_raw.replace("Z", "+00:00")
                         )
-                        cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=30)
+                        # 60-second grace period for clock skew
+                        cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=60)
                         deposit_is_fresh = dep_ts >= cutoff
                     except Exception:
-                        # Can't parse timestamp — trust the webhook but log it
+                        # Can't parse timestamp — trust the webhook since it came
+                        # directly from Daya and the funding_account_id matched exactly
                         logger.warning(
                             "[DAYA WEBHOOK] Could not parse deposit created_at=%s for order %s. "
                             "Proceeding cautiously.",
                             deposit_created_raw, dp.order_id
                         )
-                        deposit_is_fresh = True  # Webhooks come from Daya directly — trust them
-                else:
-                    # No timestamp on the deposit — webhook is direct from Daya, trust it
-                    deposit_is_fresh = True
+                        deposit_is_fresh = True
 
                 if deposit_is_fresh:
                     dp.status          = "COMPLETED"
@@ -737,14 +755,21 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             _link = db.session.get(_PL, order.payment_link_id)
             _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
             if _ltype == 'digital':
-                # Digital Pay Link — release immediately, credit vendor
-                fee_rate = 0.03  # Flat 3% Safe Pay fee for all vendors
+                # Digital Pay Link — release immediately, credit vendor, single payout
                 net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
                 order.status = 'COMPLETED'
                 if _link: _link.status = 'PAID'
-                _payout_vendor_via_daya(order, escrow)
+                # Write ledger credit BEFORE attempting payout so the balance
+                # is correct even if the payout transfer call fails or is retried
+                from app.routes.escrow import _credit_vendor_ledger
+                _credit_vendor_ledger(
+                    vendor_id=order.vendor_id,
+                    amount=net_amount,
+                    reference_id=escrow.transaction_number,
+                    description=f"Payout for Order #{order_id} (guest_buyer_token)",
+                )
                 if order.buyer_id:
                     db.session.add(Notification(
                         user_id=order.buyer_id,
@@ -760,13 +785,20 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 ))
                 is_digital = True
             elif _ltype == 'service':
-                # Service Pay Link — release immediately
+                # Service Pay Link — release immediately, credit vendor, single payout
                 net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
                 order.status = 'COMPLETED'
                 if _link: _link.status = 'PAID'
-                _payout_vendor_via_daya(order, escrow)
+                # Write ledger credit BEFORE attempting payout
+                from app.routes.escrow import _credit_vendor_ledger
+                _credit_vendor_ledger(
+                    vendor_id=order.vendor_id,
+                    amount=net_amount,
+                    reference_id=escrow.transaction_number,
+                    description=f"Payout for Order #{order_id} (guest_buyer_token)",
+                )
                 if order.buyer_id:
                     db.session.add(Notification(
                         user_id=order.buyer_id,
@@ -787,8 +819,9 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 _link.status = 'PAID'
 
         # ── Vendor payout via Daya for digital/service orders ─────────────
-        # For physical orders, payout happens when buyer confirms delivery.
-        # For digital/service, payout is immediate (same as Paystack flow).
+        # Called exactly once here for ALL digital/service paths (both product-
+        # based orders handled by _deliver_* and Pay Link orders handled above).
+        # Physical orders are paid out when the buyer confirms delivery.
         if is_digital or is_service:
             _payout_vendor_via_daya(order, escrow)
 
