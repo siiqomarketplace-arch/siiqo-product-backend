@@ -1,4 +1,4 @@
-# payments.py - Daya crypto payment routes + vendor crypto wallet management
+# payments.py - Daya crypto payment routes + vendor crypto wallet management + Flutterwave
 #
 # Routes registered at /api/payments/* via payments_bp:
 #   GET  /payments/vendor/crypto-wallet        -> get current wallet settings
@@ -8,6 +8,9 @@
 #   POST /payments/daya/refresh-rate           -> refresh expired rate
 #   POST /payments/daya/webhook                -> deposit lifecycle events (no JWT)
 #   POST /payments/initiate-pro-subscription   -> delegates to bridge.py
+#   POST /payments/flutterwave/initiate        -> Flutterwave hosted checkout (digital, service, events)
+#   POST /payments/flutterwave/webhook         -> Flutterwave webhook (no JWT)
+#   GET  /payments/flutterwave/status          -> check/proactively verify Flutterwave transaction
 
 import hashlib
 import hmac
@@ -1118,3 +1121,423 @@ def initiate_pro_subscription():
     """Delegates to the existing bridge.py handler."""
     from app.routes.bridge import initiate_pro_subscription as _bridge_sub
     return _bridge_sub()
+
+
+# ===========================================================================
+# FLUTTERWAVE PAYMENT ROUTES (Digital, Services & Events)
+# ===========================================================================
+
+@payments_bp.route("/flutterwave/initiate", methods=["POST"])
+@jwt_required(optional=True)
+def flutterwave_initiate():
+    """
+    Initiate a Flutterwave checkout for digital products, services, and event tickets.
+    Supports single and multi-order carts (unified payment).
+    """
+    from app.services import flutterwave_service as _flw
+    from app.models.escrow import EscrowTransaction, EscrowStatus
+    from app.models.withdrawal import VendorBankAccount
+    from app.models.product import Product as _Prod
+
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+
+    order_id_param = data.get("orderId") or data.get("order_id", "")
+    order_ids = [int(oid) for oid in str(order_id_param).split(",") if oid.strip().isdigit()]
+    if not order_ids:
+        return jsonify({"message": "orderId is required"}), 400
+
+    orders = Order.query.filter(Order.id.in_(order_ids)).all()
+    if not orders:
+        return jsonify({"message": "Orders not found"}), 404
+
+    # Verify authorization if user is authenticated
+    for order in orders:
+        if order.buyer_id and user_id and str(order.buyer_id) != str(user_id):
+            return jsonify({"message": "Unauthorized"}), 403
+
+    # Check product types: Flutterwave here is strictly for digital, services, and events
+    # Physical products remain with Daya / POD
+    from app.models.event import TicketPurchase
+    for order in orders:
+        # 1. Event orders have associated TicketPurchase records and are strictly non-physical
+        has_tickets = TicketPurchase.query.filter_by(order_id=order.id).first() is not None
+        if has_tickets:
+            continue
+
+        # 2. Check regular catalog items
+        for item in (order.items or []):
+            p = db.session.get(_Prod, item.product_id) if item.product_id else item.product
+            p_type = (getattr(p, "product_type", None) or "physical").lower() if p else None
+            if p_type == "physical":
+                return jsonify({
+                    "message": (
+                        "Flutterwave card checkout is currently enabled for digital products, "
+                        "service bookings, and event tickets. For physical products, please use "
+                        "Bank Transfer & Crypto (Daya) or Pay on Delivery."
+                    ),
+                    "code": "FLUTTERWAVE_PHYSICAL_BLOCKED",
+                }), 400
+
+    # Calculate total listed price & Siiqo 3% fee
+    total_listed_ngn = sum(float(o.total_amount) for o in orders)
+    if total_listed_ngn <= 0:
+        return jsonify({"message": "Total amount must be greater than zero"}), 400
+
+    siiqo_fee_total = round(total_listed_ngn * 0.03, 2)  # Flat 3% Safe Pay fee
+
+    # Buyer contact info
+    primary_order = orders[0]
+    buyer_email = (
+        (data.get("buyerEmail") or data.get("buyer_email") or "").strip().lower()
+        or (primary_order.buyer_email or "").strip().lower()
+        or (primary_order.buyer.email if primary_order.buyer else "").strip().lower()
+    )
+    buyer_name = (
+        (data.get("buyerName") or data.get("buyer_name") or "").strip()
+        or (primary_order.buyer_name or "").strip()
+        or (f"{primary_order.buyer.first_name or ''} {primary_order.buyer.last_name or ''}".strip() if primary_order.buyer else "")
+        or "Siiqo Buyer"
+    )
+    buyer_phone = (
+        (data.get("buyerPhone") or data.get("buyer_phone") or "").strip()
+        or (primary_order.buyer_phone or getattr(primary_order, "delivery_phone", "") or "").strip()
+        or "08012345678"
+    )
+
+    if not buyer_email or "@" not in buyer_email:
+        return jsonify({"message": "A valid email address is required to initiate payment."}), 400
+
+    # Look up vendor subaccount for single-vendor carts
+    vendor_ids = list({o.vendor_id for o in orders})
+    flw_subaccount_id = None
+    if len(vendor_ids) == 1:
+        v_id = vendor_ids[0]
+        bank_acc = VendorBankAccount.query.filter_by(vendor_id=v_id, is_default=True).first() or \
+                   VendorBankAccount.query.filter_by(vendor_id=v_id).first()
+        if bank_acc and bank_acc.flw_subaccount_id:
+            flw_subaccount_id = bank_acc.flw_subaccount_id
+        elif bank_acc and bank_acc.account_number and bank_acc.bank_code and _flw.is_configured():
+            # Auto-provision Flutterwave subaccount if vendor already has bank details
+            try:
+                from app.models.user import Storefront, User as _U
+                sf = Storefront.query.filter_by(vendor_id=v_id).first()
+                vendor_u = db.session.get(_U, v_id)
+                v_phone = (vendor_u.phone if vendor_u else "") or "08012345678"
+                b_name = sf.store_name if sf else (vendor_u.full_name if vendor_u else f"Vendor {v_id}")
+                created_sub = _flw.create_subaccount(
+                    business_name=b_name,
+                    bank_code=bank_acc.bank_code,
+                    account_number=bank_acc.account_number,
+                    business_mobile=v_phone,
+                    business_email=sf.contact_email if (sf and sf.contact_email) else "",
+                )
+                if created_sub.get("success"):
+                    flw_subaccount_id = created_sub["subaccount_id"]
+                    bank_acc.flw_subaccount_id = flw_subaccount_id
+                    db.session.commit()
+            except Exception as _sub_err:
+                logger.warning("[FLW INITIATE] On-the-fly subaccount creation skipped: %s", _sub_err)
+
+    site_url = os.environ.get("SITE_URL", "https://siiqo.com").rstrip("/")
+    primary_id = primary_order.id
+    order_ids_str = ",".join(str(oid) for oid in order_ids)
+    tx_ref = f"FLW-ORD-{primary_id}-{uuid.uuid4().hex[:8].upper()}"
+
+    custom_return_url = data.get("returnUrl") or data.get("return_url")
+    redirect_url = custom_return_url or f"{site_url}/payment/success?reference={tx_ref}&order_id={primary_id}"
+
+    # Narration for hosted receipt
+    narration = f"Siiqo Order #{primary_id}" if len(order_ids) == 1 else f"Siiqo Orders {', '.join(f'#{i}' for i in order_ids)}"
+
+    flw_result = _flw.initiate_payment(
+        order_id=order_ids_str,
+        listed_price_ngn=total_listed_ngn,
+        siiqo_fee_ngn=siiqo_fee_total,
+        buyer_email=buyer_email,
+        buyer_name=buyer_name,
+        buyer_phone=buyer_phone,
+        flw_subaccount_id=flw_subaccount_id,
+        tx_ref=tx_ref,
+        redirect_url=redirect_url,
+        is_international=bool(data.get("isInternational", False)),
+        narration=narration,
+    )
+
+    if not flw_result.get("success"):
+        return jsonify({"message": flw_result.get("error_message") or "Could not initialize Flutterwave payment."}), 400
+
+    # Create or update EscrowTransaction for each order
+    for o in orders:
+        o.payment_method = "FLUTTERWAVE"
+        indiv_fee = round(float(o.total_amount) * 0.03, 2)
+        escrow = EscrowTransaction.query.filter_by(order_id=o.id).first()
+        if not escrow:
+            escrow = EscrowTransaction(
+                order_id=o.id,
+                transaction_number=tx_ref,
+                status=EscrowStatus.PENDING_PAYMENT,
+                amount=float(o.total_amount),
+                fee_percent=3.0,
+                fee_amount=indiv_fee,
+                payment_link=flw_result["payment_link"],
+                payscrow_transaction_id=tx_ref,
+                payscrow_ref=tx_ref,
+            )
+            db.session.add(escrow)
+        else:
+            escrow.transaction_number = tx_ref
+            escrow.status = EscrowStatus.PENDING_PAYMENT
+            escrow.payment_link = flw_result["payment_link"]
+            escrow.payscrow_transaction_id = tx_ref
+            escrow.payscrow_ref = tx_ref
+
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "paymentLink": flw_result["payment_link"],
+        "transactionNumber": tx_ref,
+        "amount": flw_result["buyer_total"],
+        "listedAmount": total_listed_ngn,
+        "flwFee": flw_result["flw_fee"],
+        "orderId": order_ids_str,
+    }), 200
+
+
+@payments_bp.route("/flutterwave/webhook", methods=["POST"])
+def flutterwave_webhook():
+    """
+    Receive and handle Flutterwave webhook events.
+    Verifies the verif-hash header, validates the transaction with Flutterwave API,
+    and completes order fulfillment.
+    """
+    from app.services import flutterwave_service as _flw
+
+    raw_body = request.get_data()
+    sig_header = request.headers.get("verif-hash", "")
+
+    if not _flw.verify_webhook_signature(raw_body, sig_header):
+        logger.warning("[FLW WEBHOOK] Invalid signature hash")
+        return jsonify({"message": "Invalid signature"}), 401
+
+    try:
+        event_data = request.get_json(force=True) or {}
+    except Exception:
+        return jsonify({"message": "Invalid JSON"}), 400
+
+    data = event_data.get("data", {})
+    tx_id = data.get("id")
+    tx_ref = data.get("tx_ref") or ""
+    status = data.get("status")
+
+    logger.info("[FLW WEBHOOK] event=%s tx_id=%s status=%s ref=%s",
+                event_data.get("event"), tx_id, status, tx_ref)
+
+    if not tx_id:
+        return jsonify({"status": "ignored", "message": "No transaction ID"}), 200
+
+    # Query Flutterwave API directly to guarantee authenticity
+    verification = _flw.verify_transaction(tx_id)
+    if not verification.get("success") or verification.get("status") != "successful":
+        logger.warning("[FLW WEBHOOK] Verification check failed for tx_id %s: %s",
+                       tx_id, verification.get("error_message"))
+        return jsonify({"status": "verification_failed"}), 200
+
+    # Execute confirmation
+    _handle_flutterwave_payment_confirmed(
+        tx_ref=verification.get("tx_ref") or tx_ref,
+        tx_id=str(tx_id),
+        verification=verification,
+    )
+
+    return jsonify({"status": "success"}), 200
+
+
+@payments_bp.route("/flutterwave/status", methods=["GET"])
+@jwt_required(optional=True)
+def flutterwave_status():
+    """
+    Check or proactively verify a Flutterwave transaction.
+    Ensures immediate order confirmation upon redirect if the webhook is slightly delayed.
+    """
+    from app.services import flutterwave_service as _flw
+    from app.models.escrow import EscrowTransaction
+
+    tx_ref = request.args.get("tx_ref") or request.args.get("reference") or ""
+    tx_id = request.args.get("transaction_id") or ""
+    order_id_str = request.args.get("order_id") or ""
+
+    escrow = None
+    if tx_ref:
+        escrow = EscrowTransaction.query.filter_by(transaction_number=tx_ref).first()
+    if not escrow and order_id_str and order_id_str.isdigit():
+        escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_str)).first()
+
+    if not escrow:
+        return jsonify({"message": "Transaction not found"}), 404
+
+    # If already released or in escrow, return immediately
+    if escrow.status in ("IN_ESCROW", "RELEASED"):
+        return jsonify({
+            "orderId": str(escrow.order_id),
+            "status": "COMPLETED",
+            "transactionNumber": escrow.transaction_number,
+        }), 200
+
+    # If pending and transaction ID is available, proactively verify with Flutterwave
+    if tx_id:
+        try:
+            verif = _flw.verify_transaction(tx_id)
+            if verif.get("success") and verif.get("status") == "successful":
+                _handle_flutterwave_payment_confirmed(
+                    tx_ref=escrow.transaction_number,
+                    tx_id=str(tx_id),
+                    verification=verif,
+                )
+                return jsonify({
+                    "orderId": str(escrow.order_id),
+                    "status": "COMPLETED",
+                    "transactionNumber": escrow.transaction_number,
+                }), 200
+        except Exception as exc:
+            logger.warning("[FLW STATUS] Proactive verification error: %s", exc)
+
+    return jsonify({
+        "orderId": str(escrow.order_id),
+        "status": escrow.status,
+        "transactionNumber": escrow.transaction_number,
+    }), 200
+
+
+def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification: dict):
+    """
+    Handle successful Flutterwave payment confirmation:
+    Activates digital downloads, service bookings, or event tickets.
+    """
+    from app.models.escrow import EscrowTransaction, EscrowStatus
+    from app.models.payment_link import PaymentLink
+    from app.models.withdrawal import VendorBankAccount
+    from app.routes.escrow import (
+        _credit_vendor_ledger,
+        _deliver_digital_products,
+        _deliver_service_products,
+        _deliver_event_tickets,
+    )
+    from app.models.communication import Notification
+
+    try:
+        escrows = EscrowTransaction.query.filter_by(transaction_number=tx_ref).all()
+        if not escrows and tx_ref.startswith("FLW-"):
+            # Try matching by order ID embedded in tx_ref: FLW-ORD-{id}-... or FLW-PL-{id}-...
+            parts = tx_ref.split("-")
+            if len(parts) >= 3 and parts[2].isdigit():
+                oid = int(parts[2])
+                escrow_single = EscrowTransaction.query.filter_by(order_id=oid).first()
+                if escrow_single:
+                    escrows = [escrow_single]
+
+        if not escrows:
+            logger.warning("[FLW CONFIRM] No escrow found for ref=%s tx_id=%s", tx_ref, tx_id)
+            return
+
+        for escrow in escrows:
+            if escrow.status == EscrowStatus.RELEASED:
+                continue
+
+            order = escrow.order
+            if not order:
+                continue
+
+            order.status = "PAID"
+            order.payment_method = "FLUTTERWAVE"
+            escrow.status = EscrowStatus.IN_ESCROW
+            escrow.paid_at = _utcnow()
+            escrow.payscrow_transaction_id = str(tx_id)
+            db.session.flush()
+
+            # 1. Event tickets
+            is_event = _deliver_event_tickets(order, escrow)
+
+            # 2. Digital products
+            is_digital = False
+            if not is_event:
+                is_digital = _deliver_digital_products(order, escrow)
+
+            # 3. Service bookings
+            is_service = False
+            if not is_event and not is_digital:
+                is_service = _deliver_service_products(order, escrow)
+
+            # 4. Pay Link orders
+            if order.payment_link_id and not is_event and not is_digital and not is_service:
+                link = db.session.get(PaymentLink, order.payment_link_id)
+                link_ptype = getattr(link, "product_type", "service") or "service"
+                if link_ptype in ("digital", "service"):
+                    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                    escrow.status = EscrowStatus.RELEASED
+                    escrow.released_at = _utcnow()
+                    order.status = "COMPLETED"
+                    if link:
+                        link.status = "PAID"
+
+                    _credit_vendor_ledger(
+                        vendor_id=order.vendor_id,
+                        amount=net_amount,
+                        reference_id=escrow.transaction_number,
+                        description=f"Flutterwave payout for Order #{order.id}",
+                    )
+                    db.session.add(Notification(
+                        user_id=order.vendor_id,
+                        title="Payment Received (Flutterwave)",
+                        message=f"Order #{order.id} paid via Flutterwave. ₦{net_amount:,.2f} credited.",
+                        type="ESCROW",
+                        order_id=order.id,
+                    ))
+                    if order.buyer_id:
+                        db.session.add(Notification(
+                            user_id=order.buyer_id,
+                            title="Payment Complete",
+                            message=f"Your payment for Order #{order.id} is confirmed.",
+                            type="ORDER",
+                            order_id=order.id,
+                        ))
+
+            # Vendor payout check:
+            # 1. If Flutterwave split was attached, settlement happens natively T+1 to vendor's subaccount.
+            # 2. If split was NOT attached, the net amount was credited to their ledger above.
+            #    If vendor has verified bank details, trigger automated instant Flutterwave Transfer payout:
+            vendor_bank = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first() or \
+                          VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
+            used_flw_split = bool(vendor_bank and vendor_bank.flw_subaccount_id)
+
+            if not used_flw_split and escrow.status == EscrowStatus.RELEASED and vendor_bank and vendor_bank.bank_code and vendor_bank.account_number:
+                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                try:
+                    from decimal import Decimal
+                    from app.routes.withdrawal import _debit_ledger
+                    payout_ref = f"WD-FLW-{order.id}-{uuid.uuid4().hex[:6].upper()}"
+                    flw_tx = _flw.transfer_to_vendor(
+                        account_bank=vendor_bank.bank_code,
+                        account_number=vendor_bank.account_number,
+                        amount_ngn=net_amount,
+                        reference=payout_ref,
+                        narration=f"Siiqo payout for Order #{order.id}",
+                    )
+                    if flw_tx.get("success"):
+                        _debit_ledger(
+                            vendor_id=order.vendor_id,
+                            amount=Decimal(str(net_amount)),
+                            description=f"Auto-payout via Flutterwave Transfer for Order #{order.id}",
+                            reference_id=payout_ref,
+                        )
+                        logger.info("[FLW CONFIRM] Payout transfer queued for vendor %s Order #%s: %s", order.vendor_id, order.id, payout_ref)
+                except Exception as _tr_err:
+                    logger.warning("[FLW CONFIRM] Automated Flutterwave payout transfer skipped: %s (funds remain in ledger)", _tr_err)
+
+        db.session.commit()
+        logger.info("[FLW CONFIRM] Orders confirmed for tx_ref=%s tx_id=%s", tx_ref, tx_id)
+
+    except Exception as exc:
+        db.session.rollback()
+        logger.error("[FLW CONFIRM] Error confirming ref=%s: %s", tx_ref, exc)

@@ -209,6 +209,52 @@ def add_bank_account():
                 f"[BANK ACCOUNT] Paystack subaccount error for vendor {vendor_id}: {_sub_exc}"
             )
 
+        # ── Create Flutterwave subaccount for Split Payments ───────────────
+        # Best-effort — if it fails, Paystack and Daya payouts still work.
+        # Flutterwave subaccount is used when buyers pay via Flutterwave
+        # (international cards, local cards). The RS_xxx ID is stored on the
+        # bank account record and looked up at checkout time.
+        try:
+            from app.services.flutterwave_service import create_subaccount as _flw_create_sub, is_configured as _flw_configured
+            if _flw_configured():
+                # Storefront is already loaded above; safe to reuse
+                _flw_business_name = (storefront.store_name if storefront else account_name)
+                _flw_phone = ""
+                if storefront:
+                    try:
+                        from app.models.user import User as _U
+                        _vendor_user = db.session.get(_U, int(vendor_id))
+                        _flw_phone = (_vendor_user.phone or "") if _vendor_user else ""
+                    except Exception:
+                        pass
+
+                flw_result = _flw_create_sub(
+                    business_name=_flw_business_name,
+                    # Flutterwave uses the same CBN bank code as Daya
+                    bank_code=cbn_bank_code,
+                    account_number=account_number,
+                    business_mobile=_flw_phone or "08012345678",
+                    business_email=(storefront.contact_email if storefront and storefront.contact_email else ""),
+                )
+                if flw_result.get("success"):
+                    bank_account.flw_subaccount_id = flw_result["subaccount_id"]
+                    logging.info(
+                        "[BANK ACCOUNT] Flutterwave subaccount %s saved for vendor %s",
+                        flw_result["subaccount_id"], vendor_id,
+                    )
+                else:
+                    logging.warning(
+                        "[BANK ACCOUNT] Flutterwave subaccount creation failed for vendor %s: %s",
+                        vendor_id, flw_result.get("error_message"),
+                    )
+            else:
+                logging.info("[BANK ACCOUNT] Flutterwave not configured — skipping FLW subaccount creation")
+        except Exception as _flw_exc:
+            logging.warning(
+                "[BANK ACCOUNT] Flutterwave subaccount error for vendor %s: %s",
+                vendor_id, _flw_exc,
+            )
+
         db.session.commit()
         
         return jsonify({
@@ -337,9 +383,12 @@ def request_withdrawal():
 
     With Payscrow provider: returns 400 (split settlement is automatic).
     """
+    from app.services import flutterwave_service as _flw
     provider = os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
+    has_flw = _flw.is_configured()
+    has_paystack = (provider == "paystack") or bool(PAYSTACK_SECRET_KEY)
 
-    if provider != "paystack":
+    if not has_flw and not has_paystack:
         return jsonify({
             'message': (
                 'Manual withdrawals are currently deactivated. '
@@ -371,7 +420,7 @@ def request_withdrawal():
     if not bank_acc:
         bank_acc = VendorBankAccount.query.filter_by(vendor_id=vendor_id).first()
 
-    if not bank_acc or not bank_acc.recipient_code:
+    if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
         return jsonify({
             'message': 'No verified bank account found. '
                        'Please add and verify a bank account in your payout settings first.'
@@ -389,26 +438,58 @@ def request_withdrawal():
     else:
         requested_amount = available  # default: withdraw all
 
-    # Paystack transfer fee is ₦50 flat (waived above ₦5,000 on live tier)
-    # We absorb this — vendor receives full requested amount
     import uuid as _uuid
     reference = f"WD-{_uuid.uuid4().hex[:12].upper()}"
+    transfer_code = ""
 
-    from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-    result = paystack_transfer_to_vendor(
-        recipient_code=bank_acc.recipient_code,
-        amount_ngn=float(requested_amount),
-        reference=reference,
-        reason="Siiqo vendor withdrawal",
-    )
-
-    if not result.get("success"):
-        return jsonify({
-            'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
-        }), 400
+    # Primary transfer channel: Flutterwave if configured, else Paystack
+    if has_flw:
+        flw_res = _flw.transfer_to_vendor(
+            account_bank=bank_acc.bank_code,
+            account_number=bank_acc.account_number,
+            amount_ngn=float(requested_amount),
+            reference=reference,
+            narration="Siiqo vendor withdrawal",
+        )
+        if not flw_res.get("success"):
+            # If Flutterwave rejected and Paystack is available with recipient_code, try Paystack fallback
+            if has_paystack and bank_acc.recipient_code:
+                from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+                result = paystack_transfer_to_vendor(
+                    recipient_code=bank_acc.recipient_code,
+                    amount_ngn=float(requested_amount),
+                    reference=reference,
+                    reason="Siiqo vendor withdrawal",
+                )
+                if not result.get("success"):
+                    return jsonify({
+                        'message': f"Withdrawal failed: {result.get('error_message', flw_res.get('error_message'))}"
+                    }), 400
+                transfer_code = result.get("transfer_code", "")
+            else:
+                return jsonify({
+                    'message': f"Withdrawal failed: {flw_res.get('error_message', 'Payment gateway error')}"
+                }), 400
+        else:
+            transfer_code = flw_res.get("transfer_id", "")
+    elif has_paystack:
+        if not bank_acc.recipient_code:
+            return jsonify({'message': 'Paystack recipient not set up for this bank account.'}), 400
+        from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+        result = paystack_transfer_to_vendor(
+            recipient_code=bank_acc.recipient_code,
+            amount_ngn=float(requested_amount),
+            reference=reference,
+            reason="Siiqo vendor withdrawal",
+        )
+        if not result.get("success"):
+            return jsonify({
+                'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
+            }), 400
+        transfer_code = result.get("transfer_code", "")
 
     # Record withdrawal + debit ledger
-    transfer_code = result.get("transfer_code", "")
+    # Note: transfer_code is already set in each branch above (flw_res or result).
     new_withdrawal = Withdrawal(
         vendor_id=int(vendor_id),
         amount=requested_amount,

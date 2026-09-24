@@ -202,11 +202,11 @@ def pay_payment_link(link_id):
     has_real_email = bool(buyer_email and '@' in buyer_email)
 
     # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
-    # Pay Links for physical products must never route to Paystack.
+    # Pay Links for physical products must never route to Paystack or Flutterwave card.
     # payment_method must be 'bank_transfer' or 'crypto' for physical links.
     payment_method = (data.get('payment_method') or 'card').lower()
 
-    if link_product_type == 'physical' and payment_method == 'card':
+    if link_product_type == 'physical' and payment_method in ('card', 'flutterwave'):
         return jsonify({
             "message": (
                 "Card payment is not available for physical products. "
@@ -460,6 +460,67 @@ def pay_payment_link(link_id):
             logging.error(f"[PAYLINK DAYA] Failed to create Daya funding account: {e}")
             db.session.rollback()
             return jsonify({"message": f"Payment gateway error: {str(e)}"}), 503
+
+    elif payment_method == 'flutterwave':
+        # ── FLUTTERWAVE path (digital + service only) ─────────────────────────
+        from app.services import flutterwave_service as _flw
+        from app.models.withdrawal import VendorBankAccount
+
+        new_order.payment_method = 'FLUTTERWAVE'
+        flw_txn_ref = f"FLW-PL-{new_order.id}-{uuid.uuid4().hex[:8].upper()}"
+
+        # Check vendor Flutterwave subaccount
+        bank_acc = VendorBankAccount.query.filter_by(vendor_id=link.vendor_id, is_default=True).first() or \
+                   VendorBankAccount.query.filter_by(vendor_id=link.vendor_id).first()
+        flw_subaccount_id = bank_acc.flw_subaccount_id if bank_acc else None
+
+        flw_res = _flw.initiate_payment(
+            order_id=str(new_order.id),
+            listed_price_ngn=float(amount),
+            siiqo_fee_ngn=float(fee_amount),
+            buyer_email=buyer_email if has_real_email else f"guest-{new_order.id}@siiqo.com",
+            buyer_name=buyer_name or "Guest Buyer",
+            buyer_phone=buyer_phone or "",
+            flw_subaccount_id=flw_subaccount_id,
+            tx_ref=flw_txn_ref,
+            redirect_url=return_url,
+            is_international=False,
+            narration=f"Payment for {link.title or 'Siiqo Item'}",
+        )
+
+        if not flw_res.get("success"):
+            db.session.rollback()
+            return jsonify({"message": flw_res.get("error_message") or "Flutterwave payment initialization failed"}), 400
+
+        new_escrow = EscrowTransaction(
+            order_id=new_order.id,
+            transaction_number=flw_txn_ref,
+            status=EscrowStatus.PENDING_PAYMENT,
+            amount=float(amount),
+            fee_percent=fee_percent,
+            fee_amount=float(fee_amount),
+            payment_link=flw_res["payment_link"],
+            payscrow_transaction_id=flw_txn_ref,
+            payscrow_ref=flw_txn_ref,
+        )
+        db.session.add(new_escrow)
+        db.session.commit()
+
+        conf_url = f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}"
+        return jsonify({
+            "success": True,
+            "paymentLink": flw_res.get("payment_link"),
+            "transactionNumber": flw_txn_ref,
+            "amount": str(flw_res.get("buyer_total", amount)),
+            "status": EscrowStatus.PENDING_PAYMENT,
+            "order_id": new_order.id,
+            "existing_account": existing_account,
+            "confirmation_url": conf_url,
+            "buyer_phone": buyer_phone,
+            "buyer_email": buyer_email if has_real_email else "",
+            "file_url": link.file_url,
+            "product_type": link_product_type,
+        }), 200
 
     else:
         # ── PAYSTACK / CARD path (digital + service only) ──────────────────────

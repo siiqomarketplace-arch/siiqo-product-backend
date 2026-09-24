@@ -59,6 +59,37 @@ class EscrowTransaction(db.Model):
     order = db.relationship('Order', back_populates='escrow')
 
     def to_dict(self) -> dict:
+        # Check if this order contains event tickets
+        is_event = False
+        event_tickets_data = []
+        try:
+            from app.models.event import TicketPurchase
+            tickets = TicketPurchase.query.filter_by(order_id=self.order_id).all() if self.order_id else []
+            if tickets:
+                is_event = True
+                event_tickets_data = [
+                    {
+                        "ticket_code": t.ticket_code,
+                        "event_title": t.event.title if t.event else "Event Ticket",
+                        "ticket_type_name": t.ticket_type.name if t.ticket_type else "Ticket",
+                        "status": t.status,
+                        "qr_code_url": t.qr_code_url,
+                        "pdf_ticket_url": t.pdf_ticket_url,
+                        "venue": (t.event.venue_address or t.event.city or "") if t.event else "",
+                        "start_date": t.event.start_date.isoformat() if (t.event and t.event.start_date) else None,
+                    }
+                    for t in tickets
+                ]
+        except Exception:
+            pass
+
+        is_digital_or_service = is_event or (
+            all(
+                (item.product.product_type if item.product else 'physical') in ('digital', 'service')
+                for item in self.order.items
+            ) if (self.order and self.order.items) else False
+        )
+
         return {
             "id": self.id,
             "order_id": self.order_id,
@@ -76,10 +107,9 @@ class EscrowTransaction(db.Model):
             "paid_at": self.paid_at.isoformat() if self.paid_at else None,
             "released_at": self.released_at.isoformat() if self.released_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "is_digital_or_service": all(
-                (item.product.product_type if item.product else 'physical') in ('digital', 'service')
-                for item in self.order.items
-            ) if self.order else False,
+            "is_event": is_event,
+            "event_tickets": event_tickets_data,
+            "is_digital_or_service": is_digital_or_service,
             "digital_downloads": [
                 {
                     "product_name": (item.product.name if item.product else "Digital Item"),

@@ -23,6 +23,7 @@ class VendorBankAccount(db.Model):
 
     recipient_code = db.Column(db.String(100), nullable=True, unique=True)
     paystack_subaccount_code = db.Column(db.String(100), nullable=True)
+    flw_subaccount_id = db.Column(db.String(120), nullable=True)  # Flutterwave RS_xxx
 
     is_verified = db.Column(db.Boolean, default=False)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -44,6 +45,7 @@ class VendorBankAccount(db.Model):
             'is_verified': self.is_verified,
             'is_default': self.is_default,
             'paystack_subaccount_code': self.paystack_subaccount_code,
+            'flw_subaccount_id': self.flw_subaccount_id,
             'verified_at': self.verified_at.isoformat() if self.verified_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }

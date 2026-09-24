@@ -85,13 +85,53 @@ class PaystackProvider(BaseEscrowProvider):
         # duplicate Paystack transactions.
         txn_ref = existing_txn_number or f"ORD-{uuid.uuid4().hex[:12].upper()}"
 
-        # ── totals ──────────────────────────────────────────────────────
-        total_ngn = sum(
-            float(o.total_amount) + float(o.logistics_fee or 0)
-            for o in orders
-        )
-        # Paystack amount is in kobo (smallest unit)
-        amount_kobo = int(round(total_ngn * 100))
+        # ── fee accounting ───────────────────────────────────────────────
+        # Siiqo platform fee: 3% for all vendors (flat).
+        # Buyer pays the listed price PLUS Paystack's processing fee on top.
+        #
+        # Paystack fee (official NGN rates):
+        #   1.5% of transaction amount + ₦100 flat
+        #   Cap: ₦2,000 per transaction
+        #   Waived if transaction < ₦2,500
+        #
+        # To ensure the vendor receives exactly the listed price (minus Siiqo 3%),
+        # we charge the buyer: gross = listed_price + paystack_fee
+        # where paystack_fee = min(gross * 0.015 + 100, 2000)
+        #
+        # We solve for gross iteratively (one pass is accurate enough):
+        #   estimate: gross ≈ listed_price / (1 - 0.015) + 100
+        #   then clamp to the ₦2,000 cap.
+        #
+        # bearer = "account" means Siiqo's main account bears nothing extra —
+        # the fee is already included in the gross amount the buyer pays.
+
+        total_listed_ngn = sum(float(o.total_amount) + float(o.logistics_fee or 0) for o in orders)
+
+        # Estimate gross = amount buyer must actually pay
+        # Paystack fee formula: fee = gross * 0.015 + 100  (if gross >= 2500)
+        # Solving: gross = (listed + 100) / (1 - 0.015)
+        if total_listed_ngn >= 2500:
+            gross_estimate = (total_listed_ngn + 100.0) / (1.0 - 0.015)
+            paystack_fee = gross_estimate * 0.015 + 100.0
+            if paystack_fee > 2000.0:
+                paystack_fee = 2000.0
+            buyer_total_ngn = round(total_listed_ngn + paystack_fee, 2)
+        else:
+            # Paystack waives fee below ₦2,500
+            buyer_total_ngn = total_listed_ngn
+            paystack_fee = 0.0
+
+        amount_kobo = int(round(buyer_total_ngn * 100))
+
+        # Siiqo's fee is 3% of the listed price (NOT of the inflated buyer total)
+        siiqo_fee_total = Decimal("0.00")
+        for o in orders:
+            subtotal = Decimal(str(o.total_amount))
+            fee_rate = Decimal("0.05")
+            if o.vendor and o.vendor.storefront and o.vendor.storefront.is_pro_verified:
+                fee_rate = Decimal("0.03")
+            siiqo_fee_total += (subtotal * fee_rate).quantize(Decimal("0.01"))
+        siiqo_fee_kobo = int(round(float(siiqo_fee_total) * 100))
 
         # ── buyer info ──────────────────────────────────────────────────
         buyer = orders[0].buyer
@@ -106,17 +146,6 @@ class PaystackProvider(BaseEscrowProvider):
             else getattr(orders[0], 'buyer_name', None) or "Siiqo Buyer"
         )
         buyer_phone = _format_phone((buyer.phone if buyer else None) or getattr(orders[0], 'delivery_phone', None))
-
-        # ── fee accounting ───────────────────────────────────────────────
-        # Platform fee: 3.0% for Pro Verified vendors, 5.0% standard.
-        siiqo_fee_total = Decimal("0.00")
-        for o in orders:
-            subtotal = Decimal(str(o.total_amount))
-            fee_rate = Decimal("0.05")
-            if o.vendor and o.vendor.storefront and o.vendor.storefront.is_pro_verified:
-                fee_rate = Decimal("0.03")
-            siiqo_fee_total += (subtotal * fee_rate).quantize(Decimal("0.01"))
-        siiqo_fee_kobo = int(round(float(siiqo_fee_total) * 100))
 
         # ── Vendor subaccount (for split payments) ───────────────────────
         # For single-vendor digital/service checkouts, attach the vendor's
@@ -161,6 +190,9 @@ class PaystackProvider(BaseEscrowProvider):
                 "buyer_name": buyer_name,
                 "buyer_phone": buyer_phone,
                 "source": "marketplace_checkout",
+                "listed_amount_ngn": total_listed_ngn,
+                "paystack_fee_ngn": paystack_fee,
+                "siiqo_fee_ngn": float(siiqo_fee_total),
                 # custom_fields appear on the Paystack dashboard receipt
                 "custom_fields": [
                     {
@@ -177,10 +209,16 @@ class PaystackProvider(BaseEscrowProvider):
         if vendor_subaccount_code:
             payload["subaccount"] = vendor_subaccount_code
             payload["transaction_charge"] = siiqo_fee_kobo
-            payload["bearer"] = "subaccount"  # buyer bears Paystack fees; subaccount nets the remainder
+            # bearer = "account" — the inflated buyer_total already includes
+            # Paystack's processing fee, so the main account (Siiqo) absorbs
+            # nothing extra. Paystack deducts its fee from buyer_total, then
+            # pays transaction_charge (Siiqo fee) to Siiqo's main account and
+            # the remainder to the vendor's subaccount.
+            payload["bearer"] = "account"
             logging.info(
                 f"[PAYSTACK] Split payment — subaccount={vendor_subaccount_code}, "
-                f"siiqo_fee=₦{float(siiqo_fee_total):,.2f}"
+                f"siiqo_fee=₦{float(siiqo_fee_total):,.2f}, "
+                f"buyer_total=₦{buyer_total_ngn:,.2f} (listed=₦{total_listed_ngn:,.2f} + psk_fee=₦{paystack_fee:,.2f})"
             )
         else:
             logging.warning(
@@ -195,7 +233,7 @@ class PaystackProvider(BaseEscrowProvider):
 
         logging.info(
             f"[PAYSTACK] Initiating transaction {txn_ref} — "
-            f"total=₦{total_ngn:,.2f}, orders={order_ids}"
+            f"buyer_total=₦{buyer_total_ngn:,.2f}, listed=₦{total_listed_ngn:,.2f}, orders={order_ids}"
         )
 
         try:
@@ -229,7 +267,9 @@ class PaystackProvider(BaseEscrowProvider):
             "provider_transaction_id": access_code,
             # Paystack reference == our own reference
             "provider_reference": txn_ref,
-            "amount": total_ngn,
+            "amount": buyer_total_ngn,
+            "listed_amount": total_listed_ngn,
+            "paystack_fee": paystack_fee,
             "fee_amount": float(siiqo_fee_total),
             # Flag so the webhook handler knows Paystack will settle vendor directly
             "used_split": bool(vendor_subaccount_code),
