@@ -1702,6 +1702,37 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                     except Exception as _email_err:
                         logger.warning("[FLW CONFIRM] Pay Link buyer email failed Order #%s: %s", order.id, _email_err)
 
+            # Send vendor email notification
+            try:
+                from app.utils.email import send_siiqo_email
+                from app.models.user import User as _VendorUser
+                vendor = db.session.get(_VendorUser, order.vendor_id)
+                if vendor and vendor.email:
+                    buyer_name = order.buyer_name or order.buyer_email or "A customer"
+                    order_items_html = "<ul style='margin:8px 0;'>"
+                    for oi in order.order_items:
+                        order_items_html += f"<li>{oi.product_name} (x{oi.quantity}) - ₦{float(oi.price) * oi.quantity:,.2f}</li>"
+                    order_items_html += "</ul>"
+                    
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject=f"💰 New Order #{order.id} Received | Siiqo",
+                        template_name="system_notice",
+                        first_name=vendor.first_name or "Vendor",
+                        notice_text=(
+                            f"Great news! You have received a new order from {buyer_name}.<br><br>"
+                            f"<strong>Order #{order.id}</strong><br>"
+                            f"Total: ₦{float(order.total_amount):,.2f}<br><br>"
+                            f"Items ordered:{order_items_html}<br>"
+                            f"Payment method: Flutterwave<br>"
+                            f"Payment status: Confirmed<br><br>"
+                            f"Log in to your Siiqo dashboard to process this order."
+                        ),
+                    )
+                    logger.info(f"[FLW CONFIRM] Vendor email sent to {vendor.email} for Order #{order.id}")
+            except Exception as vendor_email_err:
+                logger.warning(f"[FLW CONFIRM] Vendor email failed for Order #{order.id}: {vendor_email_err}")
+
             # Vendor payout check:
             # 1. If Flutterwave split was attached, settlement happens natively T+1 to vendor's subaccount.
             # 2. If split was NOT attached, the net amount was credited to their ledger above.

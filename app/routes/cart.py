@@ -268,7 +268,7 @@ def clear_cart():
 def checkout():
     user_id = get_jwt_identity()
     user = db.session.get(User, int(user_id)) if user_id else None
-    cart = Cart.query.filter_by(user_id=user_id).first() if user_id else None
+    cart = Cart.query.filter_by(user_id=int(user_id)).first() if user_id else None
 
     data = request.get_json() or {}
     guest_items_input = data.get('items', [])
