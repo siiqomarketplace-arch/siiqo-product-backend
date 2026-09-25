@@ -1429,13 +1429,18 @@ def flutterwave_webhook():
         logger.error("[FLW WEBHOOK] JSON parsing failed: %s", parse_err)
         return jsonify({"message": "Invalid JSON"}), 400
 
-    data = event_data.get("data", {})
+    # Flutterwave sends data in two formats:
+    # 1. Nested: {"event": "charge.completed", "data": {"id": 123, "tx_ref": "..."}}
+    # 2. Flat: {"id": 123, "txRef": "...", "status": "successful"}  <- sandbox uses this
+    data = event_data.get("data", event_data)  # Use root if "data" key doesn't exist
+    
+    # Handle both key formats: "tx_ref" and "txRef"
     tx_id = data.get("id")
-    tx_ref = data.get("tx_ref") or ""
+    tx_ref = data.get("tx_ref") or data.get("txRef") or ""
     status = data.get("status")
 
     logger.info("[FLW WEBHOOK] Parsed: event=%s tx_id=%s status=%s ref=%s",
-                event_data.get("event"), tx_id, status, tx_ref)
+                event_data.get("event") or event_data.get("event.type"), tx_id, status, tx_ref)
 
     if not tx_id:
         logger.warning("[FLW WEBHOOK] No transaction ID in webhook data")
