@@ -12,6 +12,11 @@ from app.models.user import User
 chat_bp = Blueprint('chat', __name__)
 
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT"""
+    return int(get_jwt_identity())
+
+
 # ---------------------------------------------------------------------------
 # POST /chat/send
 # ---------------------------------------------------------------------------
@@ -19,7 +24,7 @@ chat_bp = Blueprint('chat', __name__)
 @chat_bp.route('/send', methods=['POST'])
 @jwt_required()
 def send_message():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     
     if request.content_type and request.content_type.startswith('multipart/form-data'):
         data = request.form
@@ -84,7 +89,7 @@ def send_message():
 @chat_bp.route('/conversation/<int:partner_id>', methods=['GET'])
 @jwt_required()
 def get_conversation(partner_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     order_id = request.args.get('order_id')
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 50)), 100)
@@ -198,7 +203,7 @@ def get_threads():
 @limiter.exempt
 @jwt_required()
 def get_unread_count():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     count = Message.query.filter_by(receiver_id=user_id, is_read=False).count()
     return jsonify({"unread_count": count}), 200
 
@@ -210,7 +215,7 @@ def get_unread_count():
 @chat_bp.route('/notifications', methods=['GET'])
 @jwt_required()
 def get_notifications():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 20)), 50)
 
@@ -234,9 +239,9 @@ def get_notifications():
 @chat_bp.route('/notifications/<int:notif_id>/read', methods=['PATCH'])
 @jwt_required()
 def mark_notification_read(notif_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     notif = db.session.get(Notification, notif_id)
-    if not notif or notif.user_id != int(user_id):
+    if not notif or notif.user_id != user_id:
         return jsonify({"message": "Not found"}), 404
 
     notif.is_read = True

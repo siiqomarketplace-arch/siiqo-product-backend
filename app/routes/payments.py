@@ -36,6 +36,12 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT (returns None if not authenticated)"""
+    user_id = get_jwt_identity()
+    return int(user_id) if user_id else None
+
+
 def _validate_wallet_address(address: str, network: str) -> tuple[bool, str]:
     """Returns (valid, reason). Reason is empty string when valid."""
     addr = address.strip()
@@ -60,7 +66,7 @@ def _validate_wallet_address(address: str, network: str) -> tuple[bool, str]:
 @jwt_required()
 def get_vendor_crypto_wallet():
     """Return the current vendor crypto wallet settings."""
-    vendor_id = int(get_jwt_identity())
+    vendor_id = _get_user_id()
     wallet = VendorCryptoWallet.query.filter_by(vendor_id=vendor_id).first()
     if not wallet:
         return jsonify({
@@ -76,7 +82,7 @@ def get_vendor_crypto_wallet():
 @jwt_required()
 def save_vendor_crypto_wallet():
     """Create or update the vendor's crypto wallet settings."""
-    vendor_id = int(get_jwt_identity())
+    vendor_id = _get_user_id()
     data = request.get_json() or {}
 
     wallet_address = (data.get("wallet_address") or "").strip()
@@ -125,7 +131,7 @@ def save_vendor_crypto_wallet():
 @jwt_required(optional=True)
 def daya_initiate():
     """Create a Daya funding account for a crypto payment (supports logged-in users and guests)."""
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     buyer_user_id = int(user_id) if user_id else None
     data = request.get_json() or {}
 
@@ -368,7 +374,7 @@ def daya_status():
     Works with or without authentication — Pay Link buyers are guests (no token).
     When authenticated, validates buyer ownership. When guest, uses order_id only.
     """
-    buyer_user_id = get_jwt_identity()
+    buyer_user_id = _get_user_id()
     order_id_str  = request.args.get("order_id", "")
 
     try:
@@ -524,7 +530,7 @@ def daya_status():
 @jwt_required()
 def daya_refresh_rate():
     """Refresh an expired Daya rate for an existing pending payment."""
-    buyer_user_id = int(get_jwt_identity())
+    buyer_user_id = _get_user_id()
     data = request.get_json() or {}
 
     order_id_str = str(data.get("orderId") or data.get("order_id", ""))
@@ -1238,7 +1244,7 @@ def flutterwave_initiate():
     from app.models.withdrawal import VendorBankAccount
     from app.models.product import Product as _Prod
 
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     data = request.get_json() or {}
 
     order_id_param = data.get("orderId") or data.get("order_id", "")

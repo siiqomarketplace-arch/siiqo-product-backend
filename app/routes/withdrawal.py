@@ -29,6 +29,11 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT"""
+    return int(get_jwt_identity())
+
+
 def _get_ledger_balance(vendor_id: int) -> Decimal:
     """Calculate vendor's available ledger balance"""
     credits = db.session.query(func.sum(Ledger.amount)).filter_by(
@@ -66,7 +71,7 @@ def _debit_ledger(vendor_id: int, amount: Decimal, description: str, reference_i
 @jwt_required()
 def get_bank_accounts():
     """Get vendor's bank accounts"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     accounts = VendorBankAccount.query.filter_by(vendor_id=vendor_id).all()
     return jsonify({
         'status': 'success',
@@ -78,7 +83,7 @@ def get_bank_accounts():
 @jwt_required()
 def add_bank_account():
     """Add and verify a new bank account"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     data = request.get_json() or {}
     
     bank_code = data.get('bank_code')
@@ -275,7 +280,7 @@ def add_bank_account():
 @jwt_required()
 def set_default_account(account_id):
     """Set a bank account as default"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     
     account = db.session.get(VendorBankAccount, account_id)
     if not account or account.vendor_id != int(vendor_id):
@@ -298,7 +303,7 @@ def set_default_account(account_id):
 @jwt_required()
 def delete_bank_account(account_id):
     """Delete a bank account"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     
     account = db.session.get(VendorBankAccount, account_id)
     if not account or account.vendor_id != int(vendor_id):
@@ -331,7 +336,7 @@ def delete_bank_account(account_id):
 @jwt_required()
 def get_balance():
     """Get vendor's available balance"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     balance = _get_ledger_balance(vendor_id)
     
     # Get pending withdrawals
@@ -355,7 +360,7 @@ def get_balance():
 @jwt_required()
 def get_withdrawals():
     """Get vendor's withdrawal history"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 20)), 100)
     
@@ -396,7 +401,7 @@ def request_withdrawal():
             )
         }), 400
 
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
 
     # Check available balance
     balance = _get_ledger_balance(int(vendor_id))
@@ -527,7 +532,7 @@ def request_withdrawal():
 @jwt_required()
 def get_pod_payments():
     """Get vendor's POD payments"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 20)), 100)
     status = request.args.get('status')  # confirmed, pending, reconciled
@@ -558,7 +563,7 @@ def get_pod_payments():
 @jwt_required()
 def confirm_pod_payment(order_id):
     """Vendor confirms cash payment received"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     data = request.get_json() or {}
     
     # Get order
@@ -628,7 +633,7 @@ def confirm_pod_payment(order_id):
 @jwt_required()
 def get_pod_summary():
     """Get POD payment summary for vendor"""
-    vendor_id = get_jwt_identity()
+    vendor_id = _get_user_id()
     
     total_pending = db.session.query(func.sum(PODPayment.amount)).filter_by(
         vendor_id=vendor_id,
@@ -759,7 +764,7 @@ def resolve_bank_account():
 @jwt_required()
 def get_partner_bank_accounts():
     """Get partner's bank accounts"""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
     accounts = PartnerBankAccount.query.filter_by(partner_id=partner_id).all()
     return jsonify({
         'status': 'success',
@@ -771,7 +776,7 @@ def get_partner_bank_accounts():
 @jwt_required()
 def add_partner_bank_account():
     """Add and verify a new partner bank account"""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
     data = request.get_json() or {}
     
     bank_code = data.get('bank_code')
@@ -863,7 +868,7 @@ def add_partner_bank_account():
 @jwt_required()
 def set_default_partner_account(account_id):
     """Set a partner bank account as default"""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
     
     account = db.session.get(PartnerBankAccount, account_id)
     if not account or account.partner_id != int(partner_id):
@@ -886,7 +891,7 @@ def set_default_partner_account(account_id):
 @jwt_required()
 def delete_partner_bank_account(account_id):
     """Delete a partner bank account"""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
     
     account = db.session.get(PartnerBankAccount, account_id)
     if not account or account.partner_id != int(partner_id):
@@ -914,7 +919,7 @@ def delete_partner_bank_account(account_id):
 @jwt_required()
 def get_partner_balance():
     """Get logistics partner's available balance"""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
     
     from app.models.escrow import LogisticsAssignment
     from app.models.withdrawal import PartnerWithdrawal
@@ -944,7 +949,7 @@ def get_partner_balance():
 @jwt_required()
 def get_partner_withdrawals():
     """Get partner's withdrawal history"""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
     page = int(request.args.get('page', 1))
     per_page = min(int(request.args.get('per_page', 20)), 100)
     
@@ -965,7 +970,7 @@ def get_partner_withdrawals():
 @jwt_required()
 def request_partner_withdrawal():
     """Partner requests a withdrawal. Triggers a Paystack transfer."""
-    partner_id = get_jwt_identity()
+    partner_id = _get_user_id()
 
     # Calculate available balance
     from app.models.escrow import LogisticsAssignment
@@ -1100,7 +1105,7 @@ def add_daya_bank_account():
     """
     from app.services import daya_service
 
-    vendor_id = int(get_jwt_identity())
+    vendor_id = _get_user_id()
     data = request.get_json() or {}
 
     bank_code = (data.get("bank_code") or "").strip()

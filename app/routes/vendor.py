@@ -31,6 +31,11 @@ vendor_bp = Blueprint('vendor', __name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT"""
+    return int(get_jwt_identity())
+
+
 def _get_vendor(user_id) -> User | None:
     user = db.session.get(User, int(user_id))
     if not user:
@@ -77,7 +82,7 @@ def _require_vendor_storefront(user_id):
 @vendor_bp.route('/settings', methods=['GET'])
 @jwt_required()
 def get_settings():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -220,7 +225,7 @@ def get_settings():
 @jwt_required()
 def get_vendor_dashboard_stats():
     """Returns engagement nudge data + stats for the vendor dashboard home."""
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -420,7 +425,7 @@ def check_slug():
 @vendor_bp.route('/onboard', methods=['POST'])
 @jwt_required()
 def onboard_vendor():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -577,7 +582,7 @@ def onboard_vendor():
 @vendor_bp.route('/update-settings', methods=['PATCH'])
 @jwt_required()
 def update_settings():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -731,7 +736,7 @@ def update_settings():
 @vendor_bp.route('/products/scrape', methods=['POST'])
 @jwt_required()
 def scrape_product():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
         return jsonify({"message": "Vendor access required"}), 403
@@ -750,7 +755,7 @@ def scrape_product():
 @vendor_bp.route('/products/add', methods=['POST'])
 @jwt_required()
 def add_product():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -987,7 +992,7 @@ def add_product():
 @vendor_bp.route('/products/update/<int:product_id>', methods=['PATCH'])
 @jwt_required()
 def edit_product(product_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1176,7 +1181,7 @@ def edit_product(product_id):
 @vendor_bp.route('/products/delete/<int:product_id>', methods=['DELETE'])
 @jwt_required()
 def delete_product(product_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1201,7 +1206,7 @@ def delete_product(product_id):
 @vendor_bp.route('/products/my-products', methods=['GET'])
 @jwt_required()
 def my_products():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
         return jsonify([]), 200
@@ -1264,7 +1269,7 @@ def my_products():
 @vendor_bp.route('/orders', methods=['GET'])
 @jwt_required()
 def get_orders():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = _get_vendor(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1342,7 +1347,7 @@ def get_orders():
 @vendor_bp.route('/orders/<int:order_id>/status', methods=['PUT', 'PATCH'])
 @jwt_required()
 def update_order_status(order_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = _get_vendor(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1438,7 +1443,7 @@ def update_order_status(order_id):
 @vendor_bp.route('/finance/ledger', methods=['GET'])
 @jwt_required()
 def get_ledger():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = _get_vendor(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1475,7 +1480,7 @@ def get_ledger():
 @vendor_bp.route('/crm/customers', methods=['GET'])
 @jwt_required()
 def get_customers():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = _get_vendor(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1540,7 +1545,7 @@ def get_customers():
 @vendor_bp.route('/marketing/coupons', methods=['GET', 'POST'])
 @jwt_required()
 def handle_coupons():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = _get_vendor(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1598,7 +1603,7 @@ def handle_coupons():
 @vendor_bp.route('/marketing/campaigns', methods=['GET', 'POST'])
 @jwt_required()
 def handle_campaigns():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = _get_vendor(user_id)
     if not user:
         return jsonify({"message": "Vendor access required"}), 403
@@ -1641,7 +1646,7 @@ def handle_campaigns():
 @vendor_bp.route('/storefront/analyze', methods=['POST'])
 @jwt_required()
 def analyze_storefront():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -1665,7 +1670,7 @@ def analyze_storefront():
 @vendor_bp.route('/trust-profile', methods=['GET'])
 @jwt_required()
 def get_vendor_trust_profile():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     from app.services.trust import get_or_create_trust_profile, recalculate_vendor_trust
     
     # Recalculate on load to ensure dashboard displays up-to-date data
@@ -1686,7 +1691,7 @@ def get_vendor_trust_profile():
 @vendor_bp.route('/dashboard-stats', methods=['GET'])
 @jwt_required()
 def get_vendor_dashboard_stats_legacy():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user:
         return jsonify({"message": "Vendor account required"}), 403
@@ -1774,7 +1779,7 @@ def get_vendor_dashboard_stats_legacy():
 @vendor_bp.route('/pro-verified/checkout', methods=['POST'])
 @jwt_required()
 def checkout_pro_verified():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
         return jsonify({"message": "Storefront required"}), 400
@@ -1829,7 +1834,7 @@ def checkout_pro_verified():
 @vendor_bp.route('/pro-verified/daya-initiate', methods=['POST'])
 @jwt_required()
 def initiate_daya_pro_verified():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
         return jsonify({"message": "Storefront required"}), 400
@@ -1933,7 +1938,7 @@ def initiate_daya_pro_verified():
 @vendor_bp.route('/pro-verified/daya-status', methods=['GET'])
 @jwt_required()
 def get_daya_pro_verified_status():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
         return jsonify({"message": "Storefront required"}), 400
@@ -1988,7 +1993,7 @@ def get_daya_pro_verified_status():
 @vendor_bp.route('/products/<int:product_id>/sponsor', methods=['POST'])
 @jwt_required()
 def sponsor_product(product_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
         return jsonify({"message": "Vendor storefront required"}), 400

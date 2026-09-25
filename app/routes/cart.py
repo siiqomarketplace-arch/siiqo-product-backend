@@ -23,6 +23,12 @@ from app.routes.escrow import generate_order_token
 cart_bp = Blueprint('cart', __name__)
 
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT (returns None if not authenticated)"""
+    user_id = get_jwt_identity()
+    return int(user_id) if user_id else None
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -67,7 +73,7 @@ def _vendor_crypto_fields(vendor_id) -> dict:
 @cart_bp.route('/', methods=['GET'])
 @jwt_required()
 def get_cart():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     cart = Cart.query.filter_by(user_id=user_id).first()
 
     if not cart:
@@ -126,7 +132,7 @@ def get_cart():
 @cart_bp.route('/add', methods=['POST'])
 @jwt_required()
 def add_to_cart():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     data = request.get_json() or {}
     product_id = data.get('product_id')
     quantity = int(data.get('quantity', 1))
@@ -173,7 +179,7 @@ def add_to_cart():
 @cart_bp.route('/update/<int:item_id>', methods=['PATCH'])
 @jwt_required()
 def update_cart_item(item_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     data = request.get_json() or {}
     quantity = data.get('quantity')
 
@@ -208,7 +214,7 @@ def update_cart_item(item_id):
 @cart_bp.route('/remove/<int:item_id>', methods=['DELETE'])
 @jwt_required()
 def remove_cart_item(item_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     cart = Cart.query.filter_by(user_id=user_id).first()
     if not cart:
         return jsonify({"message": "Cart not found"}), 404
@@ -236,7 +242,7 @@ def remove_cart_item(item_id):
 @cart_bp.route('/clear', methods=['DELETE'])
 @jwt_required()
 def clear_cart():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     cart = Cart.query.filter_by(user_id=user_id).first()
     if cart:
         items = CartItem.query.filter_by(cart_id=cart.id).all()

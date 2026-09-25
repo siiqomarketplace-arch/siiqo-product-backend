@@ -27,6 +27,12 @@ auth_bp = Blueprint('auth', __name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT (returns None if not authenticated)"""
+    user_id = _get_user_id()
+    return int(user_id) if user_id else None
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -393,7 +399,7 @@ def login_rider():
 @auth_bp.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)
 def refresh_token():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user or not user.is_active:
         return jsonify({"message": "User not found or suspended"}), 404
@@ -412,7 +418,7 @@ def refresh_token():
 @auth_bp.route('/profile', methods=['GET'])
 @jwt_required()
 def profile():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -439,7 +445,7 @@ def profile():
 @auth_bp.route('/switch-mode', methods=['POST'])
 @jwt_required()
 def switch_mode():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -529,7 +535,7 @@ def reset_password():
 @auth_bp.route('/upload-profile-pic', methods=['POST'])
 @jwt_required()
 def upload_profile_pic():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -554,7 +560,7 @@ def upload_profile_pic():
 @auth_bp.route('/delete-account', methods=['DELETE'])
 @jwt_required()
 def delete_account():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -754,7 +760,7 @@ def link_telegram():
     import hashlib
     import hmac
 
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -889,7 +895,7 @@ def verify_link_otp():
 @auth_bp.route('/unlink-telegram', methods=['POST'])
 @jwt_required()
 def unlink_telegram():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404
@@ -911,7 +917,7 @@ def unlink_telegram():
 @auth_bp.route('/telegram-prefs', methods=['PATCH'])
 @jwt_required()
 def telegram_prefs():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     user = db.session.get(User, int(user_id))
     if not user:
         return jsonify({"message": "User not found"}), 404

@@ -22,6 +22,11 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT"""
+    return int(get_jwt_identity())
+
+
 def _notify(user_id: int, title: str, message: str, ntype: str = 'NEGOTIATION'):
     db.session.add(Notification(
         user_id=user_id,
@@ -47,7 +52,7 @@ def _chat_message(sender_id: int, receiver_id: int, content: str):
 @negotiation_bp.route('/create', methods=['POST'])
 @jwt_required()
 def create_offer():
-    buyer_id = int(get_jwt_identity())
+    buyer_id = _get_user_id()
     data = request.get_json() or {}
 
     product_id    = data.get('product_id')
@@ -162,7 +167,7 @@ def create_offer():
 @negotiation_bp.route('/buyer', methods=['GET'])
 @jwt_required()
 def get_buyer_negotiations():
-    buyer_id = int(get_jwt_identity())
+    buyer_id = _get_user_id()
     status_filter = request.args.get('status')  # optional filter
 
     q = NegotiationRequest.query.filter_by(buyer_id=buyer_id)
@@ -182,7 +187,7 @@ def get_buyer_negotiations():
 @negotiation_bp.route('/vendor', methods=['GET'])
 @jwt_required()
 def get_vendor_negotiations():
-    vendor_id = int(get_jwt_identity())
+    vendor_id = _get_user_id()
     status_filter = request.args.get('status')
 
     q = NegotiationRequest.query.filter_by(vendor_id=vendor_id)
@@ -210,7 +215,7 @@ def get_vendor_negotiations():
 @negotiation_bp.route('/<int:neg_id>', methods=['GET'])
 @jwt_required()
 def get_negotiation(neg_id):
-    user_id = int(get_jwt_identity())
+    user_id = _get_user_id()
     neg = db.session.get(NegotiationRequest, neg_id)
     if not neg:
         return jsonify({"message": "Negotiation not found"}), 404
@@ -225,7 +230,7 @@ def get_negotiation(neg_id):
 @negotiation_bp.route('/<int:neg_id>/accept', methods=['POST'])
 @jwt_required()
 def accept_offer(neg_id):
-    vendor_id = int(get_jwt_identity())
+    vendor_id = _get_user_id()
     neg = db.session.get(NegotiationRequest, neg_id)
     if not neg:
         return jsonify({"message": "Negotiation not found"}), 404
@@ -330,7 +335,7 @@ def accept_offer(neg_id):
 @negotiation_bp.route('/<int:neg_id>/counter', methods=['POST'])
 @jwt_required()
 def counter_offer(neg_id):
-    user_id = int(get_jwt_identity())
+    user_id = _get_user_id()
     neg = db.session.get(NegotiationRequest, neg_id)
     if not neg:
         return jsonify({"message": "Negotiation not found"}), 404
@@ -419,7 +424,7 @@ def counter_offer(neg_id):
 @negotiation_bp.route('/<int:neg_id>/reject', methods=['POST'])
 @jwt_required()
 def reject_offer(neg_id):
-    user_id = int(get_jwt_identity())
+    user_id = _get_user_id()
     neg = db.session.get(NegotiationRequest, neg_id)
     if not neg:
         return jsonify({"message": "Negotiation not found"}), 404
@@ -478,7 +483,7 @@ def reject_offer(neg_id):
 @negotiation_bp.route('/<int:neg_id>/buyer-accept', methods=['POST'])
 @jwt_required()
 def buyer_accept_counter(neg_id):
-    buyer_id = int(get_jwt_identity())
+    buyer_id = _get_user_id()
     neg = db.session.get(NegotiationRequest, neg_id)
     if not neg:
         return jsonify({"message": "Negotiation not found"}), 404
@@ -565,7 +570,7 @@ def buyer_accept_counter(neg_id):
 @negotiation_bp.route('/product/<int:product_id>', methods=['GET'])
 @jwt_required()
 def get_product_negotiation(product_id):
-    buyer_id = int(get_jwt_identity())
+    buyer_id = _get_user_id()
     neg = NegotiationRequest.query.filter(
         NegotiationRequest.buyer_id == buyer_id,
         NegotiationRequest.product_id == product_id,

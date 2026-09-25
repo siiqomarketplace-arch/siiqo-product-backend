@@ -21,6 +21,10 @@ payment_links_bp = Blueprint('payment_links', __name__)
 def _utcnow():
     return datetime.now(timezone.utc)
 
+def _get_user_id():
+    """Helper to get user_id as integer from JWT"""
+    return int(get_jwt_identity())
+
 def _get_vendor(user_id) -> User | None:
     user = db.session.get(User, int(user_id))
     if not user:
@@ -36,7 +40,7 @@ def _get_vendor(user_id) -> User | None:
 @payment_links_bp.route('/vendor/payment-links', methods=['POST'])
 @jwt_required()
 def create_payment_link():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     vendor = _get_vendor(user_id)
     if not vendor:
         return jsonify({"message": "Vendor access required"}), 403
@@ -109,7 +113,7 @@ def create_payment_link():
 @payment_links_bp.route('/vendor/payment-links', methods=['GET'])
 @jwt_required()
 def get_vendor_payment_links():
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     vendor = _get_vendor(user_id)
     if not vendor:
         return jsonify({"message": "Vendor access required"}), 403
@@ -139,7 +143,7 @@ def get_vendor_payment_links():
 @payment_links_bp.route('/vendor/payment-links/<int:link_id>', methods=['DELETE'])
 @jwt_required()
 def delete_payment_link(link_id):
-    user_id = get_jwt_identity()
+    user_id = _get_user_id()
     vendor = _get_vendor(user_id)
     if not vendor:
         return jsonify({"message": "Vendor access required"}), 403
