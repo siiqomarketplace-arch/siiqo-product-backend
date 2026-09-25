@@ -1709,9 +1709,22 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                 vendor = db.session.get(_VendorUser, order.vendor_id)
                 if vendor and vendor.email:
                     buyer_name = order.buyer_name or order.buyer_email or "A customer"
+                    
+                    # Build order items HTML - handle both cart orders and payment link orders
                     order_items_html = "<ul style='margin:8px 0;'>"
-                    for oi in order.order_items:
-                        order_items_html += f"<li>{oi.product_name} (x{oi.quantity}) - ₦{float(oi.price) * oi.quantity:,.2f}</li>"
+                    if order.payment_link_id and order.payment_link:
+                        # Payment link order - use payment link details
+                        link = order.payment_link
+                        order_items_html += f"<li>{link.title} - ₦{float(order.total_amount):,.2f}</li>"
+                    elif order.items:
+                        # Cart/storefront order - use order items
+                        for oi in order.items:
+                            product_name = oi.product.name if oi.product else "Product"
+                            item_total = float(oi.price_at_purchase) * oi.quantity
+                            order_items_html += f"<li>{product_name} (x{oi.quantity}) - ₦{item_total:,.2f}</li>"
+                    else:
+                        # Fallback if no items found
+                        order_items_html += f"<li>Order total - ₦{float(order.total_amount):,.2f}</li>"
                     order_items_html += "</ul>"
                     
                     send_siiqo_email(
