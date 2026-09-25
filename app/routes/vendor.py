@@ -1288,81 +1288,11 @@ def get_orders():
     # ── Live payment sync for stuck PENDING orders ───────────────────────────
     from app.models.escrow import EscrowTransaction
     from datetime import datetime, timezone as _tz
-    needs_commit = False
-    for o in orders:
-        if o.status == 'PENDING':
-            escrow_check = EscrowTransaction.query.filter_by(order_id=o.id).first()
-            if escrow_check and escrow_check.transaction_number:
-                txn = escrow_check.transaction_number
-                if txn.startswith('FLW-'):
-                    # Flutterwave order — verify with FLW API and run full delivery
-                    try:
-                        from app.services import flutterwave_service as _flw
-                        from app.routes.payments import _handle_flutterwave_payment_confirmed
-                        
-                        # Verify by tx_ref (the FLW-ORD-... string stored in transaction_number)
-                        # FLW API supports verification by reference, not just numeric ID
-                        verif = _flw.verify_transaction_by_ref(txn)
-                        if verif.get("success") and verif.get("status") == "successful":
-                            # Extract numeric tx_id from verification response
-                            tx_id = str(verif.get("data", {}).get("id", ""))
-                            _handle_flutterwave_payment_confirmed(
-                                tx_ref=txn,
-                                tx_id=tx_id,
-                                verification=verif,
-                            )
-                            db.session.refresh(o)
-                            db.session.refresh(escrow_check)
-                            needs_commit = False  # already committed inside handler
-                    except Exception as _flw_err:
-                        # If verify_by_ref doesn't exist, fall back to numeric ID check
-                        try:
-                            flw_tx_id = escrow_check.payscrow_transaction_id
-                            if flw_tx_id and str(flw_tx_id).isdigit():
-                                verif = _flw.verify_transaction(flw_tx_id)
-                                if verif.get("success") and verif.get("status") == "successful":
-                                    _handle_flutterwave_payment_confirmed(
-                                        tx_ref=txn,
-                                        tx_id=str(flw_tx_id),
-                                        verification=verif,
-                                    )
-                                    db.session.refresh(o)
-                                    db.session.refresh(escrow_check)
-                                    needs_commit = False
-                        except Exception:
-                            pass  # non-fatal
-                else:
-                    # Paystack order — verify with Paystack API and run full delivery
-                    try:
-                        from app.services.escrow.paystack_provider import PaystackProvider
-                        verify = PaystackProvider().verify_transaction(txn)
-                        if verify.get("success"):
-                            escrow_check.status = 'IN_ESCROW'
-                            escrow_check.paid_at = escrow_check.paid_at or datetime.now(_tz.utc)
-                            o.status = 'PAID'
-                            needs_commit = True
-                            
-                            # Run full delivery pipeline for digital/service/event orders
-                            db.session.flush()
-                            from app.routes.escrow import _deliver_digital_products, _deliver_service_products, _deliver_event_tickets
-                            is_digital = _deliver_digital_products(o, escrow_check)
-                            is_service = False
-                            is_event = False
-                            if not is_digital:
-                                is_service = _deliver_service_products(o, escrow_check)
-                            if not is_digital and not is_service:
-                                is_event = _deliver_event_tickets(o, escrow_check)
-                            
-                            if is_digital or is_service or is_event:
-                                db.session.refresh(o)
-                                db.session.refresh(escrow_check)
-                    except Exception:
-                        pass  # non-fatal
-    if needs_commit:
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
+    # ─────────────────────────────────────────────────────────────────────────
+    # REMOVED: Live sync verification for FLW/Paystack orders.
+    # Webhooks handle order confirmation. If webhook fired, order is already PAID in DB.
+    # If webhook hasn't fired yet, order stays PENDING until it does.
+    # This live sync was causing crashes and is redundant.
     # ─────────────────────────────────────────────────────────────────────────
 
     orders_data = [{
