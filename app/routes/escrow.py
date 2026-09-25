@@ -715,7 +715,7 @@ def payscrow_webhook():
     logging.info("[LEGACY WEBHOOK] /escrow/webhook called — no active provider, returning 200.")
     return jsonify({"status": "ok", "message": "No active provider for this webhook endpoint."}), 200
 
-                        if order.buyer_id:
+
 def _paystack_payout_vendor(order, escrow):
     """
     Push vendor's net share via Paystack Transfers API.
