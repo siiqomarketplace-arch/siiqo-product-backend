@@ -1227,13 +1227,13 @@ def paystack_webhook():
                             type="ESCROW",
                             order_id=order.id,
                         ))
-                    processed_orders.append(order)
+                    processed_orders.append((order, is_digital or is_service or is_event))
 
             db.session.commit()
 
             # Send emails (non-blocking, deduplicated per order)
             from app.utils.email import send_siiqo_email
-            for order in processed_orders:
+            for order, was_delivered in processed_orders:
                 if getattr(order, 'confirmation_email_sent', False):
                     logging.info(f"[EMAIL DUP GUARD] Order #{order.id} confirmation email already sent. Skipping.")
                     continue
@@ -1245,15 +1245,18 @@ def paystack_webhook():
                     db.session.rollback()
 
                 is_digital_or_service = all(
-                    (item.product.product_type if item.product else 'physical') in ('digital', 'service')
-                    for item in order.items
+                    ((getattr(item.product, 'product_type', None) or 'physical') if item.product else 'physical') in ('digital', 'service')
+                    for item in (order.items or [])
                 )
                 buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
                 buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
                 buyer_name = (buyer.full_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
                 buyer_phone = (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or getattr(order, 'delivery_phone', None) or ""
 
-                if buyer_email:
+                # Skip generic order_confirmation for digital/service/event orders:
+                # _deliver_digital_products / _deliver_service_products / activate_tickets_for_order
+                # already sent the buyer a tailored email with download/booking link or QR code.
+                if not was_delivered and buyer_email:
                     try:
                         send_siiqo_email(
                             to_email=buyer_email,
@@ -1267,8 +1270,10 @@ def paystack_webhook():
                     except Exception as e:
                         logging.warning(f"[EMAIL] buyer order confirm failed #{order.id}: {e}")
 
+                # Skip generic order_received_vendor for digital/service/event orders:
+                # delivery helpers already sent the vendor a tailored notification email.
                 vendor = db.session.get(User, order.vendor_id)
-                if vendor and vendor.email:
+                if vendor and vendor.email and not was_delivered:
                     try:
                         send_siiqo_email(
                             to_email=vendor.email,

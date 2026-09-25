@@ -81,10 +81,25 @@ def _deliver_digital_products(order, escrow):
     from app.utils.email import send_siiqo_email
     from app.models.user import User
 
+    def _abs_url(u):
+        if not u:
+            return ""
+        u_str = str(u).strip()
+        if u_str.startswith('/static/'):
+            base = os.environ.get('SITE_URL', 'https://siiqo.com').rstrip('/')
+            try:
+                from flask import request
+                if request and hasattr(request, 'host_url') and request.host_url:
+                    base = request.host_url.rstrip('/')
+            except Exception:
+                pass
+            return f"{base}{u_str}"
+        return u_str
+
     digital_items = []
     for item in (order.items or []):
         p = db.session.get(Prod, item.product_id) if item.product_id else item.product
-        if p and p.product_type == 'digital':
+        if p and (getattr(p, 'product_type', '') or '').strip().lower() == 'digital':
             digital_items.append((p, item))
 
     if not digital_items:
@@ -93,7 +108,7 @@ def _deliver_digital_products(order, escrow):
     # Build download list for email — HTML links so they are clickable in inbox
     download_links_html = "".join(
         f'<p style="margin:8px 0;"><strong>{p.name}</strong><br>'
-        f'<a href="{p.file_url}" style="color:#E0921C;word-break:break-all;">{p.file_url}</a></p>'
+        f'<a href="{_abs_url(p.file_url)}" style="color:#E0921C;font-weight:700;word-break:break-all;">{_abs_url(p.file_url)}</a></p>'
         for p, _ in digital_items if p.file_url
     ) or "<p>The vendor will share your download link shortly via Siiqo chat.</p>"
 
@@ -199,18 +214,41 @@ def _deliver_digital_products(order, escrow):
         except Exception as e:
             logging.warning(f"[EMAIL] digital download email failed Order #{order.id}: {e}")
 
-    # Notify vendor
+    # Notify vendor — include payout timing based on payment method
     vendor = db.session.get(User, order.vendor_id)
     if vendor and vendor.email:
         try:
+            _pmethod = (order.payment_method or '').upper()
+            _is_flw = is_flutterwave
+            _is_psk = is_paystack
+            if _is_flw:
+                payout_line = (
+                    f"💳 Payment method: Flutterwave (card/international).<br>"
+                    f"Your bank settlement will arrive within <strong>24–48 hours</strong> after order completion — "
+                    f"this is Flutterwave's standard T+1 settlement schedule."
+                )
+            elif _is_psk:
+                payout_line = (
+                    f"💳 Payment method: Paystack (card/USSD).<br>"
+                    f"Your bank settlement will arrive within <strong>24–48 hours</strong> after order completion — "
+                    f"this is Paystack's standard T+1 settlement schedule."
+                )
+            else:
+                payout_line = (
+                    f"⚡ Payment method: Bank Transfer / Crypto (Daya).<br>"
+                    f"Your payout has been <strong>triggered immediately</strong> and should arrive in your bank account shortly."
+                )
             send_siiqo_email(
                 to_email=vendor.email,
                 subject=f"Digital Sale Complete – Order #{order.id} | Siiqo",
                 template_name="system_notice",
                 first_name=vendor.first_name or "Vendor",
                 notice_text=(
-                    f"Your digital product was purchased and delivered automatically.\n"
-                    f"Order #{order.id} — ₦{net_amount:,.2f} credited to your ledger."
+                    f"Your digital product was purchased and the download link has been delivered to the buyer automatically.<br><br>"
+                    f"<strong>Order #{order.id}</strong> — ₦{net_amount:,.2f} credited to your account.<br><br>"
+                    f"{payout_line}<br><br>"
+                    f"No action needed from you — the order is fully complete. "
+                    f"<a href='https://siiqo.com/vendor/orders'>View your order dashboard →</a>"
                 ),
             )
         except Exception as e:
@@ -233,10 +271,25 @@ def _deliver_service_products(order, escrow):
     from app.utils.email import send_siiqo_email
     from app.models.user import User
 
+    def _abs_url(u):
+        if not u:
+            return ""
+        u_str = str(u).strip()
+        if u_str.startswith('/static/'):
+            base = os.environ.get('SITE_URL', 'https://siiqo.com').rstrip('/')
+            try:
+                from flask import request
+                if request and hasattr(request, 'host_url') and request.host_url:
+                    base = request.host_url.rstrip('/')
+            except Exception:
+                pass
+            return f"{base}{u_str}"
+        return u_str
+
     service_items = []
     for item in (order.items or []):
         p = db.session.get(Prod, item.product_id) if item.product_id else item.product
-        if p and p.product_type == 'service':
+        if p and (getattr(p, 'product_type', '') or '').strip().lower() == 'service':
             service_items.append((p, item))
 
     if not service_items:
@@ -245,7 +298,7 @@ def _deliver_service_products(order, escrow):
     # Build booking list for email — HTML links so they are clickable in inbox
     booking_links_html = "".join(
         f'<p style="margin:8px 0;"><strong>{p.name}</strong><br>'
-        f'<a href="{p.booking_link}" style="color:#E0921C;word-break:break-all;">{p.booking_link}</a></p>'
+        f'<a href="{_abs_url(p.booking_link)}" style="color:#E0921C;font-weight:700;word-break:break-all;">{_abs_url(p.booking_link)}</a></p>'
         for p, _ in service_items if p.booking_link
     ) or "<p>The vendor will reach out to you via Siiqo chat to schedule your service.</p>"
 
@@ -347,18 +400,40 @@ def _deliver_service_products(order, escrow):
         except Exception as e:
             logging.warning(f"[EMAIL] service booking email failed Order #{order.id}: {e}")
 
-    # Notify vendor
+    # Notify vendor — include payout timing based on payment method
     vendor = db.session.get(User, order.vendor_id)
     if vendor and vendor.email:
         try:
+            _is_flw = is_flutterwave
+            _is_psk = is_paystack
+            if _is_flw:
+                payout_line = (
+                    f"💳 Payment method: Flutterwave (card/international).<br>"
+                    f"Your bank settlement will arrive within <strong>24–48 hours</strong> after order completion — "
+                    f"this is Flutterwave's standard T+1 settlement schedule."
+                )
+            elif _is_psk:
+                payout_line = (
+                    f"💳 Payment method: Paystack (card/USSD).<br>"
+                    f"Your bank settlement will arrive within <strong>24–48 hours</strong> after order completion — "
+                    f"this is Paystack's standard T+1 settlement schedule."
+                )
+            else:
+                payout_line = (
+                    f"⚡ Payment method: Bank Transfer / Crypto (Daya).<br>"
+                    f"Your payout has been <strong>triggered immediately</strong> and should arrive in your bank account shortly."
+                )
             send_siiqo_email(
                 to_email=vendor.email,
                 subject=f"Service Booking Sale – Order #{order.id} | Siiqo",
                 template_name="system_notice",
                 first_name=vendor.first_name or "Vendor",
                 notice_text=(
-                    f"Your service product was purchased and booking links delivered automatically.\n"
-                    f"Order #{order.id} — ₦{net_amount:,.2f} credited to your ledger."
+                    f"Your service product was purchased and the booking link has been delivered to the buyer automatically.<br><br>"
+                    f"<strong>Order #{order.id}</strong> — ₦{net_amount:,.2f} credited to your account.<br><br>"
+                    f"{payout_line}<br><br>"
+                    f"No action needed from you — the order is fully complete. "
+                    f"<a href='https://siiqo.com/vendor/orders'>View your order dashboard →</a>"
                 ),
             )
         except Exception as e:
@@ -730,21 +805,25 @@ def payscrow_webhook():
                             order_id=order.id,
                         ))
 
-                    processed_orders.append((escrow, order, is_digital_order or is_service_order))
+                    processed_orders.append((escrow, order, is_digital_order or is_service_order or is_event_order))
 
         db.session.commit()
 
         from app.utils.email import send_siiqo_email
         from app.models.user import User
 
-        for escrow, order, is_digital_order in processed_orders:
+        for escrow, order, is_digital_or_event_order in processed_orders:
             is_digital_or_service = all(
-                (item.product.product_type if item.product else 'physical') in ('digital', 'service')
-                for item in order.items
+                ((getattr(item.product, 'product_type', None) or 'physical') if item.product else 'physical') in ('digital', 'service')
+                for item in (order.items or [])
             )
             buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
             buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
-            if buyer_email:
+            # Skip generic order_confirmation for digital/service/event orders:
+            # their specific delivery emails (download link / booking link / QR code)
+            # were already sent by _deliver_digital_products / _deliver_service_products
+            # / _deliver_event_tickets / activate_tickets_for_order.
+            if not is_digital_or_event_order and buyer_email:
                 buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "there"
                 try:
                     send_siiqo_email(
@@ -759,8 +838,11 @@ def payscrow_webhook():
                 except Exception as e:
                     logging.warning(f"[EMAIL] buyer confirm email failed Order #{order.id}: {e}")
 
+            # Skip generic order_received_vendor for digital/service/event orders:
+            # _deliver_digital_products / _deliver_service_products / activate_tickets_for_order
+            # already sent the vendor a tailored notification email.
             vendor = db.session.get(User, order.vendor_id)
-            if vendor and vendor.email:
+            if vendor and vendor.email and not is_digital_or_event_order:
                 b_name = (buyer.full_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
                 b_phone = (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or getattr(order, 'delivery_phone', None) or ""
                 try:

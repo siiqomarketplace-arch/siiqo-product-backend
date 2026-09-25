@@ -1996,6 +1996,19 @@ def activate_tickets_for_order(order_id):
                 if vendor and vendor.email:
                     vendor_name = vendor.business_name or vendor.first_name or vendor.email
                     dashboard_url = f"https://siiqo.com/vendor/events/{ev.id}/tickets"
+                    # Determine payout timing based on how this ticket was paid
+                    _pm = (order.payment_method or '').upper() if order else ''
+                    _is_flw_ticket = _pm == 'FLUTTERWAVE'
+                    _is_psk_ticket = _pm in ('ESCROW', 'PAYSTACK') or (
+                        not _is_flw_ticket and _pm not in ('CRYPTO', 'DAYA_BANK_TRANSFER', '')
+                    )
+                    if _is_flw_ticket:
+                        _payout_note = "💳 Paid via Flutterwave — your settlement arrives within 24–48 hours (Flutterwave T+1 schedule)."
+                    elif _is_psk_ticket:
+                        _payout_note = "💳 Paid via Paystack — your settlement arrives within 24–48 hours (Paystack T+1 schedule)."
+                    else:
+                        _payout_note = "⚡ Paid via Bank Transfer / Crypto (Daya) — your payout has been triggered immediately."
+
                     send_siiqo_email(
                         to_email=vendor.email,
                         subject=f"💰 New Ticket Purchase (₦{float(order.total_amount if order else 0):,.0f}) — {ev.title}",
@@ -2008,6 +2021,7 @@ def activate_tickets_for_order(order_id):
                         quantity=len(pending_tickets),
                         total_price=f"{float(order.total_amount if order else 0):,.0f}",
                         is_free=False,
+                        payout_note=_payout_note,
                         dashboard_url=dashboard_url,
                         year=datetime.utcnow().year,
                     )
