@@ -1528,7 +1528,7 @@ def my_referral_stats():
     if not user:
         return jsonify({"status": "error", "message": "User not found"}), 404
 
-    referrals = Referral.query.filter_by(referrer_id=user_id).all()
+    referrals = Referral.query.filter_by(referrer_id=int(user_id)).all()
     total_earned = sum(float(r.reward_earned or 0) for r in referrals)
 
     referred_users = []

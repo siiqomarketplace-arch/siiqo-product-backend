@@ -66,13 +66,13 @@ def calculate_completion_score(vendor_id) -> float:
     from app.models.escrow import EscrowTransaction
     try:
         # 1. Total orders handled by this vendor
-        total_orders = Order.query.filter_by(vendor_id=vendor_id).count()
+        total_orders = Order.query.filter_by(vendor_id=int(vendor_id)).count()
         if total_orders == 0:
             return 0.00
 
         # 2. Completed orders (Escrow released or POD payment confirmed)
         completed_orders = Order.query.filter(
-            Order.vendor_id == vendor_id,
+            Order.vendor_id == int(vendor_id),
             Order.status == 'COMPLETED'
         ).count()
 
@@ -82,13 +82,13 @@ def calculate_completion_score(vendor_id) -> float:
         # 3. Dispute deductions
         # Open disputes: Escrow transactions currently disputed
         pending_disputes = EscrowTransaction.query.join(Order).filter(
-            Order.vendor_id == vendor_id,
+            Order.vendor_id == int(vendor_id),
             EscrowTransaction.status == 'DISPUTED'
         ).count()
 
         # Lost disputes: Escrow transactions refunded where a dispute was raised
         lost_disputes = EscrowTransaction.query.join(Order).filter(
-            Order.vendor_id == vendor_id,
+            Order.vendor_id == int(vendor_id),
             EscrowTransaction.status == 'REFUNDED',
             EscrowTransaction.dispute_id.isnot(None)
         ).count()

@@ -1479,9 +1479,9 @@ def get_dashboard_overview():
     
     # Orders count
     from app.models.order import Order
-    total_orders = Order.query.filter_by(vendor_id=user_id).count()
+    total_orders = Order.query.filter_by(vendor_id=int(user_id)).count()
     month_orders = Order.query.filter(
-        Order.vendor_id == user_id,
+        Order.vendor_id == int(user_id),
         Order.created_at >= month_start
     ).count()
     
