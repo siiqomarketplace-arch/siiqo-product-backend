@@ -493,6 +493,9 @@ def pay_payment_link(link_id):
             db.session.rollback()
             return jsonify({"message": flw_res.get("error_message") or "Flutterwave payment initialization failed"}), 400
 
+        # Create escrow transaction record
+        # NOTE: payscrow_transaction_id and payscrow_ref are legacy DB column names,
+        # now used to store generic provider references (FLW, Paystack, or Daya)
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
             transaction_number=flw_txn_ref,
@@ -539,6 +542,9 @@ def pay_payment_link(link_id):
             db.session.rollback()
             return jsonify({"message": result.get("error_message") or "Payment gateway initialization failed"}), 400
 
+        # Create escrow transaction record
+        # NOTE: payscrow_transaction_id and payscrow_ref are legacy DB column names,
+        # now used to store generic provider references (FLW, Paystack, or Daya)
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
             transaction_number=result['transaction_number'],

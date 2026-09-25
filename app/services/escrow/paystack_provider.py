@@ -13,11 +13,18 @@ Flow for marketplace checkout (digital/service products — Split Payment):
      marks EscrowTransaction as RELEASED and Order as COMPLETED
   5. NO manual /transfer call needed — Paystack handles the vendor payout.
 
-Flow for physical products (Payscrow — unchanged):
-  Payscrow handles escrow hold, release, and vendor payout natively.
+Flow for physical products:
+  Physical orders are now handled by Daya (bank transfer/crypto) or POD (pay-on-delivery).
+  Paystack is used only for digital/service/event products at checkout.
 
-NOTE: Payscrow is still used for Payment Links (/pay/[slug] flow).
-      This provider is ONLY for marketplace cart checkout + subscriptions.
+Flow for Payment Links (/pay/[slug]):
+  Payment links support Paystack, Flutterwave, or Daya — buyer chooses at payment time.
+  Paystack split payment is used if the link creator's vendor account has a subaccount.
+
+NOTE: Payscrow has been fully removed. This provider is used for:
+      - Marketplace cart checkout (digital/service/event)
+      - Subscriptions (via bridge.py)
+      - Payment Links (when buyer selects card payment and vendor has Paystack subaccount)
 """
 
 import os

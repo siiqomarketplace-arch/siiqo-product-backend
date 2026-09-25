@@ -930,6 +930,49 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                     type="ORDER",
                     order_id=order_id,
                 ))
+            
+            # ── Send emails for physical Daya orders ─────────────────────────────
+            from app.utils.email import send_siiqo_email
+            from app.models.user import User
+            
+            vendor = db.session.get(User, order.vendor_id)
+            if vendor and vendor.email:
+                try:
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject=f"Payment Received - Order #{order_id}",
+                        template_name="system_notice",
+                        first_name=vendor.first_name or "Vendor",
+                        notice_text=(
+                            f"{'Bank transfer' if is_naira else 'Crypto'} payment confirmed "
+                            f"for Order #{order_id}.<br><br>"
+                            f"<strong>₦{float(order.total_amount):,.2f}</strong> is now held in escrow.<br><br>"
+                            f"Please ship the order. Once the buyer confirms delivery, funds will be released to you.<br><br>"
+                            f"<a href='https://siiqo.com/vendor/orders'>View & ship order →</a>"
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning(f"[EMAIL WARN] Daya physical vendor email failed Order #{order_id}: {e}")
+            
+            buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
+            buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+            if buyer_email:
+                buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
+                try:
+                    send_siiqo_email(
+                        to_email=buyer_email,
+                        subject=f"Payment Confirmed - Order #{order_id}",
+                        template_name="system_notice",
+                        first_name=buyer_name,
+                        notice_text=(
+                            f"Your {'bank transfer' if is_naira else 'crypto'} payment for Order #{order_id} "
+                            f"has been confirmed.<br><br>"
+                            f"Your order is now being prepared for delivery. You'll be notified when it ships.<br><br>"
+                            f"<a href='https://siiqo.com/orders/{order_id}'>Track your order →</a>"
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning(f"[EMAIL WARN] Daya physical buyer email failed Order #{order_id}: {e}")
 
         db.session.commit()
         logger.info("[DAYA CONFIRM] Order %s confirmed (digital=%s service=%s)",

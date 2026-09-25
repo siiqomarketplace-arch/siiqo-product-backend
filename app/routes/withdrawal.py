@@ -384,7 +384,7 @@ def request_withdrawal():
     With Payscrow provider: returns 400 (split settlement is automatic).
     """
     from app.services import flutterwave_service as _flw
-    provider = os.environ.get("ACTIVE_ESCROW_PROVIDER", "payscrow").lower()
+    provider = os.environ.get("ACTIVE_ESCROW_PROVIDER", "paystack").lower()
     has_flw = _flw.is_configured()
     has_paystack = (provider == "paystack") or bool(PAYSTACK_SECRET_KEY)
 

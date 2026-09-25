@@ -77,11 +77,9 @@ def auto_release_escrow():
             if not order:
                 continue
             # ── Trigger vendor payout based on payment method ────────────────
-            is_crypto_order = (order.payment_method or '').upper() == 'CRYPTO'
-            is_paystack_order = (order.payment_method or '').upper() == 'PAYSTACK' or (
-                not is_crypto_order and escrow.payscrow_transaction_id
-                and (escrow.payscrow_transaction_id.startswith('ORD-') or escrow.payscrow_transaction_id.startswith('PL-'))
-            )
+            is_crypto_order = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA', 'DAYA_BANK_TRANSFER')
+            is_paystack_order = (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
+            is_flw_order = (order.payment_method or '').upper() == 'FLUTTERWAVE'
 
             if is_crypto_order:
                 # Funds in Daya collection balance — pay out via Daya

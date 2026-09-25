@@ -3,10 +3,13 @@ escrow.py — Escrow lifecycle routes
 Handles: initiate, status, Paystack webhook, Flutterwave webhook, release, dispute, admin actions
 
 Payment provider split:
-  - Marketplace checkout (physical) → Paystack  (ACTIVE_ESCROW_PROVIDER=paystack)
-  - Marketplace checkout (digital, service, event) → Flutterwave or Paystack (card)
-  - Payment Links (/pay)  → Payscrow  (payment_links.py, unchanged)
-  - Subscriptions         → Paystack  (bridge.py, unchanged)
+  - Marketplace cart checkout (digital, service, event) → Flutterwave or Paystack (card)
+  - Marketplace cart checkout (physical)               → Daya (bank transfer / crypto) or POD
+  - Payment Links (/pay/[slug])                        → Daya, Flutterwave, or Paystack
+  - Subscriptions                                      → Paystack (bridge.py)
+
+NOTE: Payscrow has been fully removed. payscrow_ref and payscrow_transaction_id DB columns
+      are kept as-is (renamed would require a migration) but now store generic provider refs.
 """
 import logging
 import uuid
@@ -124,21 +127,18 @@ def _deliver_digital_products(order, escrow):
     # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
     # NOTE: CRYPTO orders skip all Paystack payout — funds sit in Siiqo's Daya
     #       merchant balance and are paid out to the vendor separately via Daya.
-    is_crypto = (order.payment_method or '').upper() == 'CRYPTO'
+    is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
     is_flutterwave = (
         (order.payment_method or '').upper() == 'FLUTTERWAVE'
         or (escrow.transaction_number or '').startswith('FLW-')
     )
-    is_paystack = not is_crypto and not is_flutterwave and (
-        (order.payment_method or '').upper() == 'PAYSTACK'
-        or (
-            escrow.payscrow_transaction_id
-            and not escrow.payscrow_transaction_id.startswith('ESC-')
-            and not escrow.payscrow_transaction_id.startswith('DAYA-')
-        )
+    # Use payment_method exclusively — the old payscrow_transaction_id heuristic
+    # incorrectly flagged FLW orders as Paystack.
+    is_paystack = (
+        not is_crypto and not is_flutterwave
+        and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
     )
     if is_paystack:
-        # Check if vendor was registered with a subaccount (split payment used)
         vendor_used_split = False
         try:
             bank_acc = VendorBankAccount.query.filter_by(
@@ -155,14 +155,12 @@ def _deliver_digital_products(order, escrow):
                     vendor_used_split = True
         except Exception:
             pass
-
         if vendor_used_split:
             logging.info(
-                f"[DIGITAL] Order #{order.id} — vendor has subaccount, "
-                "Paystack split already settled vendor. Skipping manual transfer."
+                f"[DIGITAL] Order #{order.id} — vendor has Paystack subaccount, "
+                "split already settled vendor. Skipping manual transfer."
             )
         else:
-            # Legacy fallback: no subaccount, use manual transfer
             _paystack_payout_vendor(order, escrow)
 
     _credit_vendor_ledger(
@@ -313,18 +311,14 @@ def _deliver_service_products(order, escrow):
     #   them directly at checkout. No manual transfer needed.
     # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
     # NOTE: CRYPTO orders skip all Paystack payout (funds held in Daya balance).
-    is_crypto = (order.payment_method or '').upper() == 'CRYPTO'
+    is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
     is_flutterwave = (
         (order.payment_method or '').upper() == 'FLUTTERWAVE'
         or (escrow.transaction_number or '').startswith('FLW-')
     )
-    is_paystack = not is_crypto and not is_flutterwave and (
-        (order.payment_method or '').upper() == 'PAYSTACK'
-        or (
-            escrow.payscrow_transaction_id
-            and not escrow.payscrow_transaction_id.startswith('ESC-')
-            and not escrow.payscrow_transaction_id.startswith('DAYA-')
-        )
+    is_paystack = (
+        not is_crypto and not is_flutterwave
+        and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
     )
     if is_paystack:
         vendor_used_split = False
@@ -343,11 +337,10 @@ def _deliver_service_products(order, escrow):
                     vendor_used_split = True
         except Exception:
             pass
-
         if vendor_used_split:
             logging.info(
-                f"[SERVICE] Order #{order.id} — vendor has subaccount, "
-                "Paystack split already settled vendor. Skipping manual transfer."
+                f"[SERVICE] Order #{order.id} — vendor has Paystack subaccount, "
+                "split already settled vendor. Skipping manual transfer."
             )
         else:
             _paystack_payout_vendor(order, escrow)
@@ -471,18 +464,14 @@ def _deliver_event_tickets(order, escrow):
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
 
-    is_crypto = (order.payment_method or '').upper() == 'CRYPTO'
+    is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
     is_flutterwave = (
         (order.payment_method or '').upper() == 'FLUTTERWAVE'
         or (escrow.transaction_number or '').startswith('FLW-')
     )
-    is_paystack = not is_crypto and not is_flutterwave and (
-        (order.payment_method or '').upper() == 'PAYSTACK'
-        or (
-            escrow.payscrow_transaction_id
-            and not escrow.payscrow_transaction_id.startswith('ESC-')
-            and not escrow.payscrow_transaction_id.startswith('DAYA-')
-        )
+    is_paystack = (
+        not is_crypto and not is_flutterwave
+        and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
     )
     if is_paystack:
         vendor_used_split = False
@@ -501,9 +490,8 @@ def _deliver_event_tickets(order, escrow):
                     vendor_used_split = True
         except Exception:
             pass
-
         if vendor_used_split:
-            logging.info(f"[EVENT] Order #{order.id} — vendor has subaccount, Paystack split already settled vendor.")
+            logging.info(f"[EVENT] Order #{order.id} — vendor has Paystack subaccount, split already settled vendor.")
         else:
             _paystack_payout_vendor(order, escrow)
 
@@ -711,160 +699,23 @@ def escrow_status():
 
 
 # ---------------------------------------------------------------------------
-# POST /escrow/webhook  — Paystack payment confirmation (marketplace orders)
+# POST /escrow/webhook  — Legacy webhook endpoint (Payscrow removed)
 #
-# NOTE: Payscrow webhook for Payment Links is handled by payment_links.py
-#       and still posts to /api/escrow/webhook (payscrow_webhook below).
-#       We keep BOTH handlers under different sub-paths and route them by
-#       the env var so existing Payscrow payment links keep working.
+# Payscrow has been fully removed. This endpoint is kept as a no-op so any
+# lingering webhook pings from old payment links don't cause 404 errors.
+# Active payment confirmations are handled by:
+#   - Flutterwave:  POST /payments/flutterwave/webhook  (payments.py)
+#   - Paystack:     POST /payments/webhook              (bridge.py)
+#   - Daya:         POST /payments/daya/webhook         (payments.py)
 # ---------------------------------------------------------------------------
 
 @escrow_bp.route('/webhook', methods=['POST'])
 def payscrow_webhook():
-    """
-    Legacy Payscrow webhook — still active for Payment Link orders.
-    Paystack marketplace orders are handled in bridge.py /payments/webhook.
-    """
-    payload = request.get_data()
-    data = request.get_json(force=True) or {}
-
-    txn_ref = data.get('externalReference') or data.get('transactionNumber')
-    payment_status = data.get('paymentStatus')
-    escrow_code = data.get('escrowCode')
-    payscrow_transaction_id = data.get('transactionId')
-
-    logging.info(
-        f"PAYSCROW WEBHOOK: txn_ref={txn_ref}, "
-        f"payment_status={payment_status}, escrow_code={escrow_code}"
-    )
-
-    if payment_status and str(payment_status).lower() == 'paid' and txn_ref:
-        escrows = EscrowTransaction.query.filter_by(transaction_number=txn_ref).all()
-        processed_orders = []
-
-        for escrow in escrows:
-            if escrow.status == EscrowStatus.PENDING_PAYMENT:
-                escrow.status = EscrowStatus.IN_ESCROW
-                escrow.paid_at = _utcnow()
-                escrow.escrow_code = escrow_code
-                if payscrow_transaction_id:
-                    escrow.payscrow_transaction_id = payscrow_transaction_id
-
-                order = escrow.order
-                if order:
-                    order.status = 'PAID'
-
-                    if order.payment_link_id:
-                        from app.models.payment_link import PaymentLink
-                        link = db.session.get(PaymentLink, order.payment_link_id)
-                        if link and link.link_type == 'INVOICE':
-                            link.status = 'PAID'
-
-                    # ── Digital/Service product: auto-deliver and release immediately ──
-                    # Commit what we have so far before calling delivery helpers
-                    db.session.flush()
-                    is_digital_order = _deliver_digital_products(order, escrow)
-                    is_service_order = False
-                    is_event_order = False
-                    if not is_digital_order:
-                        is_service_order = _deliver_service_products(order, escrow)
-                    if not is_digital_order and not is_service_order:
-                        is_event_order = _deliver_event_tickets(order, escrow)
-
-                    if not is_digital_order and not is_service_order and not is_event_order:
-                        # Physical: normal logistics flow
-                        from app.models.escrow import LogisticsAssignment
-                        assignment = LogisticsAssignment.query.filter_by(order_id=order.id).first()
-                        if assignment and assignment.status == 'PENDING':
-                            assignment.status = 'ASSIGNED'
-                            assignment.assigned_at = _utcnow()
-                            db.session.add(Notification(
-                                user_id=assignment.partner_id,
-                                title="New Delivery Assignment",
-                                message=(
-                                    f"You have been assigned a new delivery for Order #{order.id}. "
-                                    f"Delivery fee: ₦{assignment.delivery_fee:,.2f}."
-                                ),
-                                type="DELIVERY",
-                                order_id=order.id,
-                            ))
+    """Legacy Payscrow webhook — no-op. Payscrow removed; all payment webhooks handled elsewhere."""
+    logging.info("[LEGACY WEBHOOK] /escrow/webhook called — no active provider, returning 200.")
+    return jsonify({"status": "ok", "message": "No active provider for this webhook endpoint."}), 200
 
                         if order.buyer_id:
-                            db.session.add(Notification(
-                                user_id=order.buyer_id,
-                                title="Payment Confirmed",
-                                message=f"Your payment for Order #{order.id} is confirmed and held in escrow.",
-                                type="ORDER",
-                                order_id=order.id,
-                            ))
-                        db.session.add(Notification(
-                            user_id=order.vendor_id,
-                            title="Payment Received in Escrow",
-                            message=f"Payment for Order #{order.id} is secured. Please ship the order.",
-                            type="ESCROW",
-                            order_id=order.id,
-                        ))
-
-                    processed_orders.append((escrow, order, is_digital_order or is_service_order or is_event_order))
-
-        db.session.commit()
-
-        from app.utils.email import send_siiqo_email
-        from app.models.user import User
-
-        for escrow, order, is_digital_or_event_order in processed_orders:
-            is_digital_or_service = all(
-                ((getattr(item.product, 'product_type', None) or 'physical') if item.product else 'physical') in ('digital', 'service')
-                for item in (order.items or [])
-            )
-            buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
-            buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
-            # Skip generic order_confirmation for digital/service/event orders:
-            # their specific delivery emails (download link / booking link / QR code)
-            # were already sent by _deliver_digital_products / _deliver_service_products
-            # / _deliver_event_tickets / activate_tickets_for_order.
-            if not is_digital_or_event_order and buyer_email:
-                buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "there"
-                try:
-                    send_siiqo_email(
-                        to_email=buyer_email,
-                        subject=f"Order Confirmation #{order.id} - Siiqo",
-                        template_name="order_confirmation",
-                        first_name=buyer_name,
-                        order_id=order.id,
-                        payment_method="ESCROW",
-                        is_digital_or_service=is_digital_or_service,
-                    )
-                except Exception as e:
-                    logging.warning(f"[EMAIL] buyer confirm email failed Order #{order.id}: {e}")
-
-            # Skip generic order_received_vendor for digital/service/event orders:
-            # _deliver_digital_products / _deliver_service_products / activate_tickets_for_order
-            # already sent the vendor a tailored notification email.
-            vendor = db.session.get(User, order.vendor_id)
-            if vendor and vendor.email and not is_digital_or_event_order:
-                b_name = (buyer.full_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
-                b_phone = (buyer.phone if buyer else None) or getattr(order, 'buyer_phone', None) or getattr(order, 'delivery_phone', None) or ""
-                try:
-                    send_siiqo_email(
-                        to_email=vendor.email,
-                        subject="New Order - Siiqo",
-                        template_name="order_received_vendor",
-                        first_name=vendor.first_name or "Vendor",
-                        order_id=order.id,
-                        total_amount=f"₦{float(order.total_amount):,.2f}",
-                        payment_method="ESCROW",
-                        is_digital_or_service=is_digital_or_service,
-                        buyer_name=b_name,
-                        buyer_email=buyer_email or "",
-                        buyer_phone=b_phone,
-                    )
-                except Exception as e:
-                    logging.warning(f"[EMAIL] vendor email failed Order #{order.id}: {e}")
-
-    return jsonify({"received": True}), 200
-
-
 def _paystack_payout_vendor(order, escrow):
     """
     Push vendor's net share via Paystack Transfers API.
@@ -1054,6 +905,52 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         logging.warning(f"[ESCROW RELEASE] Notification warning: {_notif_err}")
 
     db.session.commit()
+
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        recalculate_vendor_trust(order.vendor_id, reason="Escrow Released")
+    except Exception as e:
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on escrow release: {e}")
+
+    # ── Send emails to vendor and buyer (fires for ALL release paths: buyer release, token, admin) ──
+    from app.utils.email import send_siiqo_email
+    from app.models.user import User as _U
+
+    vendor = db.session.get(_U, order.vendor_id)
+    if vendor and vendor.email:
+        try:
+            send_siiqo_email(
+                to_email=vendor.email,
+                subject=f"Siiqo - Payout Released for Order #{order.id}",
+                template_name="system_notice",
+                first_name=vendor.first_name or "Vendor",
+                notice_text=(
+                    f"Great news! The buyer has confirmed delivery for Order #{order.id}.<br><br>"
+                    f"<strong>₦{net_amount:,.2f}</strong> has been released to your account.<br><br>"
+                    f"<a href='https://siiqo.com/vendor/orders'>View your orders →</a>"
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL WARN] payout release vendor email failed Order #{order.id}: {e}")
+
+    buyer = db.session.get(_U, order.buyer_id) if order.buyer_id else None
+    buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
+    if buyer_email:
+        buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Buyer"
+        try:
+            send_siiqo_email(
+                to_email=buyer_email,
+                subject=f"Siiqo - Order #{order.id} Completed",
+                template_name="system_notice",
+                first_name=buyer_name,
+                notice_text=(
+                    f"Thank you! Order #{order.id} is now complete and payment has been released to the vendor.<br><br>"
+                    "We hope you enjoyed your purchase. Leave a review from your order dashboard."
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"[EMAIL WARN] order completed buyer email failed Order #{order.id}: {e}")
+
     logging.info(f"[ESCROW RELEASE] Released Order #{order.id} and paid vendor {order.vendor_id} via {source}")
     return True
 
@@ -1117,37 +1014,16 @@ def release_escrow():
 
     # ── Fallback verify if still PENDING_PAYMENT ─────────────────────────────
     if escrow.status == EscrowStatus.PENDING_PAYMENT:
-        provider = _active_provider()
-        if provider == "paystack":
+        # Try Paystack verify (active provider for cart checkout)
+        try:
             from app.services.escrow.paystack_provider import PaystackProvider
             result = PaystackProvider().verify_transaction(escrow.transaction_number)
             if result.get("success"):
                 escrow.status = EscrowStatus.IN_ESCROW
                 escrow.paid_at = _utcnow()
                 db.session.commit()
-        else:
-            # Legacy Payscrow verify
-            payscrow_key, base_url = _payscrow_env()
-            headers = {"BrokerApiKey": payscrow_key}
-            try:
-                resp = requests.get(
-                    f"{base_url}/api/v3/marketplace/transactions/"
-                    f"{escrow.transaction_number}/status",
-                    headers=headers,
-                )
-                if resp.status_code == 200:
-                    status_data = resp.json()
-                    p_status = str(status_data.get('paymentStatus', '')).lower()
-                    if p_status in ['paid', 'completed', 'pendingsettlement']:
-                        escrow.status = EscrowStatus.IN_ESCROW
-                        escrow.paid_at = _utcnow()
-                        if status_data.get('escrowCode'):
-                            escrow.escrow_code = status_data.get('escrowCode')
-                        if status_data.get('transactionId'):
-                            escrow.payscrow_transaction_id = status_data.get('transactionId')
-                        db.session.commit()
-            except Exception as e:
-                logging.error(f"Fallback status check failed: {e}")
+        except Exception as e:
+            logging.warning(f"[RELEASE] Paystack verify fallback failed: {e}")
 
     if escrow.status not in [
         EscrowStatus.IN_ESCROW, EscrowStatus.DELIVERED, EscrowStatus.SHIPPED
@@ -1210,203 +1086,22 @@ def release_escrow():
             # Legacy non-split flow — manual Paystack transfer
             _paystack_payout_vendor(order, escrow)
     else:
-        # ── Legacy Payscrow applycode (Payment Links) ─────────────────────
-        if not escrow.payscrow_transaction_id:
-            return jsonify({
-                "message": "Missing payment transaction ID. Cannot verify payment."
-            }), 400
-
-        user_submitted_code = (
-            data.get('escrowCode') or data.get('escrow_code') or ''
-        ).strip()
-        raw_code = (
-            user_submitted_code
-            if user_submitted_code
-            else (str(escrow.escrow_code).strip() if escrow.escrow_code else "")
+        # FLW, Daya NGN, or any other provider — funds already handled at payment time.
+        # Just proceed to internal release below.
+        logging.info(
+            f"[RELEASE] Order #{order.id} payment_method={order.payment_method} — "
+            "releasing internally (no external API call needed)."
         )
-        code_is_real = raw_code.isdigit() and 4 <= len(raw_code) <= 10
 
-        if code_is_real:
-            payscrow_key, base_url = _payscrow_env()
-            headers = {
-                "BrokerApiKey": payscrow_key,
-                "Content-Type": "application/json",
-            }
-            try:
-                resp = requests.post(
-                    f"{base_url}/api/v3/escrow/escrowtransactions/applycode",
-                    json={"transactionId": escrow.payscrow_transaction_id, "code": raw_code},
-                    headers=headers,
-                    timeout=15,
-                )
-                resp_data = resp.json()
-                if not resp_data.get('success'):
-                    logging.warning(
-                        f"Payscrow applycode non-success for "
-                        f"{escrow.transaction_number}: {resp.text}"
-                    )
-                    is_sandbox = (
-                        not payscrow_key
-                        or payscrow_key.startswith('ps_9')
-                        or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-                    )
-                    if not is_sandbox:
-                        return jsonify({
-                            "success": False,
-                            "message": f"Payscrow release failed: "
-                                       f"{resp_data.get('message', 'Invalid release code')}",
-                        }), 400
-            except Exception as e:
-                logging.warning(
-                    f"Payscrow applycode unreachable for "
-                    f"{escrow.transaction_number}: {e} — releasing internally"
-                )
-        else:
-            logging.info(
-                f"Escrow code '{raw_code[:40]}' is not a numeric release code "
-                "— releasing internally."
-            )
-
-    # ── Common post-release logic (both providers) ────────────────────────────
+    # ── Delegate to unified release pipeline ─────────────────────────────────
+    # execute_order_escrow_release handles: release, ledger credit, payout, notifications, emails
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
-
-    escrow.status = EscrowStatus.RELEASED
-    escrow.released_at = _utcnow()
-    order.status = 'COMPLETED'
-
-    try:
-        from app.services.referral_service import check_and_reward_referral_on_order_complete
-        check_and_reward_referral_on_order_complete(order)
-    except Exception as ex:
-        logging.error(f"[REFERRAL ERR] Escrow release referral reward failed: {ex}")
-
-    try:
-        from app.services.event_logger import log_platform_event, log_trust_evidence
-        log_platform_event(
-            event_name="order_completed",
-            order_id=order.id,
-            business_id=order.vendor_id,
-            user_id=order.buyer_id,
-            source="escrow",
-            properties={"amount": str(escrow.amount), "transaction_number": escrow.transaction_number}
-        )
-        log_trust_evidence(
-            business_id=order.vendor_id,
-            evidence_type="order_fulfilled",
-            provenance="siiqo_transaction_verified",
-            source="escrow_transactions",
-            source_id=str(escrow.id),
-            properties={"order_id": order.id, "amount": str(escrow.amount)}
-        )
-    except Exception as ev_err:
-        logging.error(f"[TELEMETRY ERR] Failed to log order completion evidence: {ev_err}")
-
-    # ── First-sale celebration ─────────────────────────────────────────────
-    try:
-        from app.models.order import Order as _Order
-        vendor_order_count = _Order.query.filter_by(vendor_id=order.vendor_id).count()
-        if vendor_order_count == 1:
-            vendor_user = db.session.get(User, order.vendor_id)
-            db.session.add(Notification(
-                user_id=order.vendor_id,
-                title="🎉 Your First Sale!",
-                message=(
-                    f"Congratulations! You just made your first sale on Siiqo — Order #{order.id}. "
-                    "Check your orders page to confirm delivery and get paid."
-                ),
-                type="ORDER",
-                order_id=order.id,
-            ))
-            if vendor_user and vendor_user.email:
-                from app.utils.email import send_siiqo_email as _send_email
-                try:
-                    _send_email(
-                        to_email=vendor_user.email,
-                        subject="Your First Sale on Siiqo! 🎉",
-                        template_name="first_sale",
-                        first_name=vendor_user.first_name or "Vendor",
-                        order_id=order.id,
-                        total_amount=f"₦{float(order.total_amount):,.2f}",
-                    )
-                except Exception as mail_err:
-                    logging.warning(f"[FIRST SALE EMAIL ERR] {mail_err}")
-    except Exception as ex:
-        logging.error(f"[FIRST SALE ERR] {ex}")
-
-    _credit_vendor_ledger(
-        vendor_id=order.vendor_id,
-        amount=net_amount,
-        reference_id=escrow.transaction_number,
-        description=f"Payout for Order #{order.id}",
-    )
-
-    db.session.add(Receipt(order_id=order.id))
-
-    db.session.add(Notification(
-        user_id=order.vendor_id,
-        title="Funds Released",
-        message=f"₦{net_amount:,.2f} has been credited to your account for Order #{order.id}.",
-        type="ESCROW",
-        order_id=order.id,
-    ))
-    if order.buyer_id:
-        db.session.add(Notification(
-            user_id=order.buyer_id,
-            title="Order Complete",
-            message=f"Order #{order.id} is complete. Thank you for shopping on Siiqo!",
-            type="ORDER",
-            order_id=order.id,
-        ))
-
-    db.session.commit()
-
-    try:
-        from app.services.trust import recalculate_vendor_trust
-        recalculate_vendor_trust(order.vendor_id, reason="Escrow Released")
-    except Exception as e:
-        logging.error(f"[TRUST ERROR] Failed to recalculate trust on escrow release: {e}")
-
-    from app.utils.email import send_siiqo_email
-    from app.models.user import User
-
-    vendor = db.session.get(User, order.vendor_id)
-    if vendor and vendor.email:
-        try:
-            send_siiqo_email(
-                to_email=vendor.email,
-                subject="Siiqo - Payout Released",
-                template_name="system_notice",
-                first_name=vendor.first_name or "Vendor",
-                notice_text=(
-                    f"Congratulations! Payout of ₦{net_amount:,.2f} has been released "
-                    f"to your account for Order #{order.id}."
-                ),
-            )
-        except Exception as e:
-            logging.warning(f"[EMAIL WARN] payout release email failed: {e}")
-
-    buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
-    buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
-    if buyer_email:
-        buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Buyer"
-        try:
-            send_siiqo_email(
-                to_email=buyer_email,
-                subject="Siiqo - Order Completed",
-                template_name="system_notice",
-                first_name=buyer_name,
-                notice_text=(
-                    f"Thank you! Order #{order.id} is now complete. "
-                    "Funds have been released to the vendor."
-                ),
-            )
-        except Exception as e:
-            logging.warning(f"[EMAIL WARN] order completed email failed: {e}")
+    execute_order_escrow_release(order, escrow, source="buyer_release")
 
     return jsonify({
         "success": True,
         "message": "Funds released to vendor successfully.",
-        "net_amount": str(net_amount),
+        "net_amount": str(float(escrow.amount) - float(escrow.fee_amount or 0)),
     }), 200
 
 
@@ -1477,26 +1172,8 @@ def raise_dispute():
     # Determine who is disputing: buyer = 'customer', vendor = 'merchant'
     requested_by = "customer" if order.buyer_id == int(user_id) else "merchant"
 
-    # Notify Payscrow to officially freeze funds on their end
-    payscrow_key, base_url = _payscrow_env()
-    headers = {
-        "BrokerApiKey": payscrow_key,
-        "Content-Type": "application/json"
-    }
-
-    if escrow.payscrow_ref and payscrow_key:
-        try:
-            resp = requests.post(
-                f"{base_url}/api/v3/marketplace/transactions/{escrow.payscrow_ref}/broker/raise-dispute",
-                json={"requestedBy": requested_by, "complaint": reason or "No reason provided."},
-                headers=headers,
-                timeout=10
-            )
-            if not resp.json().get('success'):
-                logging.warning(f"Payscrow dispute API returned non-success: {resp.text}")
-        except Exception as e:
-            logging.error(f"Payscrow dispute API error: {e}")
-            # We still mark it locally — don't block the user if network issue
+    # Mark dispute locally — no external API call needed (Payscrow removed)
+    logging.info(f"[DISPUTE] Order #{order.id} disputed by {requested_by}: {reason}")
 
     dispute_id = f"DISP-{uuid.uuid4().hex[:8].upper()}"
     escrow.status = EscrowStatus.DISPUTED

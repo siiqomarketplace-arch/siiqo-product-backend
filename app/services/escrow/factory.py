@@ -6,11 +6,15 @@ def get_escrow_provider(orders=None):
     """
     Returns the active escrow provider based on orders or global configuration.
 
-    Architecture:
-    - Physical products  → ALWAYS paid via Daya (payment_method=CRYPTO or NGN onramp bank transfer).
-    - Digital products   → PaystackProvider (split payment via subaccount) or Daya.
-    - Service products   → PaystackProvider (split payment via subaccount) or Daya.
-    - Payscrow           → Completely deleted.
+    Architecture (as of 2026):
+    - Physical products  → Daya (bank transfer/crypto via payment_method=DAYA_BANK_TRANSFER or CRYPTO)
+    - Digital products   → Paystack (split payment via subaccount), Flutterwave, or Daya
+    - Service products   → Paystack (split payment via subaccount), Flutterwave, or Daya
+    - Event tickets      → Paystack, Flutterwave, or Daya
+    - Payment Links      → Daya, Flutterwave, or Paystack (selected by link creator)
+    
+    NOTE: Payscrow completely removed. DB columns payscrow_ref and payscrow_transaction_id
+          are kept for backward compatibility but now store generic provider references.
     """
     return PaystackProvider()
 

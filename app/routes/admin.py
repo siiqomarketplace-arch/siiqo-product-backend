@@ -1272,8 +1272,11 @@ def admin_get_transactions():
 def admin_refund_buyer(order_id):
     """
     Admin refunds the buyer (dispute resolved in buyer's favour).
-    Calls PayScrow's broker refund endpoint to reverse the transaction,
-    then marks the escrow as REFUNDED and notifies both parties.
+    Marks the escrow as REFUNDED and notifies both parties.
+    
+    NOTE: Payscrow removed. Refunds are now processed internally (DB-only).
+    For Daya/crypto orders, admin must manually initiate refund via Daya dashboard.
+    For Paystack, funds remain in Siiqo's balance (manual refund if needed).
     
     Security: Rate limited, anomaly detected, fully audit logged.
     """
@@ -1292,38 +1295,8 @@ def admin_refund_buyer(order_id):
     if escrow.status == EscrowStatus.RELEASED:
         return jsonify({"message": "Funds already released to vendor — cannot refund"}), 400
 
-    # Call PayScrow broker refund / cancel endpoint
-    if escrow.payscrow_ref:
-        import os, requests as _requests
-        payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-        base_url = os.environ.get('PAYSCROW_BASE_URL')
-        if not base_url:
-            _is_sandbox = (
-                not payscrow_key
-                or payscrow_key.startswith('ps_9')
-                or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-            )
-            base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
-        headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
-        try:
-            resp = _requests.post(
-                f"{base_url}/api/v3/marketplace/transactions/{escrow.payscrow_ref}/broker/refund",
-                json={"reason": "Admin dispute resolution — refund to buyer"},
-                headers=headers,
-                timeout=15,
-            )
-            resp_data = resp.json()
-            if not resp_data.get('success'):
-                logging.warning(
-                    f"[ADMIN REFUND] PayScrow refund returned non-success for Order #{order_id}: {resp.text}"
-                )
-                # Continue — still update our DB so order isn't stuck
-        except Exception as e:
-            logging.error(f"[ADMIN REFUND] PayScrow refund error for Order #{order_id}: {e}")
-    else:
-        logging.warning(
-            f"[ADMIN REFUND] Order #{order_id} has no payscrow_ref — skipping PayScrow call."
-        )
+    # Internal refund — no external API call (Payscrow removed)
+    logging.info(f"[ADMIN REFUND] Processing refund for Order #{order_id} (payment_method: {escrow.order.payment_method if escrow.order else 'N/A'})")
 
     escrow.status = EscrowStatus.REFUNDED
     order = escrow.order
@@ -1589,103 +1562,21 @@ def admin_release_funds(order_id):
     if not escrow:
         return jsonify({"message": "Escrow transaction not found"}), 404
 
-    # Call PayScrow's applycode to actually move the money — required for DISPUTED orders
-    # where funds are frozen on PayScrow's side.
-    if escrow.payscrow_transaction_id and escrow.escrow_code:
-        import os, requests as _requests
-        payscrow_key = os.environ.get('PAYSCROW_API_KEY', '')
-        base_url = os.environ.get('PAYSCROW_BASE_URL')
-        if not base_url:
-            _is_sandbox = (
-                not payscrow_key
-                or payscrow_key.startswith('ps_9')
-                or os.environ.get('PAYSCROW_ENV', '').lower() == 'sandbox'
-            )
-            base_url = "https://api.payscrow.dev" if _is_sandbox else "https://api.payscrow.net"
-        headers = {"BrokerApiKey": payscrow_key, "Content-Type": "application/json"}
-        try:
-            resp = _requests.post(
-                f"{base_url}/api/v3/escrow/escrowtransactions/applycode",
-                json={"transactionId": escrow.payscrow_transaction_id, "code": escrow.escrow_code},
-                headers=headers,
-                timeout=15,
-            )
-            resp_data = resp.json()
-            if not resp_data.get('success'):
-                logging.warning(
-                    f"[ADMIN RELEASE] PayScrow applycode returned non-success for Order #{order_id}: {resp.text}"
-                )
-        except Exception as e:
-            logging.error(f"[ADMIN RELEASE] PayScrow applycode error for Order #{order_id}: {e}")
-    else:
-        logging.warning(
-            f"[ADMIN RELEASE] Order #{order_id} has no payscrow_transaction_id or escrow_code — "
-            "skipping PayScrow applycode call (manual bank transfer or missing data)."
-        )
+    # Internal release — delegate to unified pipeline (Payscrow removed)
+    # execute_order_escrow_release handles DB update, ledger credit, payout (Daya/Paystack/FLW)
+    logging.info(f"[ADMIN RELEASE] Releasing funds for Order #{order_id} via unified pipeline")
 
-    escrow.status = EscrowStatus.RELEASED
-    escrow.released_at = _utcnow()
+    from app.routes.escrow import execute_order_escrow_release
     order = escrow.order
-    if order:
-        order.status = 'COMPLETED'
-        net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
-        _credit_vendor_ledger(
-            vendor_id=order.vendor_id,
-            amount=net_amount,
-            reference_id=escrow.transaction_number,
-            description=f"Admin-released payout for Order #{order.id}",
-        )
+    if not order:
+        return jsonify({"message": "Order not found for this escrow"}), 404
+    
+    execute_order_escrow_release(order, escrow, source="admin_release")
 
-        # Also trigger digital delivery if digital
-        from app.routes.escrow import _deliver_digital_products
-        is_dig = _deliver_digital_products(order, escrow)
-
-        # Trigger Daya payout if order used Daya/crypto
-        try:
-            from app.routes.payments import _payout_vendor_via_daya
-            _payout_vendor_via_daya(order, escrow)
-        except Exception as payout_err:
-            logging.warning(f"[ADMIN RELEASE] Daya payout warning: {payout_err}")
-
-        db.session.add(Notification(
-            user_id=order.vendor_id,
-            title="Funds Released by Admin",
-            message=f"₦{net_amount:,.2f} has been credited to your ledger for Order #{order.id}.",
-            type="ESCROW",
-            order_id=order.id,
-        ))
-        # Also notify buyer
-        if order.buyer_id:
-            db.session.add(Notification(
-                user_id=order.buyer_id,
-                title="Order Complete",
-                message=f"Order #{order.id} has been resolved by Siiqo support. The order is now complete.",
-                type="ORDER",
-                order_id=order.id,
-            ))
-        else:
-            # Guest buyer
-            buyer_email = getattr(order, 'buyer_email', None)
-            if buyer_email and not is_dig:
-                try:
-                    from app.utils.email import send_siiqo_email
-                    send_siiqo_email(
-                        to_email=buyer_email,
-                        subject=f"Order #{order.id} Resolved | Siiqo",
-                        template_name="system_notice",
-                        first_name=getattr(order, 'buyer_name', None) or "there",
-                        notice_text=f"Your payment and order #{order.id} have been completed by support.",
-                    )
-                except Exception:
-                    pass
-
-    db.session.commit()
-
-    # Trigger trust score recalculation on dispute won / admin release
+    # Trigger trust score recalculation on admin release
     try:
         from app.services.trust import recalculate_vendor_trust
-        if order:
-            recalculate_vendor_trust(order.vendor_id, reason="Dispute Resolved (Released)")
+        recalculate_vendor_trust(order.vendor_id, reason="Dispute Resolved (Admin Released)")
     except Exception as e:
         logging.error(f"[TRUST ERROR] Failed to recalculate trust on admin release: {e}")
 
