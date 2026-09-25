@@ -1416,13 +1416,17 @@ def flutterwave_webhook():
     raw_body = request.get_data()
     sig_header = request.headers.get("verif-hash", "")
 
+    logger.info("[FLW WEBHOOK] === WEBHOOK RECEIVED === Headers: %s", dict(request.headers))
+
     if not _flw.verify_webhook_signature(raw_body, sig_header):
-        logger.warning("[FLW WEBHOOK] Invalid signature hash")
+        logger.warning("[FLW WEBHOOK] Invalid signature hash - signature=%s", sig_header[:20] + "...")
         return jsonify({"message": "Invalid signature"}), 401
 
     try:
         event_data = request.get_json(force=True) or {}
-    except Exception:
+        logger.info("[FLW WEBHOOK] Raw event data: %s", event_data)
+    except Exception as parse_err:
+        logger.error("[FLW WEBHOOK] JSON parsing failed: %s", parse_err)
         return jsonify({"message": "Invalid JSON"}), 400
 
     data = event_data.get("data", {})
@@ -1430,25 +1434,35 @@ def flutterwave_webhook():
     tx_ref = data.get("tx_ref") or ""
     status = data.get("status")
 
-    logger.info("[FLW WEBHOOK] event=%s tx_id=%s status=%s ref=%s",
+    logger.info("[FLW WEBHOOK] Parsed: event=%s tx_id=%s status=%s ref=%s",
                 event_data.get("event"), tx_id, status, tx_ref)
 
     if not tx_id:
+        logger.warning("[FLW WEBHOOK] No transaction ID in webhook data")
         return jsonify({"status": "ignored", "message": "No transaction ID"}), 200
 
     # Query Flutterwave API directly to guarantee authenticity
+    logger.info("[FLW WEBHOOK] Verifying transaction with FLW API: tx_id=%s", tx_id)
     verification = _flw.verify_transaction(tx_id)
+    logger.info("[FLW WEBHOOK] Verification result: %s", verification)
+    
     if not verification.get("success") or verification.get("status") != "successful":
         logger.warning("[FLW WEBHOOK] Verification check failed for tx_id %s: %s",
                        tx_id, verification.get("error_message"))
         return jsonify({"status": "verification_failed"}), 200
 
     # Execute confirmation
-    _handle_flutterwave_payment_confirmed(
-        tx_ref=verification.get("tx_ref") or tx_ref,
-        tx_id=str(tx_id),
-        verification=verification,
-    )
+    logger.info("[FLW WEBHOOK] Calling _handle_flutterwave_payment_confirmed for ref=%s", tx_ref)
+    try:
+        _handle_flutterwave_payment_confirmed(
+            tx_ref=verification.get("tx_ref") or tx_ref,
+            tx_id=str(tx_id),
+            verification=verification,
+        )
+        logger.info("[FLW WEBHOOK] ✓ Payment confirmation completed successfully for ref=%s", tx_ref)
+    except Exception as confirm_err:
+        logger.error("[FLW WEBHOOK] ✗ Payment confirmation FAILED for ref=%s: %s", tx_ref, confirm_err, exc_info=True)
+        return jsonify({"status": "error", "message": str(confirm_err)}), 500
 
     return jsonify({"status": "success"}), 200
 
@@ -1525,35 +1539,54 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
     )
     from app.models.communication import Notification
 
+    logger.info("[FLW CONFIRM] Starting confirmation for ref=%s tx_id=%s", tx_ref, tx_id)
+    
     try:
         escrows = EscrowTransaction.query.filter_by(transaction_number=tx_ref).all()
+        logger.info("[FLW CONFIRM] Found %d escrows by transaction_number", len(escrows))
+        
         if not escrows and tx_ref.startswith("FLW-"):
             # Try matching by order ID embedded in tx_ref: FLW-ORD-{id}-... or FLW-PL-{id}-...
             parts = tx_ref.split("-")
+            logger.info("[FLW CONFIRM] Trying fallback order ID extraction from ref=%s", tx_ref)
             if len(parts) >= 3 and parts[2].isdigit():
                 oid = int(parts[2])
                 escrow_single = EscrowTransaction.query.filter_by(order_id=oid).first()
                 if escrow_single:
                     escrows = [escrow_single]
+                    logger.info("[FLW CONFIRM] Found escrow via fallback: order_id=%d", oid)
+                else:
+                    logger.warning("[FLW CONFIRM] No escrow found for extracted order_id=%d", oid)
 
         if not escrows:
-            logger.warning("[FLW CONFIRM] No escrow found for ref=%s tx_id=%s", tx_ref, tx_id)
+            logger.warning("[FLW CONFIRM] ✗ No escrow found for ref=%s tx_id=%s", tx_ref, tx_id)
             return
 
-        for escrow in escrows:
+        logger.info("[FLW CONFIRM] Processing %d escrow transactions", len(escrows))
+        
+        for idx, escrow in enumerate(escrows):
+            logger.info("[FLW CONFIRM] Processing escrow %d/%d: escrow_id=%d order_id=%d status=%s", 
+                       idx + 1, len(escrows), escrow.id, escrow.order_id or 0, escrow.status)
             if escrow.status == EscrowStatus.RELEASED:
+                logger.info("[FLW CONFIRM] Skipping escrow_id=%d (already RELEASED)", escrow.id)
                 continue
 
             order = escrow.order
             if not order:
+                logger.warning("[FLW CONFIRM] Skipping escrow_id=%d (no linked order)", escrow.id)
                 continue
 
+            logger.info("[FLW CONFIRM] Updating order %d: current_status=%s payment_method=%s", 
+                       order.id, order.status, order.payment_method or "None")
+            
             order.status = "PAID"
             order.payment_method = "FLUTTERWAVE"
             escrow.status = EscrowStatus.IN_ESCROW
             escrow.paid_at = _utcnow()
             escrow.payscrow_transaction_id = str(tx_id)
             db.session.flush()
+            
+            logger.info("[FLW CONFIRM] ✓ Order %d updated to PAID, escrow status=%s", order.id, escrow.status)
 
             # 1. Event tickets
             is_event = _deliver_event_tickets(order, escrow)
@@ -1690,9 +1723,10 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                 except Exception as _tr_err:
                     logger.warning("[FLW CONFIRM] Automated Flutterwave payout transfer skipped: %s (funds remain in ledger)", _tr_err)
 
+        logger.info("[FLW CONFIRM] Committing database changes...")
         db.session.commit()
-        logger.info("[FLW CONFIRM] Orders confirmed for tx_ref=%s tx_id=%s", tx_ref, tx_id)
+        logger.info("[FLW CONFIRM] ✓✓✓ Database commit successful! Orders confirmed for tx_ref=%s tx_id=%s", tx_ref, tx_id)
 
     except Exception as exc:
         db.session.rollback()
-        logger.error("[FLW CONFIRM] Error confirming ref=%s: %s", tx_ref, exc)
+        logger.error("[FLW CONFIRM] ✗✗✗ ERROR confirming ref=%s: %s", tx_ref, exc, exc_info=True)
