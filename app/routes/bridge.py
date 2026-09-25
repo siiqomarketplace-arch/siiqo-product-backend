@@ -1069,10 +1069,62 @@ def paystack_webhook():
 
                         if link_ptype in ('digital', 'service'):
                             from app.routes.escrow import _deliver_digital_products, _deliver_service_products
-                            if not _deliver_digital_products(pl_order, pl_escrow):
-                                _deliver_service_products(pl_order, pl_escrow)
+                            delivered = _deliver_digital_products(pl_order, pl_escrow)
+                            if not delivered:
+                                delivered = _deliver_service_products(pl_order, pl_escrow)
                             if link and link.link_type == 'INVOICE':
                                 link.status = 'PAID'
+                            # _deliver_* return False for Pay Link orders (product_id=None).
+                            # Send buyer email directly using the file_url on the PaymentLink record.
+                            if not delivered:
+                                from app.models.escrow import EscrowStatus as _ES
+                                net_amount = float(pl_escrow.amount) - float(pl_escrow.fee_amount or 0)
+                                pl_escrow.status = _ES.RELEASED
+                                pl_escrow.released_at = _utcnow()
+                                pl_order.status = 'COMPLETED'
+                                if link:
+                                    link.status = 'PAID'
+                                from app.routes.escrow import _credit_vendor_ledger
+                                _credit_vendor_ledger(
+                                    vendor_id=pl_order.vendor_id,
+                                    amount=net_amount,
+                                    reference_id=pl_escrow.transaction_number,
+                                    description=f"Paystack payout for Pay Link Order #{pl_order.id}",
+                                )
+                                try:
+                                    from app.utils.email import send_siiqo_email
+                                    from app.models.user import User as _U
+                                    _buyer = db.session.get(_U, pl_order.buyer_id) if pl_order.buyer_id else None
+                                    _buyer_email = (_buyer.email if _buyer else None) or getattr(pl_order, 'buyer_email', None)
+                                    if _buyer_email:
+                                        _first = (_buyer.first_name if _buyer else None) or getattr(pl_order, 'buyer_name', None) or "there"
+                                        _file_url = getattr(link, 'file_url', None)
+                                        _link_html = (
+                                            f'<p style="margin:8px 0;"><a href="{_file_url}" '
+                                            f'style="color:#E0921C;word-break:break-all;">{_file_url}</a></p>'
+                                            if _file_url
+                                            else "<p>The vendor will send your access link shortly.</p>"
+                                        )
+                                        _subj = (
+                                            f"Your Digital Download – Order #{pl_order.id} | Siiqo"
+                                            if link_ptype == 'digital'
+                                            else f"Service Booking Confirmed – Order #{pl_order.id} | Siiqo"
+                                        )
+                                        _body = (
+                                            f"Your payment for Order #{pl_order.id} is confirmed.<br><br>"
+                                            + ("Here is your download link:<br><br>" if link_ptype == 'digital' else "Use the link below to access your service:<br><br>")
+                                            + f"{_link_html}<br>"
+                                            "If you have any issues, please contact the seller via Siiqo chat."
+                                        )
+                                        send_siiqo_email(
+                                            to_email=_buyer_email,
+                                            subject=_subj,
+                                            template_name="system_notice",
+                                            first_name=_first,
+                                            notice_text=_body,
+                                        )
+                                except Exception as _email_err:
+                                    logging.warning(f"[PAYSTACK WEBHOOK] Pay Link buyer email failed Order #{pl_order.id}: {_email_err}")
                         else:
                             db.session.add(Notification(
                                 user_id=pl_order.vendor_id,

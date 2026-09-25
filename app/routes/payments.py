@@ -786,6 +786,34 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                     message=f"Order #{order_id} paid. ₦{net_amount:,.2f} credited.",
                     type="ESCROW", order_id=order_id,
                 ))
+                # Email buyer with file URL from the Pay Link record
+                try:
+                    from app.utils.email import send_siiqo_email
+                    from app.models.user import User as _U
+                    _buyer = db.session.get(_U, order.buyer_id) if order.buyer_id else None
+                    _buyer_email = (_buyer.email if _buyer else None) or getattr(order, 'buyer_email', None)
+                    if _buyer_email:
+                        _first = (_buyer.first_name if _buyer else None) or getattr(order, 'buyer_name', None) or "there"
+                        _file_url = getattr(_link, 'file_url', None)
+                        _link_html = (
+                            f'<p style="margin:8px 0;"><a href="{_file_url}" '
+                            f'style="color:#E0921C;word-break:break-all;">{_file_url}</a></p>'
+                            if _file_url
+                            else "<p>The vendor will send your download link shortly.</p>"
+                        )
+                        send_siiqo_email(
+                            to_email=_buyer_email,
+                            subject=f"Your Digital Download – Order #{order_id} | Siiqo",
+                            template_name="system_notice",
+                            first_name=_first,
+                            notice_text=(
+                                f"Your payment for Order #{order_id} is confirmed.<br><br>"
+                                f"Here is your download link:<br><br>{_link_html}<br>"
+                                "If you have any issues, please contact the seller via Siiqo chat."
+                            ),
+                        )
+                except Exception as _e:
+                    logger.warning("[DAYA CONFIRM] Pay Link digital buyer email failed Order #%s: %s", order_id, _e)
                 is_digital = True
             elif _ltype == 'service':
                 # Service Pay Link — release immediately, credit vendor, single payout
@@ -815,6 +843,34 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                     message=f"Order #{order_id} paid. ₦{net_amount:,.2f} credited.",
                     type="ESCROW", order_id=order_id,
                 ))
+                # Email buyer with booking/session link from the Pay Link record
+                try:
+                    from app.utils.email import send_siiqo_email
+                    from app.models.user import User as _U
+                    _buyer = db.session.get(_U, order.buyer_id) if order.buyer_id else None
+                    _buyer_email = (_buyer.email if _buyer else None) or getattr(order, 'buyer_email', None)
+                    if _buyer_email:
+                        _first = (_buyer.first_name if _buyer else None) or getattr(order, 'buyer_name', None) or "there"
+                        _booking_url = getattr(_link, 'file_url', None)
+                        _link_html = (
+                            f'<p style="margin:8px 0;"><a href="{_booking_url}" '
+                            f'style="color:#E0921C;word-break:break-all;">{_booking_url}</a></p>'
+                            if _booking_url
+                            else "<p>The vendor will reach out to schedule your service.</p>"
+                        )
+                        send_siiqo_email(
+                            to_email=_buyer_email,
+                            subject=f"Service Booking Confirmed – Order #{order_id} | Siiqo",
+                            template_name="system_notice",
+                            first_name=_first,
+                            notice_text=(
+                                f"Your payment for Order #{order_id} is confirmed.<br><br>"
+                                f"Use the link below to access your service:<br><br>{_link_html}<br>"
+                                "If you have any issues, please contact the seller via Siiqo chat."
+                            ),
+                        )
+                except Exception as _e:
+                    logger.warning("[DAYA CONFIRM] Pay Link service buyer email failed Order #%s: %s", order_id, _e)
                 is_service = True
             # else: physical Pay Link — falls through to hold-in-escrow logic below
             # Mark INVOICE as PAID regardless of product type once payment confirmed
@@ -1502,6 +1558,62 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                             type="ORDER",
                             order_id=order.id,
                         ))
+
+                    # Email buyer with file/booking link from the Pay Link record
+                    try:
+                        from app.utils.email import send_siiqo_email
+                        from app.models.user import User as _U
+                        _buyer = db.session.get(_U, order.buyer_id) if order.buyer_id else None
+                        _buyer_email = (
+                            (_buyer.email if _buyer else None)
+                            or getattr(order, "buyer_email", None)
+                        )
+                        if _buyer_email:
+                            _first = (
+                                (_buyer.first_name if _buyer else None)
+                                or getattr(order, "buyer_name", None)
+                                or "there"
+                            )
+                            _file_url = getattr(link, "file_url", None) if link else None
+                            if link_ptype == "digital":
+                                _link_html = (
+                                    f'<p style="margin:8px 0;"><a href="{_file_url}" '
+                                    f'style="color:#E0921C;word-break:break-all;">{_file_url}</a></p>'
+                                    if _file_url
+                                    else "<p>The vendor will send your download link shortly.</p>"
+                                )
+                                send_siiqo_email(
+                                    to_email=_buyer_email,
+                                    subject=f"Your Digital Download – Order #{order.id} | Siiqo",
+                                    template_name="system_notice",
+                                    first_name=_first,
+                                    notice_text=(
+                                        f"Your payment for Order #{order.id} is confirmed.<br><br>"
+                                        f"Here is your download link:<br><br>{_link_html}<br>"
+                                        "If you have any issues, please contact the seller via Siiqo chat."
+                                    ),
+                                )
+                            else:  # service
+                                _booking_url = getattr(link, "file_url", None) if link else None
+                                _link_html = (
+                                    f'<p style="margin:8px 0;"><a href="{_booking_url}" '
+                                    f'style="color:#E0921C;word-break:break-all;">{_booking_url}</a></p>'
+                                    if _booking_url
+                                    else "<p>The vendor will reach out to schedule your service.</p>"
+                                )
+                                send_siiqo_email(
+                                    to_email=_buyer_email,
+                                    subject=f"Service Booking Confirmed – Order #{order.id} | Siiqo",
+                                    template_name="system_notice",
+                                    first_name=_first,
+                                    notice_text=(
+                                        f"Your payment for Order #{order.id} is confirmed.<br><br>"
+                                        f"Use the link below to access your service:<br><br>{_link_html}<br>"
+                                        "If you have any issues, please contact the seller via Siiqo chat."
+                                    ),
+                                )
+                    except Exception as _email_err:
+                        logger.warning("[FLW CONFIRM] Pay Link buyer email failed Order #%s: %s", order.id, _email_err)
 
             # Vendor payout check:
             # 1. If Flutterwave split was attached, settlement happens natively T+1 to vendor's subaccount.

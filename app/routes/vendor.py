@@ -1285,7 +1285,7 @@ def get_orders():
     else:
         orders = query.limit(500).all()
 
-    # ── Live Paystack sync for stuck PENDING orders ───────────────────────────
+    # ── Live payment sync for stuck PENDING orders ───────────────────────────
     from app.models.escrow import EscrowTransaction
     from datetime import datetime, timezone as _tz
     needs_commit = False
@@ -1293,16 +1293,40 @@ def get_orders():
         if o.status == 'PENDING':
             escrow_check = EscrowTransaction.query.filter_by(order_id=o.id).first()
             if escrow_check and escrow_check.transaction_number:
-                try:
-                    from app.services.escrow.paystack_provider import PaystackProvider
-                    verify = PaystackProvider().verify_transaction(escrow_check.transaction_number)
-                    if verify.get("success"):
-                        escrow_check.status = 'IN_ESCROW'
-                        escrow_check.paid_at = escrow_check.paid_at or datetime.now(_tz.utc)
-                        o.status = 'PAID'
-                        needs_commit = True
-                except Exception:
-                    pass  # non-fatal
+                txn = escrow_check.transaction_number
+                if txn.startswith('FLW-'):
+                    # Flutterwave order — verify with FLW API and run full delivery
+                    try:
+                        from app.services import flutterwave_service as _flw
+                        from app.routes.payments import _handle_flutterwave_payment_confirmed
+                        # We need a transaction_id to verify; skip if not yet available
+                        # (FLW sets payscrow_transaction_id to the numeric tx_id after webhook fires)
+                        flw_tx_id = escrow_check.payscrow_transaction_id
+                        if flw_tx_id and str(flw_tx_id).isdigit():
+                            verif = _flw.verify_transaction(flw_tx_id)
+                            if verif.get("success") and verif.get("status") == "successful":
+                                _handle_flutterwave_payment_confirmed(
+                                    tx_ref=txn,
+                                    tx_id=str(flw_tx_id),
+                                    verification=verif,
+                                )
+                                db.session.refresh(o)
+                                db.session.refresh(escrow_check)
+                                needs_commit = False  # already committed inside handler
+                    except Exception:
+                        pass  # non-fatal
+                else:
+                    # Paystack order — verify with Paystack API
+                    try:
+                        from app.services.escrow.paystack_provider import PaystackProvider
+                        verify = PaystackProvider().verify_transaction(txn)
+                        if verify.get("success"):
+                            escrow_check.status = 'IN_ESCROW'
+                            escrow_check.paid_at = escrow_check.paid_at or datetime.now(_tz.utc)
+                            o.status = 'PAID'
+                            needs_commit = True
+                    except Exception:
+                        pass  # non-fatal
     if needs_commit:
         try:
             db.session.commit()
