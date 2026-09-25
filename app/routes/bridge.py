@@ -1257,6 +1257,15 @@ def paystack_webhook():
                 # _deliver_digital_products / _deliver_service_products / activate_tickets_for_order
                 # already sent the buyer a tailored email with download/booking link or QR code.
                 if not was_delivered and buyer_email:
+                    # Build order items list for email
+                    order_items_list = []
+                    for order_item in order.items:
+                        order_items_list.append({
+                            'product_name': order_item.product.name if order_item.product else 'Product',
+                            'quantity': order_item.quantity,
+                            'price': float(order_item.price_at_purchase) * order_item.quantity
+                        })
+                    
                     try:
                         send_siiqo_email(
                             to_email=buyer_email,
@@ -1266,6 +1275,8 @@ def paystack_webhook():
                             order_id=order.id,
                             payment_method="PAYSTACK",
                             is_digital_or_service=is_digital_or_service,
+                            order_items=order_items_list,
+                            total_amount=float(order.total_amount),
                         )
                     except Exception as e:
                         logging.warning(f"[EMAIL] buyer order confirm failed #{order.id}: {e}")

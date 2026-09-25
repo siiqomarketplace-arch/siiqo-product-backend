@@ -622,6 +622,15 @@ def checkout():
                 logging.warning(f"[TELEGRAM PUSH WARN] Failed to notify vendor {vid}: {tg_err}")
 
         if payment_method == 'POD':
+            # Build order items list for email
+            order_items_list = []
+            for item in items:
+                order_items_list.append({
+                    'product_name': item.product.name,
+                    'quantity': item.quantity,
+                    'price': float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
+                })
+            
             try:
                 send_siiqo_email(
                     to_email=user.email,
@@ -630,6 +639,8 @@ def checkout():
                     first_name=user.first_name or "there",
                     order_id=new_order.id,
                     payment_method=payment_method,
+                    order_items=order_items_list,
+                    total_amount=total,
                 )
             except Exception as e:
                 logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")
