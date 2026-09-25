@@ -1149,14 +1149,18 @@ def add_daya_bank_account():
     except Exception as _rec_err:
         logging.warning("[DAYA BANK REG] Could not create Paystack recipient: %s", _rec_err)
 
-    # Step 3: Check for duplicate (same account_number for this vendor)
-    existing = VendorBankAccount.query.filter_by(
-        vendor_id=vendor_id,
-        account_number=account_number,
+    # Step 3: Check for duplicate (same account_number OR same recipient_code for this vendor)
+    existing = VendorBankAccount.query.filter(
+        VendorBankAccount.vendor_id == vendor_id,
+        db.or_(
+            VendorBankAccount.account_number == account_number,
+            VendorBankAccount.recipient_code == recipient_code
+        )
     ).first()
+    
     if existing:
-        # If existing is missing recipient_code or details, update it
-        if recipient_code and not existing.recipient_code:
+        # Update existing record with latest details
+        if recipient_code:
             existing.recipient_code = recipient_code
         if bank_code:
             existing.bank_code = bank_code
@@ -1164,6 +1168,62 @@ def add_daya_bank_account():
             existing.bank_name = bank_name
         if account_name:
             existing.account_name = account_name
+        existing.is_verified = bool(account_name)
+        existing.verified_at = _utcnow() if account_name else existing.verified_at
+        
+        # Update Paystack subaccount if missing
+        if not existing.paystack_subaccount_code:
+            try:
+                from app.services.escrow.paystack_provider import create_paystack_subaccount
+                from app.models.user import Storefront
+                storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
+                business_name = storefront.store_name if storefront else (account_name or bank_name)
+                sub_result = create_paystack_subaccount(
+                    business_name=business_name,
+                    bank_code=bank_code,
+                    account_number=account_number,
+                )
+                if sub_result.get("success"):
+                    existing.paystack_subaccount_code = sub_result["subaccount_code"]
+                    if storefront:
+                        storefront.paystack_subaccount_code = sub_result["subaccount_code"]
+                    logging.info("[DAYA BANK REG] Paystack subaccount %s created for vendor %s",
+                                 sub_result["subaccount_code"], vendor_id)
+            except Exception as exc:
+                logging.warning("[DAYA BANK REG] Paystack subaccount error for vendor %s: %s", vendor_id, exc)
+        
+        # Update Flutterwave subaccount if missing
+        if not existing.flw_subaccount_id:
+            try:
+                from app.services.flutterwave_service import create_subaccount as _flw_create_sub, is_configured as _flw_configured
+                if _flw_configured():
+                    from app.models.user import Storefront, User as _U
+                    storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
+                    _flw_business_name = storefront.store_name if storefront else (account_name or bank_name)
+                    _flw_phone = ""
+                    if storefront:
+                        try:
+                            _vendor_user = db.session.get(_U, int(vendor_id))
+                            _flw_phone = (_vendor_user.phone or "") if _vendor_user else ""
+                        except Exception:
+                            pass
+                    
+                    flw_result = _flw_create_sub(
+                        business_name=_flw_business_name,
+                        bank_code=bank_code,
+                        account_number=account_number,
+                        business_mobile=_flw_phone or "08012345678",
+                        business_email=(storefront.contact_email if storefront and storefront.contact_email else ""),
+                    )
+                    if flw_result.get("success"):
+                        existing.flw_subaccount_id = flw_result["subaccount_id"]
+                        logging.info("[DAYA BANK REG] Flutterwave subaccount %s created for vendor %s",
+                                     flw_result["subaccount_id"], vendor_id)
+                else:
+                    logging.info("[DAYA BANK REG] Flutterwave not configured — skipping FLW subaccount creation")
+            except Exception as _flw_exc:
+                logging.warning("[DAYA BANK REG] Flutterwave subaccount error for vendor %s: %s", vendor_id, _flw_exc)
+        
         db.session.commit()
         return jsonify({"status": "success", "message": "Bank account updated successfully", "account": existing.to_dict()}), 200
 
@@ -1182,8 +1242,9 @@ def add_daya_bank_account():
         is_default=is_first,
     )
     db.session.add(bank_account)
+    db.session.flush()  # Get bank_account.id without committing yet
 
-    # Step 4: Optionally create Paystack subaccount for split payments
+    # Step 5: Create Paystack subaccount for split payments
     # (This is best-effort — if it fails, Daya payout still works fine)
     try:
         from app.services.escrow.paystack_provider import create_paystack_subaccount
@@ -1209,6 +1270,52 @@ def add_daya_bank_account():
                             vendor_id, sub_result.get("error_message"))
     except Exception as exc:
         logging.warning("[DAYA BANK REG] Paystack subaccount error for vendor %s: %s", vendor_id, exc)
+
+    # Step 6: Create Flutterwave subaccount for split payments
+    # Best-effort — if it fails, Paystack and Daya payouts still work.
+    # Flutterwave subaccount is used when buyers pay via Flutterwave
+    # (international cards, local cards). The RS_xxx ID is stored on the
+    # bank account record and looked up at checkout time.
+    try:
+        from app.services.flutterwave_service import create_subaccount as _flw_create_sub, is_configured as _flw_configured
+        if _flw_configured():
+            from app.models.user import Storefront, User as _U
+            # Storefront is already loaded above; safe to reuse
+            _flw_business_name = (storefront.store_name if storefront else (account_name or bank_name))
+            _flw_phone = ""
+            if storefront:
+                try:
+                    _vendor_user = db.session.get(_U, int(vendor_id))
+                    _flw_phone = (_vendor_user.phone or "") if _vendor_user else ""
+                except Exception:
+                    pass
+
+            flw_result = _flw_create_sub(
+                business_name=_flw_business_name,
+                # Flutterwave uses the same CBN bank code as Daya
+                bank_code=bank_code,
+                account_number=account_number,
+                business_mobile=_flw_phone or "08012345678",
+                business_email=(storefront.contact_email if storefront and storefront.contact_email else ""),
+            )
+            if flw_result.get("success"):
+                bank_account.flw_subaccount_id = flw_result["subaccount_id"]
+                logging.info(
+                    "[DAYA BANK REG] Flutterwave subaccount %s created for vendor %s",
+                    flw_result["subaccount_id"], vendor_id,
+                )
+            else:
+                logging.warning(
+                    "[DAYA BANK REG] Flutterwave subaccount creation failed for vendor %s: %s",
+                    vendor_id, flw_result.get("error_message"),
+                )
+        else:
+            logging.info("[DAYA BANK REG] Flutterwave not configured — skipping FLW subaccount creation")
+    except Exception as _flw_exc:
+        logging.warning(
+            "[DAYA BANK REG] Flutterwave subaccount error for vendor %s: %s",
+            vendor_id, _flw_exc,
+        )
 
     db.session.commit()
 
