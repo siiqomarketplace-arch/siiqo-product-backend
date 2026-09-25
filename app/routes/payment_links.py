@@ -280,6 +280,7 @@ def pay_payment_link(link_id):
         f"?order_id={new_order.id}"
         f"&email={urllib.parse.quote(buyer_email if has_real_email else '')}"
         f"&existing={str(existing_account).lower()}"
+        f"&product_type={urllib.parse.quote(link_product_type)}"
     )
 
     # Initiate payment gateway transaction

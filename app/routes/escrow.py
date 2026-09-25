@@ -90,10 +90,12 @@ def _deliver_digital_products(order, escrow):
     if not digital_items:
         return False
 
-    # Build download list for email
-    download_lines = "\n".join(
-        f"• {p.name}: {p.file_url}" for p, _ in digital_items if p.file_url
-    ) or "The vendor will share your download link shortly via Siiqo chat."
+    # Build download list for email — HTML links so they are clickable in inbox
+    download_links_html = "".join(
+        f'<p style="margin:8px 0;"><strong>{p.name}</strong><br>'
+        f'<a href="{p.file_url}" style="color:#E0921C;word-break:break-all;">{p.file_url}</a></p>'
+        for p, _ in digital_items if p.file_url
+    ) or "<p>The vendor will share your download link shortly via Siiqo chat.</p>"
 
     # Release escrow immediately — no physical delivery required
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
@@ -188,8 +190,8 @@ def _deliver_digital_products(order, escrow):
                 template_name="system_notice",
                 first_name=buyer_first_name,
                 notice_text=(
-                    f"Great news! Your payment for Order #{order.id} is confirmed.\n\n"
-                    f"Here are your download link(s):\n\n{download_lines}\n\n"
+                    f"Great news! Your payment for Order #{order.id} is confirmed.<br><br>"
+                    f"Here are your download link(s):<br><br>{download_links_html}<br>"
                     "These links are yours to keep. If you have any issues accessing your files, "
                     "please contact the seller via the Siiqo chat."
                 ),
@@ -240,10 +242,12 @@ def _deliver_service_products(order, escrow):
     if not service_items:
         return False
 
-    # Build booking list for email
-    booking_lines = "\n".join(
-        f"• {p.name}: {p.booking_link}" for p, _ in service_items if p.booking_link
-    ) or "The vendor will reach out to you via Siiqo chat to schedule your service."
+    # Build booking list for email — HTML links so they are clickable in inbox
+    booking_links_html = "".join(
+        f'<p style="margin:8px 0;"><strong>{p.name}</strong><br>'
+        f'<a href="{p.booking_link}" style="color:#E0921C;word-break:break-all;">{p.booking_link}</a></p>'
+        for p, _ in service_items if p.booking_link
+    ) or "<p>The vendor will reach out to you via Siiqo chat to schedule your service.</p>"
 
     # Release escrow immediately
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
@@ -335,8 +339,8 @@ def _deliver_service_products(order, escrow):
                 template_name="system_notice",
                 first_name=buyer_first_name,
                 notice_text=(
-                    f"Great news! Your payment for Order #{order.id} is confirmed.\n\n"
-                    f"Please use the link(s) below to book your appointment:\n\n{booking_lines}\n\n"
+                    f"Great news! Your payment for Order #{order.id} is confirmed.<br><br>"
+                    f"Please use the link(s) below to book your appointment:<br><br>{booking_links_html}<br>"
                     "If you have any issues booking the service, please message the vendor in Siiqo chat."
                 ),
             )
