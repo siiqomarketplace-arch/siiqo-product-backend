@@ -239,7 +239,7 @@ def add_bank_account():
                     bank_code=cbn_bank_code,
                     account_number=account_number,
                     business_mobile=_flw_phone or "08012345678",
-                    business_email=(storefront.contact_email if storefront and storefront.contact_email else ""),
+                    business_email=(storefront.vendor.email if storefront and storefront.vendor else ""),
                 )
                 if flw_result.get("success"):
                     bank_account.flw_subaccount_id = flw_result["subaccount_id"]
@@ -1213,7 +1213,7 @@ def add_daya_bank_account():
                         bank_code=bank_code,
                         account_number=account_number,
                         business_mobile=_flw_phone or "08012345678",
-                        business_email=(storefront.contact_email if storefront and storefront.contact_email else ""),
+                        business_email=(storefront.vendor.email if storefront and storefront.vendor else ""),
                     )
                     if flw_result.get("success"):
                         existing.flw_subaccount_id = flw_result["subaccount_id"]
@@ -1296,7 +1296,7 @@ def add_daya_bank_account():
                 bank_code=bank_code,
                 account_number=account_number,
                 business_mobile=_flw_phone or "08012345678",
-                business_email=(storefront.contact_email if storefront and storefront.contact_email else ""),
+                business_email=(storefront.vendor.email if storefront and storefront.vendor else ""),
             )
             if flw_result.get("success"):
                 bank_account.flw_subaccount_id = flw_result["subaccount_id"]
