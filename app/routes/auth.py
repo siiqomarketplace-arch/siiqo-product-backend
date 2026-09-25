@@ -29,7 +29,7 @@ auth_bp = Blueprint('auth', __name__)
 
 def _get_user_id():
     """Helper to get user_id as integer from JWT (returns None if not authenticated)"""
-    user_id = _get_user_id()
+    user_id = get_jwt_identity()
     return int(user_id) if user_id else None
 
 
