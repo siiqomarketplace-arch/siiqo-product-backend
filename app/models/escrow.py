@@ -83,12 +83,51 @@ class EscrowTransaction(db.Model):
         except Exception:
             pass
 
-        is_digital_or_service = is_event or (
-            all(
-                (item.product.product_type if item.product else 'physical') in ('digital', 'service')
-                for item in self.order.items
-            ) if (self.order and self.order.items) else False
-        )
+        link_ptype = None
+        link_file_url = None
+        if self.order and self.order.payment_link_id:
+            try:
+                from app.models.payment_link import PaymentLink
+                pl = db.session.get(PaymentLink, self.order.payment_link_id)
+                if pl:
+                    link_ptype = getattr(pl, 'product_type', 'physical') or 'physical'
+                    link_file_url = getattr(pl, 'file_url', None)
+            except Exception:
+                pass
+
+        if link_ptype in ('digital', 'service'):
+            is_digital_or_service = True
+            is_service = (link_ptype == 'service')
+        else:
+            is_digital_or_service = is_event or (
+                all(
+                    (item.product.product_type if item.product else 'physical') in ('digital', 'service')
+                    for item in self.order.items
+                ) if (self.order and self.order.items) else False
+            )
+            is_service = not is_event and (
+                all(
+                    (item.product.product_type if item.product else 'physical') == 'service'
+                    for item in self.order.items
+                ) if (self.order and self.order.items) else False
+            )
+
+        downloads = []
+        if self.status == EscrowStatus.RELEASED or (self.order and self.order.status == 'COMPLETED'):
+            if link_ptype == 'digital' and link_file_url:
+                downloads.append({
+                    "product_name": (self.order.payment_link.title if getattr(self.order, 'payment_link', None) else "Digital Item"),
+                    "file_url": link_file_url,
+                })
+            elif self.order and self.order.items:
+                downloads.extend([
+                    {
+                        "product_name": (item.product.name if item.product else "Digital Item"),
+                        "file_url": (item.product.file_url if item.product else None),
+                    }
+                    for item in self.order.items
+                    if (item.product and item.product.product_type == 'digital' and item.product.file_url)
+                ])
 
         return {
             "id": self.id,
@@ -108,16 +147,10 @@ class EscrowTransaction(db.Model):
             "released_at": self.released_at.isoformat() if self.released_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "is_event": is_event,
+            "is_service": is_service,
             "event_tickets": event_tickets_data,
             "is_digital_or_service": is_digital_or_service,
-            "digital_downloads": [
-                {
-                    "product_name": (item.product.name if item.product else "Digital Item"),
-                    "file_url": (item.product.file_url if item.product else None),
-                }
-                for item in (self.order.items if self.order else [])
-                if (item.product and item.product.product_type == 'digital' and item.product.file_url)
-            ] if (self.status == EscrowStatus.RELEASED or (self.order and self.order.status == 'COMPLETED')) else [],
+            "digital_downloads": downloads,
             "confirmation_url": (
                 f"https://siiqo.com/order-confirm/{self.order_id}?token="
                 f"{__import__('app.routes.escrow', fromlist=['generate_order_token']).generate_order_token(self.order_id)}"

@@ -70,112 +70,31 @@ def auto_release_escrow():
             escrows_to_release.append(escrow)
     
     released_count = 0
-    
+
+    from app.routes.escrow import execute_order_escrow_release
+
     for escrow in escrows_to_release:
         try:
             order = escrow.order
             if not order:
                 continue
-            # ── Trigger vendor payout based on payment method ────────────────
-            is_crypto_order = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA', 'DAYA_BANK_TRANSFER')
-            is_paystack_order = (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
-            is_flw_order = (order.payment_method or '').upper() == 'FLUTTERWAVE'
 
-            if is_crypto_order:
-                # Funds in Daya collection balance — pay out via Daya
-                try:
-                    from app.routes.payments import _payout_vendor_via_daya
-                    _payout_vendor_via_daya(order, escrow)
-                    logger.info(
-                        f"  [DAYA AUTO-RELEASE] Payout initiated for Order #{order.id}"
-                    )
-                except Exception as daya_err:
-                    logger.error(
-                        f"  [DAYA AUTO-RELEASE] Payout failed for Order #{order.id}: {daya_err}"
-                    )
-            elif is_paystack_order:
-                # Paystack split payment / digital release
-                logger.info(
-                    f"  [PAYSTACK AUTO-RELEASE] Order #{order.id} — "
-                    "releasing escrow record and crediting ledger."
-                )
-            else:
-                logger.info(
-                    f"  [AUTO-RELEASE] Order #{order.id} — releasing escrow record internally."
-                )
-            escrow.status = EscrowStatus.RELEASED
-            escrow.released_at = utcnow()
-            order.status = 'COMPLETED'
-
-            # Credit vendor ledger (net of fee)
-            net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
-            _credit_vendor_ledger(
-                vendor_id=order.vendor_id,
-                amount=net_amount,
-                reference_id=escrow.transaction_number,
-                description=f"Auto-released payout for Order #{order.id}",
-            )
-            
-            # Create Receipt
-            existing_receipt = Receipt.query.filter_by(order_id=order.id).first()
-            if not existing_receipt:
-                db.session.add(Receipt(order_id=order.id))
-            
-            # Notify vendor
-            db.session.add(Notification(
-                user_id=order.vendor_id,
-                title="Funds Auto-Released",
-                message=f"₦{net_amount:,.2f} has been credited to your ledger for Order #{order.id} (auto-released after 72 hours).",
-                type="ESCROW",
-                order_id=order.id,
-            ))
-            
-            # Notify buyer
-            if order.buyer_id:
-                db.session.add(Notification(
-                    user_id=order.buyer_id,
-                    title="Order Complete",
-                    message=f"Order #{order.id} is complete. Funds have been released to the vendor. Thank you for shopping on Siiqo!",
-                    type="ORDER",
-                    order_id=order.id,
-                ))
-            
-            db.session.commit()
-            
-            # Send email notifications (non-blocking)
-            from app.utils.email import send_siiqo_email
-            from app.models.user import User
-
-            vendor = db.session.get(User, order.vendor_id)
-            if vendor and vendor.email:
-                try:
-                    send_siiqo_email(
-                        to_email=vendor.email,
-                        subject="Siiqo - Payout Released",
-                        template_name="system_notice",
-                        first_name=vendor.first_name or "Vendor",
-                        notice_text=f"Congratulations! Payout of ₦{net_amount:,.2f} has been released to your Siiqo wallet for Order #{order.id} (auto-released after 72 hours)."
-                    )
-                except Exception as e:
-                    logger.warning(f"[EMAIL WARN] Failed to send payout release email to vendor: {e}")
-
-            buyer = db.session.get(User, order.buyer_id) if order.buyer_id else None
-            buyer_email = (buyer.email if buyer else None) or getattr(order, 'buyer_email', None)
-            if buyer_email:
-                buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Buyer"
-                try:
-                    send_siiqo_email(
-                        to_email=buyer_email,
-                        subject="Siiqo - Order Completed",
-                        template_name="system_notice",
-                        first_name=buyer_name,
-                        notice_text=f"Thank you! Order #{order.id} is now complete. The funds have been released to the vendor. We hope you enjoyed shopping on Siiqo!"
-                    )
-                except Exception as e:
-                    logger.warning(f"[EMAIL WARN] Failed to send order completed email to buyer: {e}")
+            # ── Delegate entirely to the unified release pipeline ─────────────
+            # execute_order_escrow_release handles:
+            #   • Flutterwave transfer payout (with SPLIT: guard)
+            #   • Paystack transfer payout (with subaccount split guard)
+            #   • Daya payout
+            #   • Vendor ledger credit (idempotent)
+            #   • In-app notifications (buyer + vendor)
+            #   • Email notifications (buyer + vendor)
+            #   • order.status = COMPLETED + escrow.status = RELEASED
+            #   • db.session.commit()
+            result = execute_order_escrow_release(order, escrow, source="auto_release")
+            if not result:
+                logger.warning(f"  [AUTO-RELEASE] execute_order_escrow_release returned False for Order #{order.id}")
+                continue
 
             released_count += 1
-            
             logger.info(f"  ✓ Auto-released escrow {escrow.transaction_number} for Order #{order.id}")
             
         except Exception as e:

@@ -303,6 +303,18 @@ def verify_transaction(transaction_id: int | str) -> dict:
 # CREATE VENDOR SUBACCOUNT
 # ---------------------------------------------------------------------------
 
+def normalize_flw_bank_code(code: str) -> str:
+    """
+    Normalize bank codes for Flutterwave.
+    PalmPay uses CBN code '100033' (and NIBSS '090405') across Paystack & Daya,
+    but Flutterwave's routing directory uses '999991'.
+    """
+    c = str(code or "").strip()
+    if c in ("100033", "090405"):
+        return "999991"
+    return c
+
+
 def create_subaccount(
     business_name: str,
     bank_code: str,
@@ -342,8 +354,10 @@ def create_subaccount(
     if not business_mobile:
         business_mobile = "08012345678"
 
+    normalized_bank = normalize_flw_bank_code(bank_code)
+
     payload = {
-        "account_bank": str(bank_code).strip(),
+        "account_bank": normalized_bank,
         "account_number": str(account_number).strip(),
         "business_name": business_name,
         "business_mobile": str(business_mobile).strip(),
@@ -450,8 +464,10 @@ def transfer_to_vendor(
     if not key:
         return {"success": False, "error_message": "Flutterwave not configured."}
 
+    normalized_bank = normalize_flw_bank_code(account_bank)
+
     payload = {
-        "account_bank": str(account_bank).strip(),
+        "account_bank": normalized_bank,
         "account_number": str(account_number).strip(),
         "amount": round(float(amount_ngn), 2),
         "narration": narration[:50],

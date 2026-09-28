@@ -162,6 +162,10 @@ def _deliver_digital_products(order, escrow):
             )
         else:
             _paystack_payout_vendor(order, escrow)
+    elif is_flutterwave:
+        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
+        if not vendor_already_paid_via_split:
+            _flutterwave_payout_vendor(order, escrow)
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -344,6 +348,10 @@ def _deliver_service_products(order, escrow):
             )
         else:
             _paystack_payout_vendor(order, escrow)
+    elif is_flutterwave:
+        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
+        if not vendor_already_paid_via_split:
+            _flutterwave_payout_vendor(order, escrow)
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -494,6 +502,16 @@ def _deliver_event_tickets(order, escrow):
             logging.info(f"[EVENT] Order #{order.id} — vendor has Paystack subaccount, split already settled vendor.")
         else:
             _paystack_payout_vendor(order, escrow)
+    elif is_flutterwave:
+        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
+        if not vendor_already_paid_via_split:
+            _flutterwave_payout_vendor(order, escrow)
+    elif is_crypto:
+        try:
+            from app.routes.payments import _payout_vendor_via_daya
+            _payout_vendor_via_daya(order, escrow)
+        except Exception as _e:
+            logging.warning(f"[EVENT] Daya payout failed for Order #{order.id}: {_e}")
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -638,39 +656,110 @@ def initiate_escrow():
 @jwt_required(optional=True)
 def escrow_status():
     txn_param = request.args.get('txn') or request.args.get('reference') or request.args.get('trxref') or request.args.get('txnref')
+    tx_ref_param = request.args.get('tx_ref')
     order_id_param = request.args.get('order_id') or request.args.get('ref')
+    tx_id = request.args.get("transaction_id") or request.args.get("tx_id")
 
     escrow = None
 
-    if txn_param:
+    # 1. Direct query by numeric order_id
+    if order_id_param and str(order_id_param).isdigit():
+        escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_param)).first()
+
+    # 2. Query by explicit tx_ref (Flutterwave full reference)
+    if not escrow and tx_ref_param:
+        escrow = EscrowTransaction.query.filter_by(transaction_number=tx_ref_param).first()
+        if not escrow and str(tx_ref_param).startswith("FLW-ORD-"):
+            parts = str(tx_ref_param).split("-")
+            if len(parts) >= 3 and parts[2].isdigit():
+                escrow = EscrowTransaction.query.filter_by(order_id=int(parts[2])).first()
+        if not escrow and str(tx_ref_param).startswith("FLW-PL-"):
+            parts = str(tx_ref_param).split("-")
+            if len(parts) >= 3 and parts[2].isdigit():
+                escrow = EscrowTransaction.query.filter_by(order_id=int(parts[2])).first()
+
+    # 3. Query by txn_param (exact, numeric, FLW-ORD-, PL-, or prefix)
+    if not escrow and txn_param:
         escrow = EscrowTransaction.query.filter_by(transaction_number=txn_param).first()
+        if not escrow and str(txn_param).isdigit():
+            escrow = EscrowTransaction.query.filter_by(order_id=int(txn_param)).first()
+        if not escrow and str(txn_param).startswith("FLW-ORD-"):
+            parts = str(txn_param).split("-")
+            if len(parts) >= 3 and parts[2].isdigit():
+                escrow = EscrowTransaction.query.filter_by(order_id=int(parts[2])).first()
+        if not escrow and str(txn_param).startswith("PL-"):
+            parts = str(txn_param).split("-")
+            if len(parts) >= 2 and parts[1].isdigit():
+                escrow = EscrowTransaction.query.filter_by(order_id=int(parts[1])).first()
+        if not escrow and str(txn_param).startswith("FLW-PL-"):
+            parts = str(txn_param).split("-")
+            if len(parts) >= 3 and parts[2].isdigit():
+                escrow = EscrowTransaction.query.filter_by(order_id=int(parts[2])).first()
+        if not escrow:
+            escrow = EscrowTransaction.query.filter(
+                (EscrowTransaction.payscrow_transaction_id == txn_param) |
+                (EscrowTransaction.payscrow_ref == txn_param)
+            ).first()
+        if not escrow:
+            escrow = EscrowTransaction.query.filter(EscrowTransaction.transaction_number.like(f"{txn_param}%")).first()
 
-    if not escrow and order_id_param:
-        if str(order_id_param).isdigit():
-            escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_param)).first()
-        else:
-            escrow = EscrowTransaction.query.filter_by(transaction_number=str(order_id_param)).first()
-
-    if not escrow and txn_param and str(txn_param).isdigit():
-        escrow = EscrowTransaction.query.filter_by(order_id=int(txn_param)).first()
+    # 4. Fallback lookup via Flutterwave API if transaction_id is passed
+    if not escrow and tx_id:
+        try:
+            from app.services import flutterwave_service as _flw
+            v = _flw.verify_transaction(tx_id)
+            if v.get("success"):
+                flw_oid = v.get("order_id")
+                flw_ref = v.get("tx_ref")
+                if flw_oid and str(flw_oid).isdigit():
+                    escrow = EscrowTransaction.query.filter_by(order_id=int(flw_oid)).first()
+                if not escrow and flw_ref:
+                    escrow = EscrowTransaction.query.filter_by(transaction_number=flw_ref).first()
+        except Exception as _flw_err:
+            logging.warning(f"[ESCROW STATUS] Flutterwave lookup fallback failed: {_flw_err}")
 
     if not escrow:
         return jsonify({"message": "Transaction not found"}), 404
 
-    # If escrow is still PENDING_PAYMENT, proactively verify with Flutterwave or Paystack
+    # If escrow is still PENDING_PAYMENT, proactively verify with Flutterwave, Daya, or Paystack
     if escrow.status == EscrowStatus.PENDING_PAYMENT and escrow.transaction_number:
-        if escrow.transaction_number.startswith("FLW-"):
+        if escrow.transaction_number.startswith("FLW-") or (escrow.order and escrow.order.payment_method == "FLUTTERWAVE"):
             try:
                 from app.routes.payments import _handle_flutterwave_payment_confirmed
                 from app.services import flutterwave_service as _flw
-                tx_id = request.args.get("transaction_id") or request.args.get("tx_id")
-                if tx_id:
-                    verif = _flw.verify_transaction(tx_id)
+                lookup_tx_id = tx_id or request.args.get("transaction_id") or request.args.get("tx_id")
+                if lookup_tx_id:
+                    verif = _flw.verify_transaction(lookup_tx_id)
                     if verif.get("success") and verif.get("status") == "successful":
-                        _handle_flutterwave_payment_confirmed(escrow.transaction_number, str(tx_id), verif)
+                        _handle_flutterwave_payment_confirmed(escrow.transaction_number, str(lookup_tx_id), verif)
                         db.session.refresh(escrow)
             except Exception as _flw_err:
                 logging.warning(f"[ESCROW STATUS] Flutterwave proactive verification failed: {_flw_err}")
+        elif escrow.order and (escrow.order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA'):
+            try:
+                from app.models.daya_payment import DayaPayment
+                from app.routes.payments import _handle_crypto_payment_confirmed, _key_configured
+                from app.services import daya_service
+                dp = DayaPayment.query.filter_by(order_id=escrow.order.id).first()
+                if dp and dp.daya_funding_account_id and _key_configured():
+                    deposit = daya_service.get_deposit_by_funding_account(dp.daya_funding_account_id)
+                    if deposit:
+                        dep_fa = deposit.get("funding_account_id") or deposit.get("fundingAccountId") or ""
+                        if dep_fa == dp.daya_funding_account_id:
+                            new_status = daya_service._map_daya_status(deposit.get("status", ""))
+                            dp.daya_deposit_id = deposit.get("id")
+                            if new_status != dp.status:
+                                dp.status = new_status
+                                dp.updated_at = _utcnow()
+                                db.session.commit()
+                                if new_status == "COMPLETED":
+                                    _handle_crypto_payment_confirmed(escrow.order.id, dp)
+                                    db.session.refresh(escrow)
+                elif dp and dp.status == "COMPLETED":
+                    _handle_crypto_payment_confirmed(escrow.order.id, dp)
+                    db.session.refresh(escrow)
+            except Exception as _daya_err:
+                logging.warning(f"[ESCROW STATUS] Daya proactive verification failed: {_daya_err}")
         else:
             try:
                 from app.services.escrow.paystack_provider import PaystackProvider
@@ -688,7 +777,42 @@ def escrow_status():
                         if not is_event:
                             is_digital = _deliver_digital_products(escrow.order, escrow)
                         if not is_event and not is_digital:
-                            _deliver_service_products(escrow.order, escrow)
+                            is_service = _deliver_service_products(escrow.order, escrow)
+                        if not is_event and not is_digital and not is_service and escrow.order.payment_link_id:
+                            from app.models.payment_link import PaymentLink as _PL
+                            link = db.session.get(_PL, escrow.order.payment_link_id)
+                            link_ptype = getattr(link, 'product_type', 'service') or 'service'
+                            if link_ptype in ('digital', 'service'):
+                                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                                escrow.status = EscrowStatus.RELEASED
+                                escrow.released_at = _utcnow()
+                                escrow.order.status = 'COMPLETED'
+                                if link:
+                                    link.status = 'PAID'
+                                _credit_vendor_ledger(
+                                    vendor_id=escrow.order.vendor_id,
+                                    amount=net_amount,
+                                    reference_id=escrow.transaction_number,
+                                    description=f"Paystack payout for Pay Link Order #{escrow.order.id}",
+                                )
+                                vendor_used_split = False
+                                try:
+                                    bank_acc = VendorBankAccount.query.filter_by(
+                                        vendor_id=escrow.order.vendor_id, is_default=True
+                                    ).first() or VendorBankAccount.query.filter_by(
+                                        vendor_id=escrow.order.vendor_id
+                                    ).first()
+                                    if bank_acc and bank_acc.paystack_subaccount_code:
+                                        vendor_used_split = True
+                                    else:
+                                        from app.models.user import Storefront
+                                        sf = Storefront.query.filter_by(vendor_id=escrow.order.vendor_id).first()
+                                        if sf and sf.paystack_subaccount_code:
+                                            vendor_used_split = True
+                                except Exception:
+                                    pass
+                                if not vendor_used_split:
+                                    _paystack_payout_vendor(escrow.order, escrow)
 
                     db.session.commit()
                     logging.info(f"[ESCROW STATUS] Proactively verified & activated transaction {escrow.transaction_number}")
@@ -777,12 +901,53 @@ def _paystack_payout_vendor(order, escrow):
     return False
 
 
+def _flutterwave_payout_vendor(order, escrow):
+    """
+    Push vendor's net share via Flutterwave Transfers API.
+    Used for instant payouts of digital/service/event orders or upon delivery confirmation
+    when subaccount split was not applied at checkout (e.g. multi-vendor cart).
+    """
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    bank_acc = VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id, is_default=True
+    ).first() or VendorBankAccount.query.filter_by(
+        vendor_id=order.vendor_id
+    ).first()
+
+    if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
+        logging.warning(
+            f"[FLW PAYOUT] Vendor {order.vendor_id} has no valid bank details for Order #{order.id}. Skipping transfer."
+        )
+        return False
+
+    try:
+        from app.services import flutterwave_service as _flw
+        import uuid as _uuid
+        payout_ref = f"WD-FLW-{order.id}-{_uuid.uuid4().hex[:6].upper()}"
+        flw_tx = _flw.transfer_to_vendor(
+            account_bank=bank_acc.bank_code,
+            account_number=bank_acc.account_number,
+            amount_ngn=net_amount,
+            reference=payout_ref,
+            narration=f"Siiqo payout for Order #{order.id}",
+        )
+        if flw_tx.get("success"):
+            logging.info(f"[FLW PAYOUT] ✓ Flutterwave transfer dispatched for Order #{order.id}: ref={payout_ref}")
+            return True
+        else:
+            logging.warning(f"[FLW PAYOUT] Flutterwave transfer failed for Order #{order.id}: {flw_tx.get('error_message')}")
+            return False
+    except Exception as exc:
+        logging.error(f"[FLW PAYOUT] Flutterwave transfer error for Order #{order.id}: {exc}", exc_info=True)
+        return False
+
+
 def execute_order_escrow_release(order, escrow, source="admin"):
     """
     Unified, idempotent order completion & payout pipeline.
     1. Sets escrow.status = RELEASED
     2. Credits vendor ledger balance
-    3. Fires transfer payout (Paystack or Daya based on order gateway)
+    3. Fires transfer payout (Paystack, Flutterwave, or Daya based on order gateway)
     4. Sets order.status = 'COMPLETED'
     5. Sends notifications to buyer & vendor
     """
@@ -806,9 +971,7 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         description=f"Payout for Order #{order.id} ({source})",
     )
 
-    # Determine payout channel: Daya (crypto/NGN bank-transfer onramp) vs Paystack
-    # IMPORTANT: 'DAYA_BANK_TRANSFER' is set by payments.py when buyer pays via Daya
-    # NGN virtual account. It MUST be included here or payout is silently skipped.
+    # Determine payout channel: Daya (crypto/NGN bank-transfer onramp) vs Paystack vs Flutterwave
     DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'USDT', 'USDC', 'DAYA_BANK_TRANSFER')
     is_daya_order = (
         (order.payment_method or '') in DAYA_PAYMENT_METHODS
@@ -824,40 +987,9 @@ def execute_order_escrow_release(order, escrow, source="admin"):
     )
 
     if is_flutterwave_order:
-        # Flutterwave channel
-        vendor_already_paid_via_split = False
-        try:
-            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first() or \
-                       VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
-            if bank_acc and bank_acc.flw_subaccount_id:
-                vendor_already_paid_via_split = True
-        except Exception as _sub_err:
-            logging.warning(f"[ESCROW RELEASE] FLW subaccount check warning: {_sub_err}")
-
-        if not vendor_already_paid_via_split and bank_acc and bank_acc.bank_code and bank_acc.account_number:
-            try:
-                from app.services import flutterwave_service as _flw
-                import uuid as _uuid
-                payout_ref = f"WD-FLW-{order.id}-{_uuid.uuid4().hex[:6].upper()}"
-                flw_tx = _flw.transfer_to_vendor(
-                    account_bank=bank_acc.bank_code,
-                    account_number=bank_acc.account_number,
-                    amount_ngn=net_amount,
-                    reference=payout_ref,
-                    narration=f"Siiqo payout for Order #{order.id}",
-                )
-                if flw_tx.get("success"):
-                    _debit_ledger(
-                        vendor_id=order.vendor_id,
-                        amount=Decimal(str(net_amount)),
-                        description=f"Auto-payout via Flutterwave Transfer for Order #{order.id}",
-                        reference_id=payout_ref,
-                    )
-                    logging.info(f"[ESCROW RELEASE] Flutterwave transfer queued for Order #{order.id}")
-                else:
-                    logging.warning(f"[ESCROW RELEASE] Flutterwave transfer failed for Order #{order.id}: {flw_tx.get('error_message')}")
-            except Exception as _flw_tr_err:
-                logging.warning(f"[ESCROW RELEASE] Flutterwave transfer error for Order #{order.id}: {_flw_tr_err}")
+        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
+        if not vendor_already_paid_via_split:
+            _flutterwave_payout_vendor(order, escrow)
     elif is_daya_order:
         try:
             from app.routes.payments import _payout_vendor_via_daya

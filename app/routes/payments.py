@@ -739,6 +739,7 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         is_ticket_order = activate_tickets_for_order(order_id)
         if is_ticket_order:
             from app.routes.escrow import _credit_vendor_ledger
+            from app.models.finance import Receipt
             net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = _utcnow()
@@ -751,15 +752,36 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             )
             _payout_vendor_via_daya(order, escrow)
 
-        from app.routes.escrow import _deliver_digital_products, _deliver_service_products
-        is_digital = _deliver_digital_products(order, escrow)
+            if not Receipt.query.filter_by(order_id=order.id).first():
+                db.session.add(Receipt(order_id=order.id))
+
+            if order.buyer_id:
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title="Event Tickets Ready! 🎟️",
+                    message=f"Your tickets for Order #{order.id} are active. Access them in My Tickets.",
+                    type="ORDER",
+                    order_id=order.id,
+                ))
+            db.session.add(Notification(
+                user_id=order.vendor_id,
+                title="Event Ticket Sale Complete 🎟️",
+                message=f"Order #{order.id} ticket sale completed. ₦{net_amount:,.2f} credited.",
+                type="ESCROW",
+                order_id=order.id,
+            ))
+
+        is_digital = False
         is_service = False
-        if not is_digital:
-            is_service = _deliver_service_products(order, escrow)
+        if not is_ticket_order:
+            from app.routes.escrow import _deliver_digital_products, _deliver_service_products
+            is_digital = _deliver_digital_products(order, escrow)
+            if not is_digital:
+                is_service = _deliver_service_products(order, escrow)
 
         # ── Pay Link orders: product_id=None so _deliver_* return False.
         # Detect product type from the linked PaymentLink instead.
-        if not is_digital and not is_service and order.payment_link_id:
+        if not is_ticket_order and not is_digital and not is_service and order.payment_link_id:
             from app.models.payment_link import PaymentLink as _PL
             _link = db.session.get(_PL, order.payment_link_id)
             _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
@@ -890,7 +912,7 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         if is_digital or is_service:
             _payout_vendor_via_daya(order, escrow)
 
-        if not is_digital and not is_service:
+        if not is_ticket_order and not is_digital and not is_service:
             # Physical order — create or activate the LogisticsAssignment
             from app.models.escrow import LogisticsAssignment
             assignment = LogisticsAssignment.query.filter_by(order_id=order_id).first()
@@ -981,8 +1003,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                     logger.warning(f"[EMAIL WARN] Daya physical buyer email failed Order #{order_id}: {e}")
 
         db.session.commit()
-        logger.info("[DAYA CONFIRM] Order %s confirmed (digital=%s service=%s)",
-                    order_id, is_digital, is_service)
+        logger.info("[DAYA CONFIRM] Order %s confirmed (digital=%s service=%s ticket=%s)",
+                    order_id, is_digital, is_service, is_ticket_order)
 
     except Exception as exc:
         db.session.rollback()
@@ -1350,7 +1372,16 @@ def flutterwave_initiate():
     tx_ref = f"FLW-ORD-{primary_id}-{uuid.uuid4().hex[:8].upper()}"
 
     custom_return_url = data.get("returnUrl") or data.get("return_url")
-    redirect_url = custom_return_url or f"{site_url}/payment/success?reference={tx_ref}&order_id={primary_id}"
+    if custom_return_url:
+        redirect_url = custom_return_url
+        delim = "&" if "?" in redirect_url else "?"
+        if "order_id=" not in redirect_url:
+            redirect_url += f"{delim}order_id={primary_id}"
+            delim = "&"
+        if "reference=" not in redirect_url and "tx_ref=" not in redirect_url:
+            redirect_url += f"{delim}reference={tx_ref}"
+    else:
+        redirect_url = f"{site_url}/payment/success?reference={tx_ref}&order_id={primary_id}"
 
     # Narration for hosted receipt
     narration = f"Siiqo Order #{primary_id}" if len(order_ids) == 1 else f"Siiqo Orders {', '.join(f'#{i}' for i in order_ids)}"
@@ -1372,6 +1403,9 @@ def flutterwave_initiate():
     if not flw_result.get("success"):
         return jsonify({"message": flw_result.get("error_message") or "Could not initialize Flutterwave payment."}), 400
 
+    # Tag whether split was attached at checkout
+    split_tag = f"SPLIT:{flw_subaccount_id}:{tx_ref}" if flw_subaccount_id else f"DIRECT:{tx_ref}"
+
     # Create or update EscrowTransaction for each order
     for o in orders:
         o.payment_method = "FLUTTERWAVE"
@@ -1387,7 +1421,7 @@ def flutterwave_initiate():
                 fee_amount=indiv_fee,
                 payment_link=flw_result["payment_link"],
                 payscrow_transaction_id=tx_ref,
-                payscrow_ref=tx_ref,
+                payscrow_ref=split_tag,
             )
             db.session.add(escrow)
         else:
@@ -1395,7 +1429,7 @@ def flutterwave_initiate():
             escrow.status = EscrowStatus.PENDING_PAYMENT
             escrow.payment_link = flw_result["payment_link"]
             escrow.payscrow_transaction_id = tx_ref
-            escrow.payscrow_ref = tx_ref
+            escrow.payscrow_ref = split_tag
 
     db.session.commit()
 
@@ -1486,31 +1520,49 @@ def flutterwave_status():
     Ensures immediate order confirmation upon redirect if the webhook is slightly delayed.
     """
     from app.services import flutterwave_service as _flw
-    from app.models.escrow import EscrowTransaction
+    from app.models.escrow import EscrowTransaction, EscrowStatus
 
-    tx_ref = request.args.get("tx_ref") or request.args.get("reference") or ""
-    tx_id = request.args.get("transaction_id") or ""
-    order_id_str = request.args.get("order_id") or ""
+    tx_ref = request.args.get("tx_ref") or request.args.get("reference") or request.args.get("txn") or ""
+    tx_id = request.args.get("transaction_id") or request.args.get("tx_id") or ""
+    order_id_str = request.args.get("order_id") or request.args.get("ref") or ""
 
     escrow = None
-    if tx_ref:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=tx_ref).first()
-    if not escrow and order_id_str and order_id_str.isdigit():
+
+    # 1. Direct match by numeric order_id
+    if order_id_str and str(order_id_str).isdigit():
         escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_str)).first()
+
+    # 2. Match by tx_ref / reference / txn
+    if not escrow and tx_ref:
+        escrow = EscrowTransaction.query.filter_by(transaction_number=tx_ref).first()
+        if not escrow and str(tx_ref).isdigit():
+            escrow = EscrowTransaction.query.filter_by(order_id=int(tx_ref)).first()
+        if not escrow and str(tx_ref).startswith("FLW-ORD-"):
+            parts = str(tx_ref).split("-")
+            if len(parts) >= 3 and parts[2].isdigit():
+                escrow = EscrowTransaction.query.filter_by(order_id=int(parts[2])).first()
+        if not escrow:
+            escrow = EscrowTransaction.query.filter(EscrowTransaction.transaction_number.like(f"{tx_ref}%")).first()
+
+    # 3. Fallback: resolve via Flutterwave API if transaction_id is present
+    if not escrow and tx_id:
+        try:
+            verif_lookup = _flw.verify_transaction(tx_id)
+            if verif_lookup.get("success"):
+                flw_oid = verif_lookup.get("order_id")
+                flw_ref = verif_lookup.get("tx_ref")
+                if flw_oid and str(flw_oid).isdigit():
+                    escrow = EscrowTransaction.query.filter_by(order_id=int(flw_oid)).first()
+                if not escrow and flw_ref:
+                    escrow = EscrowTransaction.query.filter_by(transaction_number=flw_ref).first()
+        except Exception as _lookup_err:
+            logger.warning("[FLW STATUS] Flutterwave lookup error: %s", _lookup_err)
 
     if not escrow:
         return jsonify({"message": "Transaction not found"}), 404
 
-    # If already released or in escrow, return immediately
-    if escrow.status in ("IN_ESCROW", "RELEASED"):
-        return jsonify({
-            "orderId": str(escrow.order_id),
-            "status": "COMPLETED",
-            "transactionNumber": escrow.transaction_number,
-        }), 200
-
     # If pending and transaction ID is available, proactively verify with Flutterwave
-    if tx_id:
+    if escrow.status == EscrowStatus.PENDING_PAYMENT and tx_id:
         try:
             verif = _flw.verify_transaction(tx_id)
             if verif.get("success") and verif.get("status") == "successful":
@@ -1519,19 +1571,14 @@ def flutterwave_status():
                     tx_id=str(tx_id),
                     verification=verif,
                 )
-                return jsonify({
-                    "orderId": str(escrow.order_id),
-                    "status": "COMPLETED",
-                    "transactionNumber": escrow.transaction_number,
-                }), 200
+                db.session.refresh(escrow)
         except Exception as exc:
             logger.warning("[FLW STATUS] Proactive verification error: %s", exc)
 
-    return jsonify({
-        "orderId": str(escrow.order_id),
-        "status": escrow.status,
-        "transactionNumber": escrow.transaction_number,
-    }), 200
+    resp_data = escrow.to_dict()
+    resp_data["orderId"] = str(escrow.order_id)
+    resp_data["transactionNumber"] = escrow.transaction_number
+    return jsonify(resp_data), 200
 
 
 def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification: dict):
@@ -1630,6 +1677,14 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                         reference_id=escrow.transaction_number,
                         description=f"Flutterwave payout for Order #{order.id}",
                     )
+
+                    # Trigger actual bank transfer payout unless vendor used FLW split at checkout
+                    from app.routes.escrow import _flutterwave_payout_vendor as _flw_payout
+                    vendor_already_paid_via_split = bool(
+                        escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:")
+                    )
+                    if not vendor_already_paid_via_split:
+                        _flw_payout(order, escrow)
                     db.session.add(Notification(
                         user_id=order.vendor_id,
                         title="Payment Received (Flutterwave)",
@@ -1746,37 +1801,11 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
             except Exception as vendor_email_err:
                 logger.warning(f"[FLW CONFIRM] Vendor email failed for Order #{order.id}: {vendor_email_err}")
 
-            # Vendor payout check:
-            # 1. If Flutterwave split was attached, settlement happens natively T+1 to vendor's subaccount.
-            # 2. If split was NOT attached, the net amount was credited to their ledger above.
-            #    If vendor has verified bank details, trigger automated instant Flutterwave Transfer payout:
-            vendor_bank = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first() or \
-                          VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
-            used_flw_split = bool(vendor_bank and vendor_bank.flw_subaccount_id)
-
-            if not used_flw_split and escrow.status == EscrowStatus.RELEASED and vendor_bank and vendor_bank.bank_code and vendor_bank.account_number:
-                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
-                try:
-                    from decimal import Decimal
-                    from app.routes.withdrawal import _debit_ledger
-                    payout_ref = f"WD-FLW-{order.id}-{uuid.uuid4().hex[:6].upper()}"
-                    flw_tx = _flw.transfer_to_vendor(
-                        account_bank=vendor_bank.bank_code,
-                        account_number=vendor_bank.account_number,
-                        amount_ngn=net_amount,
-                        reference=payout_ref,
-                        narration=f"Siiqo payout for Order #{order.id}",
-                    )
-                    if flw_tx.get("success"):
-                        _debit_ledger(
-                            vendor_id=order.vendor_id,
-                            amount=Decimal(str(net_amount)),
-                            description=f"Auto-payout via Flutterwave Transfer for Order #{order.id}",
-                            reference_id=payout_ref,
-                        )
-                        logger.info("[FLW CONFIRM] Payout transfer queued for vendor %s Order #%s: %s", order.vendor_id, order.id, payout_ref)
-                except Exception as _tr_err:
-                    logger.warning("[FLW CONFIRM] Automated Flutterwave payout transfer skipped: %s (funds remain in ledger)", _tr_err)
+            # Vendor payout is handled inside _deliver_digital_products / _deliver_service_products /
+            # _deliver_event_tickets (called above). Each delivery function calls _flutterwave_payout_vendor()
+            # when no SPLIT: tag exists on the escrow, so NO additional transfer should be triggered here.
+            # Physical goods (escrow still IN_ESCROW) are paid out via execute_order_escrow_release()
+            # when the buyer confirms delivery — not here.
 
         logger.info("[FLW CONFIRM] Committing database changes...")
         db.session.commit()

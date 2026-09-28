@@ -1091,6 +1091,42 @@ def paystack_webhook():
                                     reference_id=pl_escrow.transaction_number,
                                     description=f"Paystack payout for Pay Link Order #{pl_order.id}",
                                 )
+                                # Trigger Paystack bank transfer unless split payment was configured
+                                vendor_used_split = False
+                                try:
+                                    from app.models.withdrawal import VendorBankAccount
+                                    from app.models.user import Storefront
+                                    bank_acc = VendorBankAccount.query.filter_by(
+                                        vendor_id=pl_order.vendor_id, is_default=True
+                                    ).first() or VendorBankAccount.query.filter_by(
+                                        vendor_id=pl_order.vendor_id
+                                    ).first()
+                                    if bank_acc and bank_acc.paystack_subaccount_code:
+                                        vendor_used_split = True
+                                    else:
+                                        sf = Storefront.query.filter_by(vendor_id=pl_order.vendor_id).first()
+                                        if sf and sf.paystack_subaccount_code:
+                                            vendor_used_split = True
+                                except Exception:
+                                    pass
+                                if not vendor_used_split:
+                                    from app.routes.escrow import _paystack_payout_vendor
+                                    _paystack_payout_vendor(pl_order, pl_escrow)
+
+                                from app.models.communication import Notification
+                                db.session.add(Notification(
+                                    user_id=pl_order.vendor_id,
+                                    title="Pay Link Sale Complete",
+                                    message=f"Order #{pl_order.id} paid. ₦{net_amount:,.2f} credited.",
+                                    type="ESCROW", order_id=pl_order.id,
+                                ))
+                                if pl_order.buyer_id:
+                                    db.session.add(Notification(
+                                        user_id=pl_order.buyer_id,
+                                        title="Payment Complete",
+                                        message=f"Your payment for Order #{pl_order.id} is confirmed.",
+                                        type="ORDER", order_id=pl_order.id,
+                                    ))
                                 try:
                                     from app.utils.email import send_siiqo_email
                                     from app.models.user import User as _U
