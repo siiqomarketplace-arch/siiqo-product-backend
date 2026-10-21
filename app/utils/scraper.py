@@ -15,30 +15,52 @@ def _fetch_page_content(url):
     
     if proxy_val:
         proxy_val = proxy_val.strip()
-        if proxy_val.startswith("http://") or proxy_val.startswith("https://"):
-            # Standard Proxy URL mode
-            proxies = {"http": proxy_val, "https": proxy_val}
-            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
-            response.raise_for_status()
-            return response.text
-        else:
-            # Bright Data Web Unlocker API Key mode
-            api_headers = {
-                "Authorization": f"Bearer {proxy_val}",
-                "Content-Type": "application/json"
-            }
-            api_body = {
-                "zone": "web_unlocker1",
-                "url": url,
-                "format": "raw"
-            }
-            response = requests.post("https://api.brightdata.com/request", headers=api_headers, json=api_body, timeout=30)
-            response.raise_for_status()
-            return response.text
-    else:
-        response = requests.get(url, headers=headers, verify=False, timeout=30)
-        response.raise_for_status()
-        return response.text
+        # Check if it's a proxy URL format (contains @ sign for auth)
+        if "@" in proxy_val and ("brd.superproxy.io" in proxy_val or proxy_val.startswith("http")):
+            # Extract username and password from proxy URL
+            # Format: http://username:password@host:port
+            try:
+                import re
+                match = re.match(r'https?://([^:]+):([^@]+)@([^:]+):(\d+)', proxy_val)
+                if match:
+                    username, password, host, port = match.groups()
+                    # Use proxy with authentication
+                    proxies = {
+                        "http": f"http://{username}:{password}@{host}:{port}",
+                        "https": f"http://{username}:{password}@{host}:{port}"
+                    }
+                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
+                    response.raise_for_status()
+                    return response.text
+            except Exception as e:
+                logger.info(f"Proxy connection error: {e}")
+                # Fall back to direct request
+                pass
+        
+        # Try as API key (for Direct API access)
+        if not proxy_val.startswith("http"):
+            try:
+                api_headers = {
+                    "Authorization": f"Bearer {proxy_val}",
+                    "Content-Type": "application/json"
+                }
+                api_body = {
+                    "zone": "web_unlocker1",
+                    "url": url,
+                    "format": "raw"
+                }
+                response = requests.post("https://api.brightdata.com/request", headers=api_headers, json=api_body, timeout=30)
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.info(f"API access error: {e}")
+                # Fall back to direct request
+                pass
+    
+    # Fallback: direct request without proxy
+    response = requests.get(url, headers=headers, verify=False, timeout=30)
+    response.raise_for_status()
+    return response.text
 
 def scrape_product_url(url):
     try:
