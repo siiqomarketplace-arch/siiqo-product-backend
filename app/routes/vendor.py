@@ -752,6 +752,104 @@ def scrape_product():
         
     return jsonify(result), 200
 
+@vendor_bp.route('/products/scrape-debug', methods=['POST'])
+@jwt_required()
+def scrape_product_debug():
+    """Debug endpoint to see detailed scraping information"""
+    user_id = _get_user_id()
+    user, sf = _require_vendor_storefront(user_id)
+    if not user or not sf:
+        return jsonify({"message": "Vendor access required"}), 403
+    
+    data = request.get_json() or {}
+    url = data.get('url')
+    if not url:
+        return jsonify({"message": "URL is required"}), 400
+    
+    # Import required modules
+    import os
+    import requests
+    from bs4 import BeautifulSoup
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    debug_info = {
+        "url": url,
+        "proxy_configured": bool(os.environ.get("BRIGHT_DATA_PROXY")),
+        "steps": []
+    }
+    
+    try:
+        # Fetch HTML
+        from app.utils.scraper import _fetch_page_content
+        html_text = _fetch_page_content(url)
+        debug_info["html_length"] = len(html_text)
+        debug_info["steps"].append(f"✅ Fetched HTML: {len(html_text)} chars")
+        
+        # Parse with BeautifulSoup
+        soup = BeautifulSoup(html_text, "html.parser")
+        debug_info["steps"].append("✅ Parsed with BeautifulSoup")
+        
+        # Check for bot detection
+        if "captcha" in html_text.lower() or "robot" in html_text.lower():
+            debug_info["steps"].append("⚠️ WARNING: Possible captcha/bot detection")
+        
+        # Check key Amazon elements
+        elements_found = {}
+        
+        # Title
+        product_title = soup.find("span", {"id": "productTitle"})
+        elements_found["productTitle"] = bool(product_title)
+        if product_title:
+            debug_info["steps"].append(f"✅ productTitle found: {product_title.get_text(strip=True)[:80]}")
+        else:
+            debug_info["steps"].append("❌ productTitle NOT found")
+            
+        # Description/Bullets
+        feature_bullets = soup.find("div", {"id": "feature-bullets"})
+        elements_found["feature-bullets"] = bool(feature_bullets)
+        if feature_bullets:
+            bullets = feature_bullets.find_all("li")
+            debug_info["steps"].append(f"✅ feature-bullets found: {len(bullets)} bullets")
+        else:
+            debug_info["steps"].append("❌ feature-bullets NOT found")
+            
+        # Price
+        price_whole = soup.find("span", {"class": "a-price-whole"})
+        elements_found["a-price-whole"] = bool(price_whole)
+        if price_whole:
+            debug_info["steps"].append(f"✅ a-price-whole found: {price_whole.get_text(strip=True)}")
+        else:
+            debug_info["steps"].append("❌ a-price-whole NOT found")
+            # Check alternative
+            price_block = soup.find("span", {"id": "priceblock_ourprice"})
+            if price_block:
+                debug_info["steps"].append(f"✅ priceblock_ourprice found: {price_block.get_text(strip=True)}")
+            else:
+                debug_info["steps"].append("❌ priceblock_ourprice NOT found")
+                
+        # Image
+        landing_image = soup.find("img", {"id": "landingImage"})
+        elements_found["landingImage"] = bool(landing_image)
+        if landing_image and landing_image.get("src"):
+            debug_info["steps"].append(f"✅ landingImage found: {landing_image['src'][:80]}...")
+        else:
+            debug_info["steps"].append("❌ landingImage NOT found")
+            
+        debug_info["elements_found"] = elements_found
+        
+        # Now run the actual scraper
+        result = scrape_product_url(url)
+        debug_info["scraper_result"] = result
+        debug_info["steps"].append("✅ Ran scrape_product_url()")
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        debug_info["error"] = str(e)
+        debug_info["steps"].append(f"❌ Error: {str(e)}")
+        return jsonify(debug_info), 500
+
 @vendor_bp.route('/products/add', methods=['POST'])
 @jwt_required()
 def add_product():
