@@ -766,12 +766,7 @@ def scrape_product_debug():
     if not url:
         return jsonify({"message": "URL is required"}), 400
     
-    # Import required modules
     import os
-    import requests
-    from bs4 import BeautifulSoup
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     debug_info = {
         "url": url,
@@ -780,73 +775,27 @@ def scrape_product_debug():
     }
     
     try:
-        # Fetch HTML
-        from app.utils.scraper import _fetch_page_content
-        html_text = _fetch_page_content(url)
-        debug_info["html_length"] = len(html_text)
-        debug_info["steps"].append(f"✅ Fetched HTML: {len(html_text)} chars")
-        
-        # Parse with BeautifulSoup
-        soup = BeautifulSoup(html_text, "html.parser")
-        debug_info["steps"].append("✅ Parsed with BeautifulSoup")
-        
-        # Check for bot detection
-        if "captcha" in html_text.lower() or "robot" in html_text.lower():
-            debug_info["steps"].append("⚠️ WARNING: Possible captcha/bot detection")
-        
-        # Check key Amazon elements
-        elements_found = {}
-        
-        # Title
-        product_title = soup.find("span", {"id": "productTitle"})
-        elements_found["productTitle"] = bool(product_title)
-        if product_title:
-            debug_info["steps"].append(f"✅ productTitle found: {product_title.get_text(strip=True)[:80]}")
-        else:
-            debug_info["steps"].append("❌ productTitle NOT found")
-            
-        # Description/Bullets
-        feature_bullets = soup.find("div", {"id": "feature-bullets"})
-        elements_found["feature-bullets"] = bool(feature_bullets)
-        if feature_bullets:
-            bullets = feature_bullets.find_all("li")
-            debug_info["steps"].append(f"✅ feature-bullets found: {len(bullets)} bullets")
-        else:
-            debug_info["steps"].append("❌ feature-bullets NOT found")
-            
-        # Price
-        price_whole = soup.find("span", {"class": "a-price-whole"})
-        elements_found["a-price-whole"] = bool(price_whole)
-        if price_whole:
-            debug_info["steps"].append(f"✅ a-price-whole found: {price_whole.get_text(strip=True)}")
-        else:
-            debug_info["steps"].append("❌ a-price-whole NOT found")
-            # Check alternative
-            price_block = soup.find("span", {"id": "priceblock_ourprice"})
-            if price_block:
-                debug_info["steps"].append(f"✅ priceblock_ourprice found: {price_block.get_text(strip=True)}")
-            else:
-                debug_info["steps"].append("❌ priceblock_ourprice NOT found")
-                
-        # Image
-        landing_image = soup.find("img", {"id": "landingImage"})
-        elements_found["landingImage"] = bool(landing_image)
-        if landing_image and landing_image.get("src"):
-            debug_info["steps"].append(f"✅ landingImage found: {landing_image['src'][:80]}...")
-        else:
-            debug_info["steps"].append("❌ landingImage NOT found")
-            
-        debug_info["elements_found"] = elements_found
-        
-        # Now run the actual scraper
+        # Just run the regular scraper and return detailed info
         result = scrape_product_url(url)
-        debug_info["scraper_result"] = result
-        debug_info["steps"].append("✅ Ran scrape_product_url()")
+        
+        if result.get("success"):
+            data = result.get("data", {})
+            debug_info["steps"].append("✅ Scraping completed successfully")
+            debug_info["steps"].append(f"Name: {'✅ Found' if data.get('name') else '❌ Empty'}")
+            debug_info["steps"].append(f"Description: {'✅ Found (' + str(len(data.get('description', ''))) + ' chars)' if data.get('description') else '❌ Empty'}")
+            debug_info["steps"].append(f"Price: {'✅ Found ($' + str(data.get('price', '0')) + ')' if data.get('price') and data.get('price') != '0' else '❌ Not found (0)'}")
+            debug_info["steps"].append(f"Image: {'✅ Found' if data.get('image_url') else '❌ Empty'}")
+            debug_info["scraper_result"] = result
+        else:
+            debug_info["steps"].append(f"❌ Scraping failed: {result.get('message')}")
+            debug_info["error"] = result.get("message")
         
         return jsonify(debug_info), 200
         
     except Exception as e:
+        import traceback
         debug_info["error"] = str(e)
+        debug_info["traceback"] = traceback.format_exc()
         debug_info["steps"].append(f"❌ Error: {str(e)}")
         return jsonify(debug_info), 500
 
