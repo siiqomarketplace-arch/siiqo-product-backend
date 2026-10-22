@@ -68,9 +68,17 @@ def scrape_product_url(url):
         soup = BeautifulSoup(html_text, "html.parser")
         import re
         
+        # Detect which site we're scraping
+        is_amazon = "amazon." in url.lower()
+        is_jumia = "jumia." in url.lower()
+        is_konga = "konga.com" in url.lower()
+        is_ebay = "ebay." in url.lower()
+        is_aliexpress = "aliexpress." in url.lower()
+        is_shopify = "myshopify.com" in url.lower() or soup.find("meta", attrs={"name": "shopify-checkout-api-token"})
+        
         # ==================== EXTRACT NAME ====================
         name = ""
-        # Try OpenGraph title first
+        # Try OpenGraph title first (works for most sites)
         og_title = soup.find("meta", property="og:title")
         if og_title and og_title.get("content"):
             name = og_title["content"]
@@ -79,23 +87,36 @@ def scrape_product_url(url):
             twitter_title = soup.find("meta", attrs={"name": "twitter:title"})
             if twitter_title and twitter_title.get("content"):
                 name = twitter_title["content"]
-        # Try Amazon-specific: span with id="productTitle"
-        if not name and "amazon" in url.lower():
+        
+        # Site-specific title extraction
+        if not name and is_amazon:
             product_title = soup.find("span", {"id": "productTitle"})
             if product_title:
                 name = product_title.get_text(strip=True)
-        # Try h1 tag as fallback
+        if not name and is_jumia:
+            h1_title = soup.find("h1", class_=re.compile(".*-title.*|.*heading.*", re.I))
+            if h1_title:
+                name = h1_title.get_text(strip=True)
+        if not name and is_konga:
+            product_name = soup.find("h1", class_=re.compile(".*product.*name.*|.*title.*", re.I))
+            if product_name:
+                name = product_name.get_text(strip=True)
+        if not name and is_ebay:
+            ebay_title = soup.find("h1", class_="x-item-title__mainTitle")
+            if ebay_title:
+                name = ebay_title.get_text(strip=True)
+        
+        # Generic fallbacks
         if not name:
             h1 = soup.find("h1")
             if h1:
                 name = h1.get_text(strip=True)
-        # Last resort: page title
         if not name:
             title_tag = soup.find("title")
             if title_tag:
                 name = title_tag.text.strip()
-                # Clean up Amazon-style titles (remove " : Amazon.com" suffix)
-                name = re.sub(r'\s*[:\|]\s*Amazon.*$', '', name, flags=re.IGNORECASE)
+                # Clean up site suffixes
+                name = re.sub(r'\s*[:\|]\s*(Amazon|Jumia|Konga|eBay|AliExpress|Shopify).*$', '', name, flags=re.IGNORECASE)
                 
         # ==================== EXTRACT DESCRIPTION ====================
         description = ""
@@ -113,22 +134,40 @@ def scrape_product_url(url):
             meta_desc = soup.find("meta", attrs={"name": "description"})
             if meta_desc and meta_desc.get("content"):
                 description = meta_desc["content"]
-        # Try Amazon feature bullets
-        if not description and "amazon" in url.lower():
+        
+        # Site-specific description extraction
+        if not description and is_amazon:
             feature_bullets = soup.find("div", {"id": "feature-bullets"})
             if feature_bullets:
                 bullets = feature_bullets.find_all("li")
                 if bullets:
-                    description = " ".join([li.get_text(strip=True) for li in bullets[:5]])  # First 5 bullets
-        # Try product description div
+                    description = " ".join([li.get_text(strip=True) for li in bullets[:5]])
+            if not description:
+                prod_desc = soup.find("div", {"id": "productDescription"})
+                if prod_desc:
+                    description = prod_desc.get_text(strip=True)[:500]
+        
+        if not description and is_jumia:
+            desc_div = soup.find("div", class_=re.compile(".*description.*|.*details.*", re.I))
+            if desc_div:
+                description = desc_div.get_text(strip=True)[:500]
+        
+        if not description and is_konga:
+            desc_content = soup.find("div", class_=re.compile(".*product.*description.*|.*details.*", re.I))
+            if desc_content:
+                description = desc_content.get_text(strip=True)[:500]
+        
+        # Generic: look for any div/section with "description" in class/id
         if not description:
-            prod_desc = soup.find("div", {"id": "productDescription"})
-            if prod_desc:
-                description = prod_desc.get_text(strip=True)[:500]  # First 500 chars
+            desc_elem = soup.find(["div", "section"], class_=re.compile("description|details|about", re.I))
+            if not desc_elem:
+                desc_elem = soup.find(["div", "section"], id=re.compile("description|details|about", re.I))
+            if desc_elem:
+                description = desc_elem.get_text(strip=True)[:500]
                 
         # ==================== EXTRACT IMAGE ====================
         image_url = ""
-        # Try OpenGraph image
+        # Try OpenGraph image (best for sharing)
         og_image = soup.find("meta", property="og:image")
         if og_image and og_image.get("content"):
             image_url = og_image["content"]
@@ -137,18 +176,34 @@ def scrape_product_url(url):
             twitter_image = soup.find("meta", attrs={"name": "twitter:image"})
             if twitter_image and twitter_image.get("content"):
                 image_url = twitter_image["content"]
-        # Try Amazon main image
-        if not image_url and "amazon" in url.lower():
+        
+        # Site-specific image extraction
+        if not image_url and is_amazon:
             main_image = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"data-a-image-name": "landingImage"})
             if main_image and main_image.get("src"):
                 image_url = main_image["src"]
-            # Try another Amazon pattern
             if not image_url:
                 img_block = soup.find("div", {"id": "imgTagWrapperId"})
                 if img_block:
                     img = img_block.find("img")
                     if img and img.get("src"):
                         image_url = img["src"]
+        
+        if not image_url and is_jumia:
+            jumia_img = soup.find("img", class_=re.compile(".*main.*image.*|.*product.*image.*", re.I))
+            if jumia_img and jumia_img.get("src"):
+                image_url = jumia_img["src"]
+        
+        if not image_url and is_konga:
+            konga_img = soup.find("img", class_=re.compile(".*product.*image.*|.*main.*photo.*", re.I))
+            if konga_img and konga_img.get("src"):
+                image_url = konga_img["src"]
+        
+        # Generic: find first product/main image
+        if not image_url:
+            img = soup.find("img", class_=re.compile("product|main|primary|featured", re.I))
+            if img and img.get("src"):
+                image_url = img["src"]
             
         # ==================== EXTRACT PRICE ====================
         price = "0"
@@ -156,9 +211,9 @@ def scrape_product_url(url):
         og_price = soup.find("meta", property="og:price:amount") or soup.find("meta", attrs={"property": "product:price:amount"})
         if og_price and og_price.get("content"):
             price = og_price["content"].replace(",", "").strip()
-        # Try Amazon-specific price elements
-        if price == "0" and "amazon" in url.lower():
-            # Try price span
+        
+        # Site-specific price extraction
+        if price == "0" and is_amazon:
             price_span = soup.find("span", {"class": "a-price-whole"})
             if price_span:
                 price_text = price_span.get_text(strip=True).replace(",", "").replace(".", "")
@@ -169,7 +224,6 @@ def scrape_product_url(url):
                     price = str(float(price_text))
                 except:
                     pass
-            # Try another Amazon pattern
             if price == "0":
                 price_elem = soup.find("span", {"id": "priceblock_ourprice"}) or soup.find("span", {"id": "priceblock_dealprice"})
                 if price_elem:
@@ -177,7 +231,16 @@ def scrape_product_url(url):
                     match = re.search(r'([\d,]+\.?\d*)', price_text)
                     if match:
                         price = match.group(1).replace(',', '')
-        # General price search with currency symbols
+        
+        if price == "0" and (is_jumia or is_konga):
+            price_elem = soup.find(class_=re.compile(".*price.*", re.I))
+            if price_elem:
+                price_text = price_elem.get_text(strip=True)
+                match = re.search(r'([\d,]+(?:\.\d{1,2})?)', price_text)
+                if match:
+                    price = match.group(1).replace(',', '')
+        
+        # Generic: search for currency symbols
         if price == "0":
             price_tags = soup.find_all(string=lambda text: text and re.search(r'[\$£€₦₵¥₹]', text))
             if price_tags:
