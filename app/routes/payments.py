@@ -791,7 +791,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
                 order.status = 'COMPLETED'
-                if _link: _link.status = 'PAID'
+                if _link and _link.link_type == 'INVOICE':
+                    _link.status = 'PAID'
                 # Write ledger credit BEFORE attempting payout so the balance
                 # is correct even if the payout transfer call fails or is retried
                 from app.routes.escrow import _credit_vendor_ledger
@@ -849,7 +850,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
                 order.status = 'COMPLETED'
-                if _link: _link.status = 'PAID'
+                if _link and _link.link_type == 'INVOICE':
+                    _link.status = 'PAID'
                 # Write ledger credit BEFORE attempting payout
                 from app.routes.escrow import _credit_vendor_ledger
                 _credit_vendor_ledger(
@@ -1668,7 +1670,7 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                     escrow.status = EscrowStatus.RELEASED
                     escrow.released_at = _utcnow()
                     order.status = "COMPLETED"
-                    if link:
+                    if link and link.link_type == 'INVOICE':
                         link.status = "PAID"
 
                     _credit_vendor_ledger(

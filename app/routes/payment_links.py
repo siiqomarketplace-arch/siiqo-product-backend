@@ -83,12 +83,17 @@ def create_payment_link():
     if not slug or slug.startswith('-'):
         slug = f"pay-{uuid.uuid4().hex[:10]}"
 
+    currency = (data.get('currency') or 'NGN').strip().upper()
+    if currency not in ('NGN', 'USD', 'GBP', 'EUR', 'CAD', 'JPY', 'CNY'):
+        currency = 'NGN'
+
     new_link = PaymentLink(
         vendor_id=vendor.id,
         link_type=link_type,
         title=title,
         description=description,
         amount=amount,
+        currency=currency,
         buyer_email=buyer_email if buyer_email else None,
         status='ACTIVE',
         slug=slug,
@@ -322,12 +327,37 @@ def pay_payment_link(link_id):
                 last_name=last_name,
             )
 
+            link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
+
+            # FX cross rates to USD
+            FX_TO_USD = {
+                'USD': Decimal('1.00'),
+                'GBP': Decimal('1.30'),
+                'EUR': Decimal('1.08'),
+                'CAD': Decimal('0.73'),
+                'JPY': Decimal('0.0065'),
+                'CNY': Decimal('0.14'),
+                'NGN': Decimal('1.00'),
+            }
+
             # 4. Get a firm exchange rate
             rate_side = "SELL" if daya_type == 'crypto_direct' else "BUY"
             rate_data = _daya.get_rate(asset="USDT", side=rate_side)
             rate = float(rate_data.get("rate", 1500))
             rate_id = rate_data.get("rate_id", "")
             rate_expires_at = rate_data.get("expires_at")
+
+            # Calculate accurate converted amounts
+            if link_currency == 'NGN':
+                calc_amount_ngn = int(round(float(amount)))
+                calc_amount_usd = round(float(amount) / rate, 2)
+            else:
+                rate_dec = Decimal(str(rate))
+                fx_factor = FX_TO_USD.get(link_currency, Decimal('1.00'))
+                amount_usd_dec = amount * fx_factor
+                amount_ngn_dec = amount_usd_dec * rate_dec
+                calc_amount_ngn = int(round(float(amount_ngn_dec)))
+                calc_amount_usd = round(float(amount_usd_dec), 2)
 
             idempotency_key = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}"
 
@@ -357,7 +387,7 @@ def pay_payment_link(link_id):
                 try:
                     fa = _daya.create_ngn_funding_account(
                         customer_id=str(customer_id),
-                        amount_ngn=int(round(float(amount))),
+                        amount_ngn=calc_amount_ngn,
                         rate_id=rate_id,
                         idempotency_key=idempotency_key,
                         developer_fee_pct="0",
@@ -367,7 +397,7 @@ def pay_payment_link(link_id):
                     time.sleep(0.5)
                     fa = _daya.create_ngn_funding_account(
                         customer_id=str(customer_id),
-                        amount_ngn=int(round(float(amount))),
+                        amount_ngn=calc_amount_ngn,
                         rate_id=rate_id,
                         idempotency_key=f"{idempotency_key}-r2",
                         developer_fee_pct="0",
@@ -379,6 +409,7 @@ def pay_payment_link(link_id):
                 transaction_number=f"ESC-{uuid.uuid4().hex[:12].upper()}",
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(amount),
+                currency=link_currency,
                 fee_percent=fee_percent,
                 fee_amount=float(fee_amount),
             )
@@ -386,7 +417,7 @@ def pay_payment_link(link_id):
 
             instructions = fa.get("instructions", [{}])[0]
             daya_amount  = fa.get("amount")
-            final_amount_ngn = float(daya_amount) if (daya_type == 'ngn_onramp' and daya_amount) else float(amount)
+            final_amount_ngn = float(daya_amount) if (daya_type == 'ngn_onramp' and daya_amount) else float(calc_amount_ngn)
 
             from app.models.withdrawal import DayaPayment
             from datetime import datetime as _dt_parse
@@ -428,20 +459,23 @@ def pay_payment_link(link_id):
                         first_name=first_name,
                         order_id=new_order.id,
                         vendor_name=link.vendor.storefront.store_name if link.vendor and link.vendor.storefront else "Vendor",
-                        amount=f"₦{float(amount):,.2f}",
+                        amount=f"{link_currency} {float(amount):,.2f}",
                         claim_url=f"{site_url}/auth/signup?email={urllib.parse.quote(buyer_email)}&redirect=/user-profile",
                         otp=order_token[:6].upper(),
                     )
                 except Exception as email_err:
                     logging.warning(f"[PAYLINK] Guest receipt email failed for {buyer_email}: {email_err}")
 
-            amount_usd = round(final_amount_ngn / rate, 6)
+            amount_usd = calc_amount_usd
             conf_url = f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}"
             return jsonify({
                 "success": True,
                 "payment_method": payment_method,
                 "order_id": new_order.id,
                 "amount": str(amount),
+                "currency": link_currency,
+                "amount_ngn": final_amount_ngn,
+                "amount_usd": amount_usd,
                 "existing_account": existing_account,
                 "confirmation_url": conf_url,
                 "buyer_phone": buyer_phone,
@@ -479,6 +513,8 @@ def pay_payment_link(link_id):
                    VendorBankAccount.query.filter_by(vendor_id=link.vendor_id).first()
         flw_subaccount_id = bank_acc.flw_subaccount_id if bank_acc else None
 
+        link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
+
         flw_res = _flw.initiate_payment(
             order_id=str(new_order.id),
             listed_price_ngn=float(amount),
@@ -489,7 +525,8 @@ def pay_payment_link(link_id):
             flw_subaccount_id=flw_subaccount_id,
             tx_ref=flw_txn_ref,
             redirect_url=return_url,
-            is_international=False,
+            is_international=(link_currency != 'NGN'),
+            currency=link_currency,
             narration=f"Payment for {link.title or 'Siiqo Item'}",
         )
 
@@ -505,6 +542,7 @@ def pay_payment_link(link_id):
             transaction_number=flw_txn_ref,
             status=EscrowStatus.PENDING_PAYMENT,
             amount=float(amount),
+            currency=link_currency,
             fee_percent=fee_percent,
             fee_amount=float(fee_amount),
             payment_link=flw_res["payment_link"],
@@ -520,6 +558,7 @@ def pay_payment_link(link_id):
             "paymentLink": flw_res.get("payment_link"),
             "transactionNumber": flw_txn_ref,
             "amount": str(flw_res.get("buyer_total", amount)),
+            "currency": link_currency,
             "status": EscrowStatus.PENDING_PAYMENT,
             "order_id": new_order.id,
             "existing_account": existing_account,

@@ -1082,7 +1082,7 @@ def paystack_webhook():
                                 pl_escrow.status = _ES.RELEASED
                                 pl_escrow.released_at = _utcnow()
                                 pl_order.status = 'COMPLETED'
-                                if link:
+                                if link and link.link_type == 'INVOICE':
                                     link.status = 'PAID'
                                 from app.routes.escrow import _credit_vendor_ledger
                                 _credit_vendor_ledger(

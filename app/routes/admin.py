@@ -1463,7 +1463,7 @@ def admin_fix_crypto_order(order_id):
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = escrow.released_at or _utcnow()
             order.status = 'COMPLETED'
-            if _link:
+            if _link and _link.link_type == 'INVOICE':
                 _link.status = 'PAID'
             _credit_vendor_ledger(
                 vendor_id=order.vendor_id,

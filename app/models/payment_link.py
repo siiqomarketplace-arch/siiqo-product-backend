@@ -10,6 +10,7 @@ class PaymentLink(db.Model):
     title = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text, nullable=True)
     amount = db.Column(db.Numeric(10, 2), nullable=True) # Null means open amount (buyer inputs amount)
+    currency = db.Column(db.String(10), default='NGN', nullable=False) # NGN, USD, GBP, EUR, CAD
     buyer_email = db.Column(db.String(120), nullable=True) # Pre-fill email for Invoice links
     status = db.Column(db.String(20), default='ACTIVE', nullable=False) # ACTIVE, PAID, EXPIRED
     slug = db.Column(db.String(100), unique=True, nullable=False)
@@ -30,6 +31,7 @@ class PaymentLink(db.Model):
             "title": self.title,
             "description": self.description,
             "amount": str(self.amount) if self.amount else None,
+            "currency": self.currency or "NGN",
             "buyer_email": self.buyer_email,
             "status": self.status,
             "slug": self.slug,

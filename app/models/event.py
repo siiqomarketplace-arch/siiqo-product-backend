@@ -228,6 +228,7 @@ class TicketType(db.Model):
     # Pricing
     is_free = db.Column(db.Boolean, default=False)
     price = db.Column(db.Numeric(10, 2), default=0.00)
+    currency = db.Column(db.String(10), default='NGN', nullable=False) # NGN, USD, GBP, EUR, CAD
     
     # Availability
     quantity_available = db.Column(db.Integer, nullable=True)  # NULL = unlimited
@@ -290,6 +291,7 @@ class TicketType(db.Model):
             'description': self.description,
             'is_free': self.is_free,
             'price': float(self.price) if self.price else 0.00,
+            'currency': getattr(self, 'currency', None) or 'NGN',
             'quantity_available': self.quantity_available,
             'quantity_sold': self.quantity_sold,
             'tickets_remaining': self.tickets_remaining,

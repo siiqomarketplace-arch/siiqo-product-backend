@@ -787,7 +787,7 @@ def escrow_status():
                                 escrow.status = EscrowStatus.RELEASED
                                 escrow.released_at = _utcnow()
                                 escrow.order.status = 'COMPLETED'
-                                if link:
+                                if link and link.link_type == 'INVOICE':
                                     link.status = 'PAID'
                                 _credit_vendor_ledger(
                                     vendor_id=escrow.order.vendor_id,

@@ -83,9 +83,13 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_email_sent BOOLEAN DEFAULT FALSE",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
-                # ── Payment link product type & digital file ─────────────────────
+                # ── Payment link product type, digital file & currency ──────────
                 "ALTER TABLE payment_links ADD COLUMN IF NOT EXISTS product_type VARCHAR(20) DEFAULT 'service'",
                 "ALTER TABLE payment_links ADD COLUMN IF NOT EXISTS file_url VARCHAR(500)",
+                "ALTER TABLE payment_links ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'NGN'",
+                # ── Multi-currency support for products & event tickets ──────────
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'NGN'",
+                "ALTER TABLE ticket_types ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'NGN'",
                 # ── Invoice standalone billing columns ───────────────────────────
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255)",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255)",

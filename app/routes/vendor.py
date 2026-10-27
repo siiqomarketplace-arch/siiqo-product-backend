@@ -913,6 +913,7 @@ def add_product():
         name=name,
         description=data.get('description', ''),
         price=price,
+        currency=(data.get('currency') or 'NGN').strip().upper() or 'NGN',
         stock_quantity=stock_qty,
         category_id=category_id,
         condition=data.get('condition') or None,
@@ -1087,6 +1088,9 @@ def edit_product(product_id):
             product.price = float(data.get('price') or data.get('price-text'))
         except (ValueError, TypeError):
             pass
+
+    if 'currency' in data and data['currency']:
+        product.currency = data['currency'].strip().upper()
 
     if product.price == 0 or str(data.get('is_free')).lower() in ('true', '1', 'yes'):
         product.is_free = True

@@ -560,12 +560,17 @@ def create_ticket_type(event_id):
             return jsonify({'message': 'Paid tickets must have price > 0'}), 400
         
         # Create ticket type
+        currency = (data.get('currency') or 'NGN').strip().upper()
+        if currency not in ('NGN', 'USD', 'GBP', 'EUR', 'CAD', 'JPY', 'CNY'):
+            currency = 'NGN'
+
         ticket_type = TicketType(
             event_id=event.id,
             name=data['name'],
             description=data.get('description'),
             is_free=is_free,
             price=0 if is_free else price,
+            currency=currency,
             quantity_available=data.get('quantity_available'),
             min_per_order=data.get('min_per_order', 1),
             max_per_order=data.get('max_per_order', 10),
@@ -623,7 +628,7 @@ def update_ticket_type(event_id, ticket_type_id):
         
         # Update fields
         updatable_fields = [
-            'name', 'description', 'is_free', 'price', 'quantity_available',
+            'name', 'description', 'is_free', 'price', 'currency', 'quantity_available',
             'min_per_order', 'max_per_order', 'is_active', 'benefits'
         ]
         

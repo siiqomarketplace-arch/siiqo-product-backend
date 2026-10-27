@@ -46,6 +46,7 @@ class Product(db.Model):
     name = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=False)
     price = db.Column(db.Numeric(10, 2), nullable=False)
+    currency = db.Column(db.String(10), default='NGN', nullable=False) # NGN, USD, GBP, EUR, CAD
     stock_quantity = db.Column(db.Integer, default=0)
     
     images = db.Column(db.JSON, default=list) # Array of image URLs
