@@ -737,7 +737,7 @@ def escrow_status():
                 logging.warning(f"[ESCROW STATUS] Flutterwave proactive verification failed: {_flw_err}")
         elif escrow.order and (escrow.order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA'):
             try:
-                from app.models.daya_payment import DayaPayment
+                from app.models.withdrawal import DayaPayment
                 from app.routes.payments import _handle_crypto_payment_confirmed, _key_configured
                 from app.services import daya_service
                 dp = DayaPayment.query.filter_by(order_id=escrow.order.id).first()
@@ -748,14 +748,13 @@ def escrow_status():
                         if dep_fa == dp.daya_funding_account_id:
                             new_status = daya_service._map_daya_status(deposit.get("status", ""))
                             dp.daya_deposit_id = deposit.get("id")
-                            if new_status != dp.status:
-                                dp.status = new_status
+                            if new_status in ("COMPLETED", "RECEIVED"):
+                                dp.status = "COMPLETED"
                                 dp.updated_at = _utcnow()
                                 db.session.commit()
-                                if new_status == "COMPLETED":
-                                    _handle_crypto_payment_confirmed(escrow.order.id, dp)
-                                    db.session.refresh(escrow)
-                elif dp and dp.status == "COMPLETED":
+                                _handle_crypto_payment_confirmed(escrow.order.id, dp)
+                                db.session.refresh(escrow)
+                elif dp and dp.status in ("COMPLETED", "RECEIVED"):
                     _handle_crypto_payment_confirmed(escrow.order.id, dp)
                     db.session.refresh(escrow)
             except Exception as _daya_err:

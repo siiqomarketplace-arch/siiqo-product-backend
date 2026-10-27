@@ -397,27 +397,18 @@ def daya_status():
             "paidAt":  None,
         }), 200
 
-    if dp.rate_expires_at and dp.rate_expires_at < _utcnow() and dp.status == "PENDING":
-        dp.status     = "EXPIRED"
-        dp.updated_at = _utcnow()
-        db.session.commit()
-        return jsonify({"orderId": str(order_id), "status": "EXPIRED"}), 200
-
+    # ── LIVE DAYA GATEWAY CHECK (before rate-expiry gate) ────────────────────
+    # CRITICAL: We must check with Daya FIRST before evaluating rate expiry.
+    # A buyer may have sent the bank transfer near or after the quote window
+    # but Daya still received the funds. If we expire first, we lose the payment.
+    # NGN virtual accounts are single-use per order — no cross-order contamination risk.
     if dp.daya_funding_account_id and _key_configured():
         try:
             deposit = daya_service.get_deposit_by_funding_account(dp.daya_funding_account_id)
             if deposit:
                 # ── FUNDING ACCOUNT OWNERSHIP GUARD ───────────────────────────
-                # A deposit is only valid for THIS order if the deposit's
-                # funding_account_id exactly matches the DayaPayment row's
-                # daya_funding_account_id. This is a hard, exact match — it
-                # prevents a deposit created for order A from confirming order B
-                # even when both orders were created within the same rate window.
-                #
-                # Additionally we require the deposit was created AFTER this
-                # payment session started (with a 60-second grace for clock skew)
-                # to protect against stale deposits on reused PERMANENT crypto
-                # funding accounts.
+                # The deposit's funding_account_id must exactly match this order's
+                # daya_funding_account_id — hard guard against cross-order confusion.
                 deposit_funding_account_id = (
                     deposit.get("funding_account_id")
                     or deposit.get("fundingAccountId")
@@ -435,18 +426,24 @@ def daya_status():
                         deposit_funding_account_id, dp.daya_funding_account_id,
                     )
                 else:
-                    # Funding account matches — also verify the deposit is fresh
-                    # (guards against old COMPLETED deposits on PERMANENT crypto accounts)
+                    # ── FRESHNESS CHECK ───────────────────────────────────────
+                    # For NGN virtual accounts (ngn_onramp / bank_transfer), the
+                    # virtual account is single-use and uniquely tied to this order,
+                    # so ANY deposit to it is valid — no freshness comparison needed.
+                    # For crypto permanent addresses we apply a 60-second grace window
+                    # using timezone-safe comparison (astimezone, not replace).
                     deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
-                    deposit_is_fresh = True  # default trust when no timestamp available
-                    if deposit_created_raw and dp.created_at:
+                    is_ngn_virtual_account = dp.payment_type in ("ngn_onramp", "bank_transfer")
+                    deposit_is_fresh = True  # default: trust account match
+
+                    if not is_ngn_virtual_account and deposit_created_raw and dp.created_at:
                         try:
                             from datetime import datetime as _dt2, timedelta
                             dep_ts = _dt2.fromisoformat(
                                 deposit_created_raw.replace("Z", "+00:00")
                             )
-                            # 60-second grace period for clock skew
-                            cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=60)
+                            # Use astimezone (not replace) — preserves WAT→UTC conversion
+                            cutoff = dp.created_at.astimezone(timezone.utc) - timedelta(seconds=60)
                             deposit_is_fresh = dep_ts >= cutoff
                         except Exception:
                             deposit_is_fresh = True  # can't parse — trust the account match
@@ -465,10 +462,21 @@ def daya_status():
                             dp.status     = new_status
                             dp.updated_at = _utcnow()
                             db.session.commit()
-                            if new_status == "COMPLETED":
-                                _handle_crypto_payment_confirmed(order_id, dp)
+                        # Confirm on COMPLETED or RECEIVED — Daya marks NGN bank
+                        # transfers as RECEIVED when funds land, not COMPLETED.
+                        if new_status in ("COMPLETED", "RECEIVED") and dp.status not in ("PAID",):
+                            _handle_crypto_payment_confirmed(order_id, dp)
         except Exception as exc:
             logger.warning("[DAYA STATUS] Poll failed for order %s: %s", order_id, exc)
+
+    # ── RATE EXPIRY GATE (only fires if Daya did NOT confirm funds above) ────
+    # Re-fetch dp to get the status that may have been updated by the Daya check above.
+    db.session.refresh(dp)
+    if dp.rate_expires_at and dp.rate_expires_at < _utcnow() and dp.status == "PENDING":
+        dp.status     = "EXPIRED"
+        dp.updated_at = _utcnow()
+        db.session.commit()
+        return jsonify({"orderId": str(order_id), "status": "EXPIRED"}), 200
 
     if dp.status == "COMPLETED":
         # Self-healing: If payment already completed (e.g. from webhook) but order
@@ -606,7 +614,11 @@ def daya_webhook():
     logger.info("[DAYA WEBHOOK] event=%s deposit_id=%s status=%s",
                 event_type, deposit.get("id"), deposit.get("status"))
 
-    if event_type == "deposit.completed":
+    # Handle deposit.completed, deposit.received, and deposit.processing
+    # Daya sends deposit.received for NGN bank transfers when funds arrive;
+    # deposit.completed is sent after internal processing finishes.
+    # We confirm on either to ensure orders reflect immediately.
+    if event_type in ("deposit.completed", "deposit.received", "deposit.processing"):
         funding_account_id = deposit.get("funding_account_id")
         deposit_id         = deposit.get("id")
         deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
@@ -617,24 +629,23 @@ def daya_webhook():
             ).filter(DayaPayment.status.notin_(["COMPLETED", "FAILED"])).first()
 
             if dp:
-                # ── FUNDING ACCOUNT OWNERSHIP GUARD (webhook) ─────────────────
-                # The deposit's funding_account_id already matched dp above via
-                # the query filter. Verify the deposit is fresh relative to this
-                # payment session — protects against stale deposits on PERMANENT
-                # crypto accounts being redelivered by Daya.
-                deposit_is_fresh = True  # default: webhooks come directly from Daya
-                if deposit_created_raw and dp.created_at:
+                # ── FRESHNESS GUARD (webhook) ──────────────────────────────────
+                # NGN virtual accounts are single-use per order — any deposit is
+                # guaranteed to belong to this order. Skip the timestamp check.
+                # For reused permanent crypto addresses, apply timezone-safe cutoff.
+                is_ngn_virtual_account = dp.payment_type in ("ngn_onramp", "bank_transfer")
+                deposit_is_fresh = True  # default: trust direct Daya webhook
+
+                if not is_ngn_virtual_account and deposit_created_raw and dp.created_at:
                     try:
                         from datetime import datetime as _dt2, timedelta
                         dep_ts = _dt2.fromisoformat(
                             deposit_created_raw.replace("Z", "+00:00")
                         )
-                        # 60-second grace period for clock skew
-                        cutoff = dp.created_at.replace(tzinfo=timezone.utc) - timedelta(seconds=60)
+                        # Use astimezone (not replace) — correct WAT→UTC conversion
+                        cutoff = dp.created_at.astimezone(timezone.utc) - timedelta(seconds=60)
                         deposit_is_fresh = dep_ts >= cutoff
                     except Exception:
-                        # Can't parse timestamp — trust the webhook since it came
-                        # directly from Daya and the funding_account_id matched exactly
                         logger.warning(
                             "[DAYA WEBHOOK] Could not parse deposit created_at=%s for order %s. "
                             "Proceeding cautiously.",
