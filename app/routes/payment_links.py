@@ -228,6 +228,7 @@ def pay_payment_link(link_id):
     # Calculate final amount: use link amount, or custom amount if open link
     if link.amount:
         amount = Decimal(str(link.amount))
+        link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
     else:
         custom_amt = data.get('custom_amount')
         if custom_amt is None:
@@ -238,6 +239,12 @@ def pay_payment_link(link_id):
                 return jsonify({"message": "Amount must be greater than zero"}), 400
         except Exception:
             return jsonify({"message": "Invalid amount format"}), 400
+
+        buyer_curr = (data.get('currency') or getattr(link, 'currency', 'NGN') or 'NGN').strip().upper()
+        if buyer_curr in ('NGN', 'USD', 'GBP', 'EUR', 'CAD', 'JPY', 'CNY'):
+            link_currency = buyer_curr
+        else:
+            link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
 
     # Resolve buyer account: if exists, link to it; otherwise leave buyer_id as None (Option A: clean guest checkout)
     from app.models.user import User
