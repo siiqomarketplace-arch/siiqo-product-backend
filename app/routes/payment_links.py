@@ -191,8 +191,15 @@ def pay_payment_link(link_id):
     if not link or link.status == 'EXPIRED':
         return jsonify({"message": "Payment link is inactive or expired."}), 400
 
-    if link.link_type == 'INVOICE' and link.status == 'PAID':
-        return jsonify({"message": "This invoice has already been paid."}), 400
+    if link.link_type == 'INVOICE':
+        if link.status == 'PAID':
+            return jsonify({"message": "This invoice has already been paid."}), 400
+        # Defense-in-depth: Verify if an order for this invoice is already paid/completed
+        existing_paid = Order.query.filter_by(payment_link_id=link.id).filter(Order.status.in_(['PAID', 'COMPLETED'])).first()
+        if existing_paid:
+            link.status = 'PAID'
+            db.session.commit()
+            return jsonify({"message": "This invoice has already been paid."}), 400
 
     data = request.get_json() or {}
     buyer_name = (data.get('buyer_name') or '').strip()
@@ -245,6 +252,20 @@ def pay_payment_link(link_id):
             link_currency = buyer_curr
         else:
             link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
+
+    # ── NON-NGN CURRENCY GUARD (Paystack International Restriction) ───────────
+    # Paystack card payment is only permitted for NGN transactions.
+    # Non-NGN currencies (USD, GBP, EUR, CAD, JPY, CNY) must use Flutterwave (cards/intl)
+    # or Daya (crypto / bank transfer).
+    if link_currency != 'NGN' and payment_method in ('card', 'paystack'):
+        return jsonify({
+            "message": (
+                f"Card payment via Paystack is only available for Naira (NGN). "
+                f"Please choose Flutterwave or Daya to complete your {link_currency} payment."
+            ),
+            "code": "PAYSTACK_NON_NGN_BLOCKED",
+        }), 400
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Resolve buyer account: if exists, link to it; otherwise leave buyer_id as None (Option A: clean guest checkout)
     from app.models.user import User
@@ -333,8 +354,6 @@ def pay_payment_link(link_id):
                 first_name=first_name,
                 last_name=last_name,
             )
-
-            link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
 
             # FX cross rates to USD
             FX_TO_USD = {
@@ -520,8 +539,6 @@ def pay_payment_link(link_id):
                    VendorBankAccount.query.filter_by(vendor_id=link.vendor_id).first()
         flw_subaccount_id = bank_acc.flw_subaccount_id if bank_acc else None
 
-        link_currency = (getattr(link, 'currency', 'NGN') or 'NGN').upper()
-
         flw_res = _flw.initiate_payment(
             order_id=str(new_order.id),
             listed_price_ngn=float(amount),
@@ -600,6 +617,7 @@ def pay_payment_link(link_id):
             transaction_number=result['transaction_number'],
             status=EscrowStatus.PENDING_PAYMENT,
             amount=float(amount),
+            currency=link_currency,
             fee_percent=fee_percent,
             fee_amount=float(fee_amount),
             payment_link=result['payment_link'],
