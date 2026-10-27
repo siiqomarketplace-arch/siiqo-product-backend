@@ -854,6 +854,32 @@ def _paystack_payout_vendor(order, escrow):
             vendor_id=order.vendor_id
         ).first()
 
+    # Storefront fallback: auto-create VendorBankAccount if vendor configured bank during onboarding
+    if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
+        try:
+            from app.models.user import Storefront
+            sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+            if sf and sf.account_number and sf.bank_code:
+                if not bank_acc:
+                    bank_acc = VendorBankAccount(
+                        vendor_id=order.vendor_id,
+                        bank_name="Bank",
+                        bank_code=sf.bank_code,
+                        account_number=sf.account_number,
+                        account_name=sf.account_name or (order.vendor.full_name if order.vendor else "Vendor"),
+                        is_default=True,
+                    )
+                    db.session.add(bank_acc)
+                else:
+                    bank_acc.bank_code = sf.bank_code
+                    bank_acc.account_number = sf.account_number
+                    if sf.account_name:
+                        bank_acc.account_name = sf.account_name
+                db.session.commit()
+                logging.info(f"[PAYSTACK FALLBACK] Synced bank account from storefront for vendor {order.vendor_id}")
+        except Exception as _sf_err:
+            logging.warning(f"[PAYSTACK FALLBACK] Failed to sync bank from storefront: {_sf_err}")
+
     if bank_acc:
         if not bank_acc.recipient_code and bank_acc.account_number and bank_acc.bank_code:
             # Self-healing payout: create Paystack transfer recipient on-the-fly
@@ -895,8 +921,44 @@ def _paystack_payout_vendor(order, escrow):
 
     logging.warning(
         f"[RELEASE] Vendor {order.vendor_id} has no valid bank account or recipient_code. "
-        "Crediting ledger only — no Paystack transfer."
+        "Crediting ledger only — notifying vendor to add bank account."
     )
+    # Notify vendor so money is not stuck silently
+    try:
+        from app.models.communication import Notification
+        from app.models.user import User
+        notif_msg = (
+            f"Your order #{order.id} has been marked complete. "
+            f"To receive your payout of ₦{net_amount:,.2f}, please add your bank account in "
+            "Escrow & Payouts (/vendor/escrow). Contact support@siiqo.com if you need help."
+        )
+        db.session.add(Notification(
+            user_id=order.vendor_id,
+            title="Action Required: Add Bank Account for Payout",
+            message=notif_msg,
+            type="ESCROW",
+            order_id=order.id,
+        ))
+        db.session.commit()
+        vendor_user = getattr(order, 'vendor', None) or db.session.get(User, order.vendor_id)
+        if vendor_user and vendor_user.email:
+            try:
+                from app.utils.email import send_siiqo_email
+                send_siiqo_email(
+                    to_email=vendor_user.email,
+                    subject=f"Action Required: Add bank account to receive payout for Order #{order.id}",
+                    template_name="base_notification",
+                    first_name=vendor_user.first_name or "Vendor",
+                    title="Payout Pending — Add Bank Account",
+                    message=notif_msg,
+                    cta_text="Add Bank Details",
+                    cta_url="https://siiqo.com/vendor/escrow",
+                )
+            except Exception as _em_err:
+                logging.info(f"[EMAIL] Could not send payout bank alert email: {_em_err}")
+    except Exception as _notif_exc:
+        logging.warning(f"[PAYSTACK PAYOUT] Failed to send missing bank notification: {_notif_exc}")
+
     return False
 
 
@@ -913,10 +975,71 @@ def _flutterwave_payout_vendor(order, escrow):
         vendor_id=order.vendor_id
     ).first()
 
+    # Storefront fallback: auto-create VendorBankAccount if vendor configured bank during onboarding
+    if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
+        try:
+            from app.models.user import Storefront
+            sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+            if sf and sf.account_number and sf.bank_code:
+                if not bank_acc:
+                    bank_acc = VendorBankAccount(
+                        vendor_id=order.vendor_id,
+                        bank_name="Bank",
+                        bank_code=sf.bank_code,
+                        account_number=sf.account_number,
+                        account_name=sf.account_name or (order.vendor.full_name if order.vendor else "Vendor"),
+                        is_default=True,
+                    )
+                    db.session.add(bank_acc)
+                else:
+                    bank_acc.bank_code = sf.bank_code
+                    bank_acc.account_number = sf.account_number
+                    if sf.account_name:
+                        bank_acc.account_name = sf.account_name
+                db.session.commit()
+                logging.info(f"[FLW FALLBACK] Synced bank account from storefront for vendor {order.vendor_id}")
+        except Exception as _sf_err:
+            logging.warning(f"[FLW FALLBACK] Failed to sync bank from storefront: {_sf_err}")
+
     if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
         logging.warning(
-            f"[FLW PAYOUT] Vendor {order.vendor_id} has no valid bank details for Order #{order.id}. Skipping transfer."
+            f"[FLW PAYOUT] Vendor {order.vendor_id} has no valid bank details for Order #{order.id}. Skipping transfer and notifying vendor."
         )
+        try:
+            from app.models.communication import Notification
+            from app.models.user import User
+            notif_msg = (
+                f"Your order #{order.id} has been marked complete. "
+                f"To receive your payout of ₦{net_amount:,.2f}, please add your bank account in "
+                "Escrow & Payouts (/vendor/escrow). Contact support@siiqo.com if you need help."
+            )
+            db.session.add(Notification(
+                user_id=order.vendor_id,
+                title="Action Required: Add Bank Account for Payout",
+                message=notif_msg,
+                type="ESCROW",
+                order_id=order.id,
+            ))
+            db.session.commit()
+            vendor_user = getattr(order, 'vendor', None) or db.session.get(User, order.vendor_id)
+            if vendor_user and vendor_user.email:
+                try:
+                    from app.utils.email import send_siiqo_email
+                    send_siiqo_email(
+                        to_email=vendor_user.email,
+                        subject=f"Action Required: Add bank account to receive payout for Order #{order.id}",
+                        template_name="base_notification",
+                        first_name=vendor_user.first_name or "Vendor",
+                        title="Payout Pending — Add Bank Account",
+                        message=notif_msg,
+                        cta_text="Add Bank Details",
+                        cta_url="https://siiqo.com/vendor/escrow",
+                    )
+                except Exception as _em_err:
+                    logging.info(f"[EMAIL] Could not send FLW payout bank alert email: {_em_err}")
+        except Exception as _notif_exc:
+            logging.warning(f"[FLW PAYOUT] Failed to send missing bank notification: {_notif_exc}")
+
         return False
 
     try:
@@ -939,6 +1062,7 @@ def _flutterwave_payout_vendor(order, escrow):
     except Exception as exc:
         logging.error(f"[FLW PAYOUT] Flutterwave transfer error for Order #{order.id}: {exc}", exc_info=True)
         return False
+
 
 
 def execute_order_escrow_release(order, escrow, source="admin"):

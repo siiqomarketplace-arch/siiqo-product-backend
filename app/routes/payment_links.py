@@ -47,6 +47,19 @@ def create_payment_link():
     if not vendor.storefront:
         return jsonify({"message": "Complete vendor onboarding first"}), 403
 
+    # ── PAYOUT ACCOUNT GUARD ──────────────────────────────────────────────────
+    from app.models.withdrawal import VendorBankAccount
+    _has_bank = VendorBankAccount.query.filter_by(vendor_id=vendor.id).first() is not None
+    if not _has_bank and vendor.storefront and vendor.storefront.account_number and vendor.storefront.bank_code:
+        _has_bank = True
+    if not _has_bank:
+        return jsonify({
+            "message": "Please add your bank account details before creating a payment link so you can receive payouts.",
+            "code": "BANK_ACCOUNT_REQUIRED",
+            "redirect_url": "/vendor/escrow",
+        }), 400
+    # ─────────────────────────────────────────────────────────────────────────
+
     data = request.get_json() or {}
     title = (data.get('title') or '').strip()
     description = (data.get('description') or '').strip()

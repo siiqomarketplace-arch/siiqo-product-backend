@@ -832,6 +832,19 @@ def add_product():
             }), 403
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── PAYOUT ACCOUNT GUARD ──────────────────────────────────────────────────
+    from app.models.withdrawal import VendorBankAccount
+    _has_bank = VendorBankAccount.query.filter_by(vendor_id=user.id).first() is not None
+    if not _has_bank and sf and sf.account_number and sf.bank_code:
+        _has_bank = True
+    if not _has_bank:
+        return jsonify({
+            "message": "Please add your bank account details before listing a product so you can receive payouts.",
+            "code": "BANK_ACCOUNT_REQUIRED",
+            "redirect_url": "/vendor/escrow",
+        }), 400
+    # ─────────────────────────────────────────────────────────────────────────
+
     data = request.form if request.form else (request.get_json() or {})
 
     # Accept both 'name' (AddProductModal) and 'product_name' (page.tsx handleSaveProduct)

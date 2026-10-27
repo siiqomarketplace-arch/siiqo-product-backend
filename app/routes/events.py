@@ -219,7 +219,20 @@ def create_event():
         
         if not user or not storefront:
             return jsonify({'message': 'Vendor access required'}), 403
-        
+
+        # ── PAYOUT ACCOUNT GUARD ──────────────────────────────────────────────
+        from app.models.withdrawal import VendorBankAccount
+        _has_bank = VendorBankAccount.query.filter_by(vendor_id=user.id).first() is not None
+        if not _has_bank and storefront and storefront.account_number and storefront.bank_code:
+            _has_bank = True
+        if not _has_bank:
+            return jsonify({
+                'message': 'Please add your bank account details before creating an event so you can receive ticket payouts.',
+                'code': 'BANK_ACCOUNT_REQUIRED',
+                'redirect_url': '/vendor/escrow',
+            }), 400
+        # ─────────────────────────────────────────────────────────────────────
+
         data = request.form.to_dict() if request.form else (request.get_json(silent=True) or {})
         
         # Support aliases for field names sent by frontend

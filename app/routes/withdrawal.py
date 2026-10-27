@@ -73,6 +73,26 @@ def get_bank_accounts():
     """Get vendor's bank accounts"""
     vendor_id = _get_user_id()
     accounts = VendorBankAccount.query.filter_by(vendor_id=vendor_id).all()
+    if not accounts:
+        try:
+            from app.models.user import Storefront, User
+            sf = Storefront.query.filter_by(vendor_id=vendor_id).first()
+            if sf and sf.account_number and sf.bank_code:
+                u = db.session.get(User, vendor_id)
+                new_acc = VendorBankAccount(
+                    vendor_id=vendor_id,
+                    bank_name="Bank",
+                    bank_code=sf.bank_code,
+                    account_number=sf.account_number,
+                    account_name=sf.account_name or (u.full_name if u else "Vendor"),
+                    is_default=True,
+                )
+                db.session.add(new_acc)
+                db.session.commit()
+                accounts = [new_acc]
+        except Exception as _e:
+            logging.warning(f"[BANK ACCOUNTS] Auto-sync from storefront error: {_e}")
+
     return jsonify({
         'status': 'success',
         'accounts': [acc.to_dict() for acc in accounts]
