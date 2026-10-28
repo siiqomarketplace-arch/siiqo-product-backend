@@ -18,6 +18,7 @@ from .grant import Grant
 from .event import Event, TicketType, TicketPurchase, EventReview
 from .fee_sweep import SiiqoFeeSweep
 from .telemetry import PlatformEvent, TrustEvidence
+from .verification import VerificationCase, VerificationCheck, VerificationStatus
 
 __all__ = [
     'User', 'Storefront', 'UserRole',
@@ -41,4 +42,5 @@ __all__ = [
     'Event', 'TicketType', 'TicketPurchase',
     'SiiqoFeeSweep',
     'PlatformEvent', 'TrustEvidence',
+    'VerificationCase', 'VerificationCheck', 'VerificationStatus',
 ]

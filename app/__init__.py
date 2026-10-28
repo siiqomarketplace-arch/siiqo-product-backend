@@ -542,6 +542,7 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.grants_migration import grants_migration_bp
     from app.routes.events import events_bp
     from app.routes.daya_admin import daya_admin_bp
+    from app.routes.verification import verification_bp
 
     app.register_blueprint(auth_bp,         url_prefix='/api/auth')
     app.register_blueprint(public_bp,       url_prefix='/api/marketplace')
@@ -566,6 +567,8 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(grants_migration_bp, url_prefix='/api/admin')
     # Daya admin: live balance + platform fee sweep
     app.register_blueprint(daya_admin_bp,   url_prefix='/api/admin/daya')
+    # Verification v2 (provider-based; "coming soon" until VERIFICATION_V2_ENABLED)
+    app.register_blueprint(verification_bp, url_prefix='/api/verification')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
 
