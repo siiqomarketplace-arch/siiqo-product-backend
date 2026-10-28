@@ -23,8 +23,8 @@ class PaymentLink(db.Model):
     
     vendor = db.relationship('User', foreign_keys=[vendor_id])
     
-    def to_dict(self):
-        return {
+    def to_dict(self, include_file: bool = False):
+        data = {
             "id": self.id,
             "vendor_id": self.vendor_id,
             "link_type": self.link_type,
@@ -36,6 +36,8 @@ class PaymentLink(db.Model):
             "status": self.status,
             "slug": self.slug,
             "product_type": self.product_type or "service",
-            "file_url": self.file_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+        if include_file:
+            data["file_url"] = self.file_url
+        return data

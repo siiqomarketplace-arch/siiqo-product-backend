@@ -68,6 +68,32 @@ def _credit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, desc
     ))
 
 
+def _debit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, description: str):
+    """Write a DEBIT entry to the vendor's ledger when funds are paid out via external gateway/transfer."""
+    from sqlalchemy import func
+    from app.models.finance import Ledger as L
+    existing = L.query.filter_by(vendor_id=vendor_id, reference_id=reference_id, transaction_type='DEBIT').first()
+    if existing:
+        logging.info(f"[LEDGER] Already debited vendor {vendor_id} for ref {reference_id} — skipping duplicate")
+        return
+    credits = db.session.query(func.sum(L.amount)).filter_by(
+        vendor_id=vendor_id, transaction_type='CREDIT'
+    ).scalar() or 0
+    debits = db.session.query(func.sum(L.amount)).filter_by(
+        vendor_id=vendor_id, transaction_type='DEBIT'
+    ).scalar() or 0
+    balance_after = float(credits) - float(debits) - amount
+
+    db.session.add(Ledger(
+        vendor_id=vendor_id,
+        transaction_type='DEBIT',
+        amount=amount,
+        description=description,
+        reference_id=reference_id,
+        balance_after=balance_after,
+    ))
+
+
 from app.services.escrow import get_escrow_provider
 
 
@@ -1082,6 +1108,14 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         db.session.commit()
         return True
 
+    # Critical Guard: Never release funds or dispatch payouts on unpaid orders
+    if escrow.status == EscrowStatus.PENDING_PAYMENT or order.status in ('PENDING', 'CANCELLED'):
+        logging.critical(
+            f"[ESCROW RELEASE REFUSED] Attempted to release unpaid escrow for Order #{order.id} "
+            f"(escrow_status={escrow.status}, order_status={order.status}, source={source})"
+        )
+        return False
+
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
@@ -1109,14 +1143,18 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         or (escrow.transaction_number or '').startswith('FLW-')
     )
 
+    payout_dispatched = False
     if is_flutterwave_order:
         vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
         if not vendor_already_paid_via_split:
-            _flutterwave_payout_vendor(order, escrow)
+            payout_dispatched = _flutterwave_payout_vendor(order, escrow)
+        else:
+            payout_dispatched = True  # Already settled directly to subaccount by FLW
     elif is_daya_order:
         try:
             from app.routes.payments import _payout_vendor_via_daya
             _payout_vendor_via_daya(order, escrow)
+            payout_dispatched = True
         except Exception as _d_err:
             logging.warning(f"[ESCROW RELEASE] Daya payout error for Order #{order.id}: {_d_err}")
     else:
@@ -1136,7 +1174,19 @@ def execute_order_escrow_release(order, escrow, source="admin"):
             logging.warning(f"[ESCROW RELEASE] Subaccount check warning: {_sub_err}")
 
         if not vendor_already_paid_via_split:
-            _paystack_payout_vendor(order, escrow)
+            payout_dispatched = _paystack_payout_vendor(order, escrow)
+        else:
+            payout_dispatched = True  # Already settled directly to subaccount by Paystack
+
+    # Write matching DEBIT to ledger if payout was settled via gateway or split,
+    # preventing double-withdrawal from Siiqo corporate balance
+    if payout_dispatched:
+        _debit_vendor_ledger(
+            vendor_id=order.vendor_id,
+            amount=net_amount,
+            reference_id=f"PAYOUT-{escrow.transaction_number or order.id}",
+            description=f"Automated gateway payout settlement for Order #{order.id}",
+        )
 
     # In-app notifications
     try:
@@ -1287,70 +1337,9 @@ def release_escrow():
             "message": f"Cannot release funds at status: {escrow.status}"
         }), 400
 
-    # ── Provider-specific fund release ───────────────────────────────────────
-    # All Daya-originated payments: crypto direct, USDT/USDC, and NGN bank
-    # transfer via Daya virtual account (payment_method='DAYA_BANK_TRANSFER').
-    DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'USDT', 'USDC', 'DAYA_BANK_TRANSFER')
-    is_daya_order = (
-        (order.payment_method or '') in DAYA_PAYMENT_METHODS
-        or (escrow.transaction_number or '').startswith('DYA-')
-        or (escrow.payscrow_transaction_id or '').startswith('DAYA-')
-    )
-
-    is_paystack_order = (
-        not is_daya_order and (
-            (order.payment_method or '').upper() == 'PAYSTACK'
-            or (escrow.transaction_number and escrow.transaction_number.startswith('ORD-'))
-        )
-    )
-
-    if is_daya_order:
-        # ── Daya payout — funds are in Siiqo's Daya collection/withdrawal balance ──
-        from app.routes.payments import _payout_vendor_via_daya
-        _payout_vendor_via_daya(order, escrow)
-    elif is_paystack_order:
-        # ── Paystack split payment ────────────────────────────────────────────
-        # Check if vendor was paid via Paystack split at checkout time.
-        # If paystack_subaccount_code exists, Paystack already settled the
-        # vendor's 94% directly to their bank when the buyer paid.
-        # Calling _paystack_payout_vendor() again would be a double payment.
-        vendor_already_paid_via_split = False
-        try:
-            bank_acc = VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id, is_default=True
-            ).first() or VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id
-            ).first()
-            if bank_acc and bank_acc.paystack_subaccount_code:
-                vendor_already_paid_via_split = True
-            else:
-                from app.models.user import Storefront
-                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-                if sf and sf.paystack_subaccount_code:
-                    vendor_already_paid_via_split = True
-        except Exception as _exc:
-            logging.warning("[RELEASE] Could not check subaccount for vendor %s: %s",
-                            order.vendor_id, _exc)
-
-        if vendor_already_paid_via_split:
-            logging.info(
-                "[RELEASE] Order #%s — vendor already paid via Paystack split at checkout. "
-                "Skipping manual transfer.", order.id
-            )
-        else:
-            # Legacy non-split flow — manual Paystack transfer
-            _paystack_payout_vendor(order, escrow)
-    else:
-        # FLW, Daya NGN, or any other provider — funds already handled at payment time.
-        # Just proceed to internal release below.
-        logging.info(
-            f"[RELEASE] Order #{order.id} payment_method={order.payment_method} — "
-            "releasing internally (no external API call needed)."
-        )
-
     # ── Delegate to unified release pipeline ─────────────────────────────────
-    # execute_order_escrow_release handles: release, ledger credit, payout, notifications, emails
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    # execute_order_escrow_release is the single source of truth for:
+    # state transitions, ledger tracking, gateway payouts, and notifications.
     execute_order_escrow_release(order, escrow, source="buyer_release")
 
     return jsonify({
@@ -1615,6 +1604,13 @@ def confirm_delivery_by_token():
             "message": "Order is already completed and received. Thank you!",
             "already_completed": True,
         }), 200
+
+    # Guard: Never release unpaid escrow via token
+    if escrow.status == EscrowStatus.PENDING_PAYMENT or order.status not in ('PAID', 'SHIPPED', 'DELIVERED'):
+        return jsonify({
+            "message": "Order payment has not been confirmed yet. Cannot confirm receipt of an unpaid order.",
+            "code": "PAYMENT_NOT_CONFIRMED",
+        }), 400
 
     success = execute_order_escrow_release(order, escrow, source="guest_buyer_token")
     if not success:

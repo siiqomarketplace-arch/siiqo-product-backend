@@ -75,6 +75,7 @@ create_admin.py
 update_*.py
 *.txt
 !requirements.txt
+!requirements-dev.txt
 .env
 .env
 .env

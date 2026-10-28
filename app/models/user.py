@@ -205,7 +205,7 @@ class Storefront(db.Model):
             (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
         )
 
-    def to_public_dict(self) -> dict:
+    def to_public_dict(self, include_sensitive: bool = False) -> dict:
         # Avoid circular imports by loading models inline
         from app.models.community import Review
         from app.models.product import Product
@@ -239,7 +239,7 @@ class Storefront(db.Model):
         )
         badge_verified = bool(is_pro_active or self.verification_status == 'VERIFIED')
 
-        return {
+        data = {
             "id": self.id,
             "store_name": self.store_name,
             "store_slug": self.store_slug,
@@ -278,8 +278,6 @@ class Storefront(db.Model):
             # ── verification fields ──
             "account_type": self.account_type,
             "cac_reg": self.cac_reg,
-            "nin_document_url": self.nin_document_url,
-            "cac_document_url": self.cac_document_url,
             "verification_status": self.verification_status,
             # ── calculated fields ──
             "avg_rating": avg_rating,
@@ -292,3 +290,7 @@ class Storefront(db.Model):
             "tiktok_pixel_id":    self.tiktok_pixel_id or None,
             "ga4_measurement_id": self.ga4_measurement_id or None,
         }
+        if include_sensitive:
+            data["nin_document_url"] = self.nin_document_url
+            data["cac_document_url"] = self.cac_document_url
+        return data

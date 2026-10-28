@@ -497,7 +497,10 @@ def forgot_password():
 # Reset Password
 # ---------------------------------------------------------------------------
 
+_failed_reset_attempts = {}
+
 @auth_bp.route('/reset-password', methods=['POST'])
+@limiter.limit("5 per minute; 20 per hour")
 def reset_password():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
@@ -514,12 +517,24 @@ def reset_password():
     if not user:
         return jsonify({"message": "User not found"}), 404
 
-    if not user.reset_otp or user.reset_otp.strip() != otp:
-        return jsonify({"message": "Invalid or expired code"}), 400
-
+    # Check expiry first
     if user.otp_expiry and _utcnow() > user.otp_expiry.replace(tzinfo=timezone.utc):
         return jsonify({"message": "Code has expired. Please request a new one."}), 400
 
+    if not user.reset_otp or user.reset_otp.strip() != otp:
+        # Increment failed attempts lockout
+        attempts = _failed_reset_attempts.get(user.id, 0) + 1
+        _failed_reset_attempts[user.id] = attempts
+        if attempts >= 5:
+            user.reset_otp = None
+            user.otp_expiry = None
+            db.session.commit()
+            _failed_reset_attempts.pop(user.id, None)
+            return jsonify({"message": "Too many invalid attempts. Reset code has been invalidated. Please request a new code."}), 400
+        return jsonify({"message": "Invalid or expired code"}), 400
+
+    # Success: clear failed attempts and reset password
+    _failed_reset_attempts.pop(user.id, None)
     user.set_password(new_password)
     user.reset_otp = None
     user.otp_expiry = None

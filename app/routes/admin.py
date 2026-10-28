@@ -219,11 +219,11 @@ def admin_dashboard():
 
 
 def _parse_admin_id(identity: str) -> int:
-    """Extract numeric ID from 'admin:123' or plain '123'. Returns -1 on bad input (will fail auth check)."""
+    """Extract numeric ID strictly from 'admin:123'. Returns -1 on bad or non-admin input to fail auth check."""
     try:
         if isinstance(identity, str) and identity.startswith('admin:'):
             return int(identity.split(':', 1)[1])
-        return int(identity)
+        return -1
     except (ValueError, TypeError):
         return -1
 
@@ -1122,7 +1122,7 @@ def admin_update_order_status(order_id):
         order.status = new_status
         db.session.commit()
 
-    logger.info("[ADMIN] Admin %s updated Order #%s status from %s to %s", admin.id, order.id, old_status, new_status)
+    logging.info("[ADMIN] Admin %s updated Order #%s status from %s to %s", admin.id, order.id, old_status, new_status)
 
     return jsonify({
         "status": "success",

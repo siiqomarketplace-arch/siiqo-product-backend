@@ -593,6 +593,12 @@ def confirm_pod_payment(order_id):
     
     if order.vendor_id != int(vendor_id):
         return jsonify({'message': 'Unauthorized'}), 403
+
+    if order.payment_method != 'POD':
+        return jsonify({'message': 'This endpoint is only for Pay-on-Delivery (POD) orders.'}), 400
+
+    if order.status == 'COMPLETED':
+        return jsonify({'message': 'This order has already been completed.'}), 400
     
     # Get or create POD payment record
     pod_payment = PODPayment.query.filter_by(order_id=order_id).first()
@@ -620,15 +626,6 @@ def confirm_pod_payment(order_id):
         check_and_reward_referral_on_order_complete(order)
     except Exception as ex:
         logging.error(f"[REFERRAL ERR] POD vendor confirm referral reward failed: {ex}")
-    
-    # Credit vendor ledger (no platform fee for POD)
-    from app.routes.escrow import _credit_vendor_ledger
-    _credit_vendor_ledger(
-        vendor_id=vendor_id,
-        amount=float(order.total_amount),
-        reference_id=f'POD-{order.id}',
-        description=f'POD payment for Order #{order.id}'
-    )
     
     # Notify buyer
     if order.buyer_id:

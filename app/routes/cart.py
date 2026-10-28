@@ -134,10 +134,17 @@ def get_cart():
 def add_to_cart():
     user_id = _get_user_id()
     data = request.get_json() or {}
-    product_id = data.get('product_id')
-    quantity = int(data.get('quantity', 1))
+    try:
+        quantity = int(data.get('quantity', 1))
+    except (ValueError, TypeError):
+        return jsonify({"message": "Invalid quantity"}), 400
 
-    if not product_id:
+    if quantity <= 0 or quantity > 1000:
+        return jsonify({"message": "Quantity must be between 1 and 1000"}), 400
+
+    try:
+        product_id = int(data.get('product_id'))
+    except (ValueError, TypeError):
         return jsonify({"message": "product_id is required"}), 400
 
     product = db.session.get(Product, product_id)
@@ -181,10 +188,13 @@ def add_to_cart():
 def update_cart_item(item_id):
     user_id = _get_user_id()
     data = request.get_json() or {}
-    quantity = data.get('quantity')
-
-    if quantity is None or int(quantity) < 1:
+    try:
+        qty_int = int(data.get('quantity'))
+    except (ValueError, TypeError):
         return jsonify({"message": "Invalid quantity"}), 400
+
+    if qty_int < 1 or qty_int > 1000:
+        return jsonify({"message": "Quantity must be between 1 and 1000"}), 400
 
     cart = Cart.query.filter_by(user_id=user_id).first()
     if not cart:
@@ -195,10 +205,10 @@ def update_cart_item(item_id):
         return jsonify({"message": "Item not found"}), 404
 
     product = db.session.get(Product, item.product_id)
-    if product and product.stock_quantity < int(quantity):
+    if product and product.stock_quantity < qty_int:
         return jsonify({"message": f"Cannot update. Only {product.stock_quantity} available in stock."}), 400
 
-    item.quantity = int(quantity)
+    item.quantity = qty_int
     try:
         db.session.commit()
     except Exception as e:
@@ -286,14 +296,43 @@ def checkout():
     if cart and cart.items and not guest_items_input:
         items_to_process = list(cart.items)
     elif guest_items_input:
+        from app.models.negotiation import NegotiationRequest
         for idx, gi in enumerate(guest_items_input):
             p_id = gi.get('product_id') or (gi.get('product', {}).get('id'))
             if not p_id:
                 continue
-            prod = db.session.get(Product, int(p_id))
+            try:
+                p_id_int = int(p_id)
+            except (ValueError, TypeError):
+                continue
+            prod = db.session.get(Product, p_id_int)
             if prod:
-                qty = int(gi.get('quantity', 1))
-                neg_price = gi.get('negotiated_price')
+                try:
+                    qty = max(1, min(1000, int(gi.get('quantity', 1))))
+                except (ValueError, TypeError):
+                    qty = 1
+
+                # Security: Only allow negotiated_price if an accepted, non-expired NegotiationRequest exists
+                neg_price = None
+                neg_id = gi.get('negotiation_id') or gi.get('negotiationId')
+                if neg_id and str(neg_id).isdigit():
+                    neg_rec = db.session.get(NegotiationRequest, int(neg_id))
+                    if (
+                        neg_rec
+                        and neg_rec.status == 'ACCEPTED'
+                        and neg_rec.product_id == prod.id
+                    ):
+                        now_dt = _utcnow()
+                        exp = neg_rec.accepted_expires_at
+                        if exp:
+                            from datetime import timezone as _tz
+                            if exp.tzinfo is None:
+                                exp = exp.replace(tzinfo=_tz.utc)
+                            if now_dt <= exp:
+                                neg_price = float(neg_rec.final_price or neg_rec.current_offer)
+                        else:
+                            neg_price = float(neg_rec.final_price or neg_rec.current_offer)
+
                 items_to_process.append(_GuestItem(idx, prod, qty, neg_price))
     
     if not items_to_process:
@@ -420,7 +459,11 @@ def checkout():
                 sel_vid = sel.get('vendorId')
                 if sel_vid is not None and int(sel_vid) == int(vid):
                     opt = sel.get('selectedOption') or {}
-                    logistics_fee = float(opt.get('fee', 0.0))
+                    try:
+                        raw_fee = float(opt.get('fee', 0.0))
+                        logistics_fee = max(0.0, raw_fee)
+                    except (ValueError, TypeError):
+                        logistics_fee = 0.0
                     logistics_provider_id = opt.get('id')
                     break
 

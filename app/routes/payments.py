@@ -136,18 +136,9 @@ def daya_initiate():
     data = request.get_json() or {}
 
     order_id_param = data.get("orderId") or data.get("order_id", "")
-    primary_order_id = int(str(order_id_param).split(",")[0]) if order_id_param else None
-    if not primary_order_id:
-        return jsonify({"message": "orderId is required"}), 400
-
-    amount_ngn_raw = data.get("amountNgn") or data.get("amount_ngn", 0)
-    try:
-        amount_ngn = float(amount_ngn_raw)
-    except (TypeError, ValueError):
-        return jsonify({"message": "amountNgn must be a number"}), 400
-
-    if amount_ngn <= 0:
-        return jsonify({"message": "amountNgn must be greater than 0"}), 400
+    order_id_strs = [s.strip() for s in str(order_id_param).split(",") if s.strip().isdigit()]
+    if not order_id_strs:
+        return jsonify({"message": "Valid orderId is required"}), 400
 
     buyer_email  = (data.get("buyerEmail") or data.get("buyer_email") or "").strip().lower()
     buyer_name   = (data.get("buyerName")  or data.get("buyer_name")  or "").strip()
@@ -162,13 +153,39 @@ def daya_initiate():
     if not _key_configured():
         return jsonify({"message": "Crypto payments are not configured yet"}), 503
 
-    order = db.session.get(Order, primary_order_id)
-    if not order:
+    order_ids = [int(s) for s in order_id_strs]
+    primary_order_id = order_ids[0]
+    orders = Order.query.filter(Order.id.in_(order_ids)).all()
+    if not orders:
         return jsonify({"message": "Order not found"}), 404
-    
+
     # Check authorization if order is tied to a specific registered user
-    if order.buyer_id is not None and buyer_user_id is not None and order.buyer_id != buyer_user_id:
-        return jsonify({"message": "Unauthorized"}), 403
+    for o in orders:
+        if o.buyer_id is not None and buyer_user_id is not None and o.buyer_id != buyer_user_id:
+            return jsonify({"message": "Unauthorized"}), 403
+
+    # Always compute canonical amount from server records to prevent tampering.
+    # The buyer pays item totals plus each order's delivery fee (checkout grandTotal).
+    canonical_amount_ngn = sum(
+        float(o.total_amount or 0) + float(o.logistics_fee or 0) for o in orders
+    )
+    if canonical_amount_ngn <= 0:
+        return jsonify({"message": "Order total must be greater than 0"}), 400
+
+    amount_ngn_raw = data.get("amountNgn") or data.get("amount_ngn")
+    if amount_ngn_raw is not None:
+        try:
+            client_amount = float(amount_ngn_raw)
+            if abs(client_amount - canonical_amount_ngn) > 1.0:
+                return jsonify({
+                    "message": f"Amount mismatch: expected ₦{canonical_amount_ngn:,.2f}, received ₦{client_amount:,.2f}"
+                }), 400
+        except (TypeError, ValueError):
+            return jsonify({"message": "amountNgn must be a valid number"}), 400
+
+    amount_ngn = canonical_amount_ngn
+
+    order = next((o for o in orders if o.id == primary_order_id), orders[0])
 
     if not buyer_email:
         if order.buyer_email:
@@ -1072,7 +1089,7 @@ def _payout_vendor_via_daya(order, escrow):
             shortfall = estimated_usd_needed - withdrawal_usd
             amount_to_move = min(round(shortfall + 0.10, 4), collection_usd)
             if amount_to_move > 0:
-                transfer_idem = f"bal-transfer-{order.id}-{uuid.uuid4().hex[:8]}"
+                transfer_idem = f"bal-transfer-{order.id}"
                 daya_service.transfer_collection_to_withdrawal(
                     amount_usd=amount_to_move,
                     idempotency_key=transfer_idem,
@@ -1088,7 +1105,7 @@ def _payout_vendor_via_daya(order, escrow):
             order.id, exc
         )
 
-    payout_ref = f"CRYPTO-PAYOUT-{order.id}-{uuid.uuid4().hex[:8].upper()}"
+    payout_ref = f"CRYPTO-PAYOUT-{order.id}"
 
     # ── Flow B: buyer paid crypto directly — pay vendor on-chain ─────────────────
     if payment_type == "crypto_direct":
@@ -1579,12 +1596,36 @@ def flutterwave_status():
         try:
             verif = _flw.verify_transaction(tx_id)
             if verif.get("success") and verif.get("status") == "successful":
-                _handle_flutterwave_payment_confirmed(
-                    tx_ref=escrow.transaction_number,
-                    tx_id=str(tx_id),
-                    verification=verif,
+                flw_tx_ref = verif.get("tx_ref") or ""
+                flw_currency = (verif.get("currency") or "").upper()
+                flw_amount = float(verif.get("amount") or 0)
+                expected_currency = (escrow.currency or "NGN").upper()
+                expected_amount = float(escrow.amount or 0)
+
+                ref_matches = (
+                    flw_tx_ref == escrow.transaction_number
+                    or (escrow.order_id and str(escrow.order_id) == str(verif.get("order_id")))
+                    or (escrow.order_id and f"ORD-{escrow.order_id}" in flw_tx_ref)
+                    or (escrow.order_id and f"-{escrow.order_id}-" in flw_tx_ref)
                 )
-                db.session.refresh(escrow)
+                currency_matches = (flw_currency == expected_currency)
+                amount_sufficient = (flw_amount >= expected_amount - 0.01)
+
+                if ref_matches and currency_matches and amount_sufficient:
+                    _handle_flutterwave_payment_confirmed(
+                        tx_ref=escrow.transaction_number,
+                        tx_id=str(tx_id),
+                        verification=verif,
+                    )
+                    db.session.refresh(escrow)
+                else:
+                    logger.warning(
+                        "[FLW STATUS] Verification criteria not met: ref_matches=%s, "
+                        "currency_matches=%s (got %s, expected %s), "
+                        "amount_sufficient=%s (got %s, expected %s)",
+                        ref_matches, currency_matches, flw_currency, expected_currency,
+                        amount_sufficient, flw_amount, expected_amount
+                    )
         except Exception as exc:
             logger.warning("[FLW STATUS] Proactive verification error: %s", exc)
 
@@ -1692,12 +1733,23 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                     )
 
                     # Trigger actual bank transfer payout unless vendor used FLW split at checkout
-                    from app.routes.escrow import _flutterwave_payout_vendor as _flw_payout
+                    from app.routes.escrow import _flutterwave_payout_vendor as _flw_payout, _debit_vendor_ledger
                     vendor_already_paid_via_split = bool(
                         escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:")
                     )
+                    payout_dispatched = False
                     if not vendor_already_paid_via_split:
-                        _flw_payout(order, escrow)
+                        payout_dispatched = _flw_payout(order, escrow)
+                    else:
+                        payout_dispatched = True
+
+                    if payout_dispatched:
+                        _debit_vendor_ledger(
+                            vendor_id=order.vendor_id,
+                            amount=net_amount,
+                            reference_id=f"PAYOUT-{escrow.transaction_number or order.id}",
+                            description=f"Automated gateway payout settlement for Order #{order.id}",
+                        )
                     db.session.add(Notification(
                         user_id=order.vendor_id,
                         title="Payment Received (Flutterwave)",

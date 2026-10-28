@@ -230,12 +230,16 @@ def pay_payment_link(link_id):
 
     has_real_email = bool(buyer_email and '@' in buyer_email)
 
-    # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
-    # Pay Links for physical products must never route to Paystack or Flutterwave card.
-    # payment_method must be 'bank_transfer' or 'crypto' for physical links.
-    payment_method = (data.get('payment_method') or 'card').lower()
+    ALLOWED_PAYMENT_METHODS = ('bank_transfer', 'crypto', 'card', 'flutterwave', 'paystack')
+    payment_method = (data.get('payment_method') or 'card').lower().strip()
+    if payment_method not in ALLOWED_PAYMENT_METHODS:
+        return jsonify({
+            "message": f"Invalid payment method '{payment_method}'. Allowed: {', '.join(ALLOWED_PAYMENT_METHODS)}"
+        }), 400
 
-    if link_product_type == 'physical' and payment_method in ('card', 'flutterwave'):
+    # ── PHYSICAL PRODUCT GUARD ────────────────────────────────────────────────
+    # Pay Links for physical products must only route to Bank Transfer or Crypto (Daya).
+    if link_product_type == 'physical' and payment_method not in ('bank_transfer', 'crypto'):
         return jsonify({
             "message": (
                 "Card payment is not available for physical products. "
@@ -519,7 +523,6 @@ def pay_payment_link(link_id):
                 "confirmation_url": conf_url,
                 "buyer_phone": buyer_phone,
                 "buyer_email": buyer_email if has_real_email else "",
-                "file_url": link.file_url,
                 "product_type": link_product_type,
                 "daya": {
                     "bank_name": dp.bank_name,
@@ -574,6 +577,8 @@ def pay_payment_link(link_id):
         # Create escrow transaction record
         # NOTE: payscrow_transaction_id and payscrow_ref are legacy DB column names,
         # now used to store generic provider references (FLW, Paystack, or Daya)
+        # Record SPLIT: prefix if Flutterwave subaccount was attached to prevent duplicate payout transfer
+        escrow_payscrow_ref = f"SPLIT:{flw_txn_ref}" if flw_subaccount_id else flw_txn_ref
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
             transaction_number=flw_txn_ref,
@@ -584,7 +589,7 @@ def pay_payment_link(link_id):
             fee_amount=float(fee_amount),
             payment_link=flw_res["payment_link"],
             payscrow_transaction_id=flw_txn_ref,
-            payscrow_ref=flw_txn_ref,
+            payscrow_ref=escrow_payscrow_ref,
         )
         db.session.add(new_escrow)
         db.session.commit()
@@ -602,11 +607,10 @@ def pay_payment_link(link_id):
             "confirmation_url": conf_url,
             "buyer_phone": buyer_phone,
             "buyer_email": buyer_email if has_real_email else "",
-            "file_url": link.file_url,
             "product_type": link_product_type,
         }), 200
 
-    else:
+    elif payment_method in ('card', 'paystack'):
         # ── PAYSTACK / CARD path (digital + service only) ──────────────────────
         new_order.payment_method = 'ESCROW'
         # Use a PL- prefixed reference so the webhook can identify Pay Link orders
@@ -652,6 +656,8 @@ def pay_payment_link(link_id):
             "confirmation_url": conf_url,
             "buyer_phone": buyer_phone,
             "buyer_email": buyer_email if has_real_email else "",
-            "file_url": link.file_url,
             "product_type": link_product_type,
         }), 200
+
+    else:
+        return jsonify({"message": f"Unsupported payment method '{payment_method}'"}), 400

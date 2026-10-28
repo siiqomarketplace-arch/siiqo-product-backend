@@ -1,4 +1,5 @@
 import html
+import logging
 import re
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
