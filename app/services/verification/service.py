@@ -307,7 +307,16 @@ def seller_summary(user: User) -> dict:
     status = VerificationStatus.query.filter_by(user_id=user.id).first()
     latest = (VerificationCase.query.filter_by(user_id=user.id)
               .order_by(VerificationCase.created_at.desc()).limit(5).all())
+    # V7: sellers approved under the old manual review keep their badge until it expires.
+    sf = user.storefront
+    legacy_expiry = _aware(sf.pro_verified_expires_at) if sf else None
+    legacy_active = bool(sf and sf.is_pro_verified
+                         and (legacy_expiry is None or legacy_expiry > _utcnow()))
     return {
+        "legacy": {
+            "verified": legacy_active,
+            "expires_at": legacy_expiry.isoformat() if legacy_active and legacy_expiry else None,
+        },
         "available": is_available(user),
         "coming_soon": not is_available(user),
         "price_ngn_per_month": 1999,

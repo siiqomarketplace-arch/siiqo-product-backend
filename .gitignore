@@ -62,8 +62,9 @@ Thumbs.db
 # Git
 .git/
 
-# Test files
+# Test files (ad-hoc root scripts; the real suite in tests/ is kept)
 test_*.py
+!tests/test_*.py
 check_*.py
 run_*.bat
 verify_*.py
