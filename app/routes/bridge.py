@@ -1003,7 +1003,11 @@ def paystack_webhook():
     Activates subscription when charge.success fires.
     Paystack signs the payload with HMAC-SHA512 using your secret key.
     """
-    # Verify the webhook signature
+    # Verify the webhook signature. Fail closed if the key is missing: an empty
+    # HMAC key would let anyone produce a "valid" signature.
+    if not PAYSTACK_SECRET_KEY:
+        logging.error("[PAYSTACK WEBHOOK] PAYSTACK_SECRET_KEY not set — rejecting webhook")
+        return jsonify({"message": "Webhook not configured"}), 503
     signature = request.headers.get('x-paystack-signature', '')
     body = request.get_data()
     expected = hmac.new(

@@ -105,20 +105,18 @@ def get_active_partners():
             "flat_rate": pricing.get("flat_rate") or 1500,
             "base_fee": pricing.get("base_fee") or 1000,
             "per_km_fee": pricing.get("per_km_fee") or 150,
-            "external_api_key": pricing.get("external_api_key") or "",
         }
 
+        # Public endpoint: never expose partner email, bank details or API keys.
         partner_data.append({
             "id": p.id,
             "name": p.full_name,
-            "email": p.email,
+            # Shown to sellers when choosing delivery partners for a listing.
+            "business_name": (app.business_name if app and app.business_name else p.full_name),
             "service_type": service_type,
             "partner_role": service_type,
             "state": app.state_of_operation if app else "Lagos",
             "status": "ACTIVE",
-            "bank_code": app.bank_code if app else None,
-            "account_number": app.account_number if app else None,
-            "account_name": app.account_name if app else None,
             "store_settings": store_settings,
         })
 

@@ -15,15 +15,20 @@ grants_bp = Blueprint('grants', __name__, url_prefix='/api/grants')
 
 
 def _parse_admin_id(identity: str) -> int:
-    """Extract numeric ID from 'admin:123' or plain '123'."""
+    """Only admin tokens ("admin:<id>") are accepted. Anything else returns -1."""
     if isinstance(identity, str) and identity.startswith('admin:'):
-        return int(identity.split(':', 1)[1])
-    return int(identity)
+        try:
+            return int(identity.split(':', 1)[1])
+        except ValueError:
+            return -1
+    return -1
 
 
 def _get_admin(admin_id) -> AdminUser | None:
-    """Get admin user by ID"""
-    return db.session.get(AdminUser, int(admin_id))
+    """Get admin user by ID (must come from _parse_admin_id)."""
+    if not isinstance(admin_id, int) or admin_id <= 0:
+        return None
+    return db.session.get(AdminUser, admin_id)
 
 
 def utcnow():

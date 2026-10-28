@@ -422,9 +422,9 @@ def verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> boo
     """
     secret = _webhook_secret()
     if not secret:
-        # If no secret is configured, log a warning and allow through in test mode
-        logger.warning("[FLW WEBHOOK] FLW_WEBHOOK_SECRET not set — skipping signature check")
-        return True
+        # Fail closed: without a configured secret anyone could forge a webhook.
+        logger.error("[FLW WEBHOOK] FLW_WEBHOOK_SECRET not set — rejecting webhook")
+        return False
 
     # Flutterwave sends the raw secret in the verif-hash header
     return hmac.compare_digest(

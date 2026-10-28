@@ -1486,15 +1486,18 @@ def flutterwave_webhook():
     raw_body = request.get_data()
     sig_header = request.headers.get("verif-hash", "")
 
-    logger.info("[FLW WEBHOOK] === WEBHOOK RECEIVED === Headers: %s", dict(request.headers))
+    # Never log request headers here: "verif-hash" carries the webhook secret.
+    logger.info("[FLW WEBHOOK] === WEBHOOK RECEIVED === (%d bytes)", len(raw_body))
 
     if not _flw.verify_webhook_signature(raw_body, sig_header):
-        logger.warning("[FLW WEBHOOK] Invalid signature hash - signature=%s", sig_header[:20] + "...")
+        logger.warning("[FLW WEBHOOK] Invalid or missing signature hash")
         return jsonify({"message": "Invalid signature"}), 401
 
     try:
         event_data = request.get_json(force=True) or {}
-        logger.info("[FLW WEBHOOK] Raw event data: %s", event_data)
+        # Log the event type only; the payload contains customer personal data.
+        logger.info("[FLW WEBHOOK] Event received: %s",
+                    event_data.get("event") or event_data.get("event.type") or "unknown")
     except Exception as parse_err:
         logger.error("[FLW WEBHOOK] JSON parsing failed: %s", parse_err)
         return jsonify({"message": "Invalid JSON"}), 400

@@ -220,8 +220,9 @@ def verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> boo
     """Verify Daya HMAC-SHA256 webhook signature from X-Daya-Signature header."""
     secret = os.environ.get("DAYA_WEBHOOK_SECRET", "")
     if not secret:
-        logger.warning("[DAYA WEBHOOK] DAYA_WEBHOOK_SECRET not set -- skipping verification")
-        return True
+        # Fail closed: without a configured secret anyone could forge a deposit event.
+        logger.error("[DAYA WEBHOOK] DAYA_WEBHOOK_SECRET not set -- rejecting webhook")
+        return False
 
     expected = hmac.new(
         secret.encode("utf-8"),

@@ -47,10 +47,17 @@ def _utcnow():
 # ---------------------------------------------------------------------------
 
 def _get_admin(admin_id) -> "AdminUser | None":
+    # Raw JWT identities are strings; only "admin:<id>" may resolve to an admin.
+    # A plain "<id>" is a normal user token and must never match an AdminUser.
+    if isinstance(admin_id, str):
+        admin_id = _parse_admin_id(admin_id)
     try:
-        return db.session.get(AdminUser, int(admin_id))
+        admin_id = int(admin_id)
     except (ValueError, TypeError):
         return None
+    if admin_id <= 0:
+        return None
+    return db.session.get(AdminUser, admin_id)
 
 
 def _require_superadmin(admin_id) -> AdminUser | None:

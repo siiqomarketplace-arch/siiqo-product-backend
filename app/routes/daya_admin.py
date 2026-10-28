@@ -31,7 +31,9 @@ def _utcnow():
 
 
 def _get_admin(admin_id) -> AdminUser | None:
-    return db.session.get(AdminUser, int(admin_id))
+    if not isinstance(admin_id, int) or admin_id <= 0:
+        return None
+    return db.session.get(AdminUser, admin_id)
 
 
 def _require_superadmin(admin_id) -> AdminUser | None:
@@ -42,10 +44,13 @@ def _require_superadmin(admin_id) -> AdminUser | None:
 
 
 def _parse_admin_id(identity) -> int:
-    """JWT identity may be a plain int or a dict with 'id' key."""
-    if isinstance(identity, dict):
-        return int(identity.get("id", 0))
-    return int(identity)
+    """Only admin tokens ("admin:<id>") are accepted. Anything else returns -1."""
+    if isinstance(identity, str) and identity.startswith("admin:"):
+        try:
+            return int(identity.split(":", 1)[1])
+        except ValueError:
+            return -1
+    return -1
 
 
 # ---------------------------------------------------------------------------
