@@ -228,6 +228,11 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
             if case.provider == "mock":
                 # Staff testing only: stands in for the paid subscription (VER-2).
                 row.subscription_active = True
+            else:
+                # The Verified mark shows while the Verified Pro plan is active.
+                from app.services.billing import sync_verification_flag
+                db.session.flush()
+                sync_verification_flag(case.user_id)
     else:
         case.status = CaseStatus.ON_HOLD
         case.reason_code = case.reason_code or "UNKNOWN_OUTCOME"
@@ -239,6 +244,42 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
         from app.services.billing import handle_identity_mismatch
         handle_identity_mismatch(case.user_id)
     return case
+
+
+def submit_identity_selfie(user: User, case_id: int, *, nin: str, selfie_image: str) -> VerificationCase:
+    """Providers without a hosted page (Youverify): the seller's selfie and NIN
+    are checked together. The NIN must match the one the case was started with;
+    only its hash is stored."""
+    from .youverify_provider import ProviderUnavailable
+
+    case = db.session.get(VerificationCase, case_id)
+    if not case or case.user_id != user.id or case.kind != VerificationKind.IDENTITY:
+        raise VerificationError("NOT_FOUND", "Verification not found.", 404)
+    if case.status != CaseStatus.IN_PROGRESS:
+        raise VerificationError("NOT_IN_PROGRESS", "This verification is already finished.", 409)
+    nin_digits = re.sub(r"\D", "", nin or "")
+    if len(nin_digits) != 11 or hash_id_number(nin_digits) != case.id_number_hash:
+        raise VerificationError("NIN_CHANGED", "Enter the same NIN you started with.", 400)
+    if not selfie_image or len(selfie_image) < 1000:
+        raise VerificationError("NO_SELFIE", "Take a clear selfie to continue.", 400)
+
+    provider = get_provider()
+    if not hasattr(provider, "submit_identity"):
+        raise VerificationError("NOT_SUPPORTED", "This verification step isn't used here.", 400)
+    try:
+        result = provider.submit_identity(case_id=case.id, id_number=nin_digits, selfie_image=selfie_image)
+    except ProviderUnavailable as exc:
+        import logging
+        logging.getLogger(__name__).warning("[VERIFICATION] provider unavailable for case %s: %s", case.id, exc)
+        raise VerificationError("PROVIDER_UNAVAILABLE",
+                                "Verification is busy right now. Please try again in a few minutes.", 503)
+    if result is None:
+        case.status = CaseStatus.PENDING_PROVIDER  # the result will arrive by webhook
+        db.session.commit()
+        return case
+    if result.provider_ref:
+        case.provider_ref = result.provider_ref
+    return apply_identity_result(case, result)
 
 
 def refresh_identity_case(case: VerificationCase) -> VerificationCase:

@@ -56,6 +56,23 @@ def start_identity():
     return jsonify({"case": case.to_seller_dict()}), 201
 
 
+@verification_bp.route("/cases/<int:case_id>/selfie", methods=["POST"])
+@jwt_required()
+@limiter.limit("10 per hour")
+def submit_selfie(case_id):
+    """Selfie + NIN for providers without a hosted page (Youverify)."""
+    user = _current_user()
+    if not user:
+        return jsonify({"message": "Seller account required"}), 403
+    data = request.get_json() or {}
+    try:
+        case = ver.submit_identity_selfie(user, case_id, nin=str(data.get("nin") or ""),
+                                          selfie_image=str(data.get("selfie_image") or ""))
+    except ver.VerificationError as exc:
+        return _error(exc)
+    return jsonify({"case": case.to_seller_dict()}), 200
+
+
 @verification_bp.route("/cases/<int:case_id>", methods=["GET"])
 @jwt_required()
 def get_case(case_id):
