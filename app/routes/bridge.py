@@ -357,6 +357,14 @@ def vendor_balance():
     ).scalar() or 0
     locked = float(locked)
 
+    # Siiqo fees actually taken on released orders, for the earnings card
+    fees_taken = db.session.query(func.sum(EscrowTransaction.fee_amount)).join(
+        Order, EscrowTransaction.order_id == Order.id
+    ).filter(
+        Order.vendor_id == user.id,
+        EscrowTransaction.status == EscrowStatus.RELEASED,
+    ).scalar() or 0
+
     # Available = net ledger balance (released funds not yet withdrawn)
     available = max(0.0, net)
     payout_threshold = 5000.0
@@ -369,6 +377,7 @@ def vendor_balance():
         "total_debits": float(debits),
         # Fields expected by /vendor/escrow page
         "locked_balance": locked,
+        "total_fees": float(fees_taken),
         "available_balance": available,
         "payout_threshold": payout_threshold,
         "can_withdraw": can_withdraw,
