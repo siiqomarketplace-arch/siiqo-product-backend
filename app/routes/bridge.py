@@ -14,7 +14,7 @@ import os
 import hmac
 import hashlib
 import requests as http_requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
@@ -37,6 +37,43 @@ bridge_bp = Blueprint('bridge', __name__)
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+def _aware(dt):
+    return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
+
+
+SPONSOR_DAYS = 7
+
+
+def _activate_sponsored_listing(reference, metadata, data):
+    """Paystack confirmed a SPONSOR- payment: feature the product for SPONSOR_DAYS."""
+    from decimal import Decimal
+    from app.models.admin import SponsoredListing
+    if SponsoredListing.query.filter_by(payment_reference=reference).first():
+        return  # webhook retry
+    try:
+        product_id = int(metadata.get('product_id'))
+        vendor_id = int(metadata.get('vendor_id'))
+    except (TypeError, ValueError):
+        logging.error(f'[PAYSTACK] Sponsorship {reference} has no product/vendor in metadata')
+        return
+    product = db.session.get(Product, product_id)
+    if not product or not product.storefront or product.storefront.vendor_id != vendor_id:
+        logging.error(f'[PAYSTACK] Sponsorship {reference} product {product_id} not owned by vendor {vendor_id}')
+        return
+    now = _utcnow()
+    db.session.add(SponsoredListing(
+        product_id=product_id,
+        vendor_id=vendor_id,
+        amount_paid=Decimal(str(data.get('amount') or 0)) / 100,
+        start_date=now,
+        end_date=now + timedelta(days=SPONSOR_DAYS),
+        is_active=True,
+        payment_reference=reference,
+    ))
+    db.session.commit()
+    logging.info(f'[PAYSTACK] Product {product_id} sponsored until {now + timedelta(days=SPONSOR_DAYS)} ref={reference}')
 
 
 # ===========================================================================
@@ -1355,6 +1392,14 @@ def paystack_webhook():
             )
             return jsonify({"status": "ok"}), 200
 
+        # ── SPONSORED LISTING ─────────────────────────────────────────────
+        # Routed before the subscription fallback, which used to turn a
+        # ₦2,000 sponsorship payment into a Pro subscription.
+        if reference.startswith('SPONSOR-') or metadata.get('type') == 'sponsored_listing':
+            if status == 'success':
+                _activate_sponsored_listing(reference, metadata, data)
+            return jsonify({"status": "ok"}), 200
+
         # ── PRO VERIFIED BADGE ────────────────────────────────────────────
         # Pro Verified payments use reference prefix PRO-VER- and have
         # metadata.type = 'pro_verified_subscription'
@@ -1404,17 +1449,29 @@ def paystack_webhook():
             return jsonify({"status": "ok"}), 200
 
         # ── SUBSCRIPTION ───────────────────────────────────────────────────
+        plan_obj = data.get('plan') or {}
         plan_code = (
-            data.get('plan', {}).get('plan_code')
+            (plan_obj.get('plan_code') if isinstance(plan_obj, dict) else str(plan_obj))
             or data.get('plan_code', '')
         )
+        meta_plan_name = metadata.get('plan_name', '')
+
+        # Only a real subscription payment may grant Pro. Anything else that
+        # reached this point matched no handler and is ignored.
+        is_subscription_payment = (
+            reference.startswith('SUB-')
+            or meta_plan_name in ('PRO_MONTHLY', 'PRO_ANNUAL', 'LIFETIME')
+            or (plan_code and plan_code in (PAYSTACK_MONTHLY_PLAN, PAYSTACK_ANNUAL_PLAN))
+        )
+        if not is_subscription_payment:
+            logging.warning(f'[PAYSTACK] {event_type} ref={reference} matched no handler — ignored')
+            return jsonify({"status": "ok"}), 200
 
         if customer_email and status == 'success':
             user = User.query.filter_by(email=customer_email).first()
             if user:
                 # Check metadata for plan_name (Lifetime payments embed this since they
                 # are one-time transactions, not recurring Paystack plan subscriptions)
-                meta_plan_name = metadata.get('plan_name', '')
                 is_lifetime = (meta_plan_name == 'LIFETIME' or 'LIFETIME' in reference.upper())
 
                 if is_lifetime:
@@ -1422,7 +1479,11 @@ def paystack_webhook():
                     plan_name = 'LIFETIME'
                 else:
                     # Determine billing cycle from plan code
-                    billing_cycle = 'annual' if plan_code == PAYSTACK_ANNUAL_PLAN else 'monthly'
+                    is_annual = (
+                        meta_plan_name == 'PRO_ANNUAL'
+                        or (bool(PAYSTACK_ANNUAL_PLAN) and plan_code == PAYSTACK_ANNUAL_PLAN)
+                    )
+                    billing_cycle = 'annual' if is_annual else 'monthly'
                     plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
 
                 # Find or create the SubscriptionPlan record
@@ -1480,10 +1541,13 @@ def paystack_webhook():
                 active_sub = VendorSubscription.query.filter_by(
                     vendor_id=user.id, status='ACTIVE'
                 ).first()
-                if active_sub:
-                    # Extend from whichever is later: now or existing end_date (avoids gaps)
-                    base = max(active_sub.end_date, _utcnow())
-                    active_sub.end_date = base + relativedelta(months=1)
+                plan_name = (active_sub.plan.name or '') if active_sub and active_sub.plan else ''
+                if active_sub and plan_name != 'LIFETIME':
+                    # Extend from whichever is later: now or existing end_date (avoids
+                    # gaps), by the plan's own interval.
+                    base = max(_aware(active_sub.end_date) or _utcnow(), _utcnow())
+                    interval = relativedelta(years=1) if 'ANNUAL' in plan_name else relativedelta(months=1)
+                    active_sub.end_date = base + interval
                     db.session.commit()
                     logging.info(f'[PAYSTACK] Subscription renewed for user {user.id} — new end_date: {active_sub.end_date}')
 

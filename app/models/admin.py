@@ -81,6 +81,7 @@ class SponsoredListing(db.Model):
     start_date = db.Column(db.DateTime(timezone=True), default=utcnow)
     end_date = db.Column(db.DateTime(timezone=True), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
+    payment_reference = db.Column(db.String(100), nullable=True)
 
 
 class Favorite(db.Model):

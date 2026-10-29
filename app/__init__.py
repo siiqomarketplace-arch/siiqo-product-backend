@@ -81,6 +81,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS tiktok_pixel_id VARCHAR(50)",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS ga4_measurement_id VARCHAR(50)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_email_sent BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE sponsored_listings ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(100)",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
                 # ── Payment link product type, digital file & currency ──────────

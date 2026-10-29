@@ -10,6 +10,7 @@ from app.models.product import Product, Category
 from app.models.user import Storefront, User
 from app.models.community import Article, Review, ArticleSlugRedirect
 from app.models.admin import SponsoredListing
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 public_bp = Blueprint('public', __name__)
@@ -77,6 +78,7 @@ def get_products():
         sponsored = (
             SponsoredListing.query
             .filter_by(is_active=True)
+            .filter(SponsoredListing.end_date > datetime.now(timezone.utc))
             .order_by(SponsoredListing.amount_paid.desc())
             .limit(4)
             .all()
