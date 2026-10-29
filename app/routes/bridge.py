@@ -618,7 +618,7 @@ def get_buyer_order_detail(order_id):
                 if vendor_store and vendor_store.address
                 else ((vendor_store.city or "Lagos") if vendor_store else "Lagos")
             ),
-            "escrow": escrow.to_dict() if escrow else None,
+            "escrow": escrow.to_dict(include_private=True) if escrow else None,
             # Convenience alias so both buyer order pages get the OTP directly (omitted for digital)
             "delivery_otp": None if is_all_digital else (escrow.escrow_code if escrow else None),
             "logistics_assignment_id": assignment.id if assignment else None,
@@ -638,7 +638,7 @@ def get_escrow_code(order_id):
     escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
     if not escrow:
         return jsonify({"message": "No escrow transaction found"}), 404
-    return jsonify(escrow.to_dict()), 200
+    return jsonify(escrow.to_dict(include_private=True)), 200
 
 
 @bridge_bp.route('/buyer-orders/confirm-received', methods=['POST'])

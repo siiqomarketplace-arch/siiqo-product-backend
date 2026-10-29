@@ -16,12 +16,12 @@ import uuid
 import os
 import hmac
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.models.order import Order
 from app.models.escrow import EscrowTransaction, EscrowStatus
 from app.models.finance import Ledger, Receipt
@@ -906,7 +906,32 @@ def escrow_status():
             except Exception as _sync_err:
                 logging.warning(f"[ESCROW STATUS] Paystack verification check failed: {_sync_err}")
 
-    return jsonify(escrow.to_dict()), 200
+    return jsonify(escrow.to_dict(include_private=_can_see_private(escrow, txn_param, tx_ref_param))), 200
+
+
+def _can_see_private(escrow, *references) -> bool:
+    """This endpoint is public. Private escrow fields go to the signed-in buyer
+    or an admin, or to a caller holding the payment reference (the payer gets
+    it from the gateway redirect). An order number alone is not enough."""
+    known = {r for r in (escrow.transaction_number, escrow.payscrow_transaction_id,
+                         (escrow.payscrow_ref or "").replace("SPLIT:", "")) if r}
+    if any(ref and ref in known for ref in references):
+        return True
+    return _is_buyer_or_admin(get_jwt_identity(), escrow.order)
+
+
+def _is_buyer_or_admin(identity, order) -> bool:
+    if not identity or not order:
+        return False
+    try:
+        uid = int(identity)
+    except (TypeError, ValueError):
+        return False
+    if uid == order.buyer_id:
+        return True
+    from app.models.user import User, UserRole
+    u = db.session.get(User, uid)
+    return bool(u and u.role == UserRole.ADMIN)
 
 
 # ---------------------------------------------------------------------------
@@ -1568,8 +1593,9 @@ def get_order_details_by_token():
             except Exception:
                 pass
 
-        if not token_valid and not is_authorized_user:
-            return jsonify({"message": "Invalid or missing confirmation security token. Please check your link or log in."}), 403
+        # A shared link (no token, not signed in) shows the order summary only;
+        # the buyer then confirms with a code emailed to them.
+        show_contact = token_valid or is_authorized_user
 
         vendor_name = "Vendor"
         try:
@@ -1595,18 +1621,20 @@ def get_order_details_by_token():
                 "id": order.id,
                 "status": order.status,
                 "total_amount": float(order.total_amount),
-                "buyer_name": order.buyer_name,
-                "buyer_email": order.buyer_email,
-                "buyer_phone": order.buyer_phone,
+                "buyer_name": order.buyer_name if show_contact else None,
+                "buyer_email": order.buyer_email if show_contact else None,
+                "buyer_phone": order.buyer_phone if show_contact else None,
                 "vendor_name": vendor_name,
                 "created_at": order.created_at.isoformat() if order.created_at else None,
                 "items": items_list,
-            }
+            },
+            "verified_buyer": bool(token_valid or _is_buyer_or_admin(user_id, order)),
+            "code_email_hint": _mask_email(_buyer_contact_email(order)),
         }), 200
     except Exception as e:
         import traceback
         logging.error(f"[ESCROW] Error loading order details for order #{order_id}: {e}\n{traceback.format_exc()}")
-        return jsonify({"message": f"Could not load order #{order_id}: {str(e)}"}), 500
+        return jsonify({"message": f"Could not load order #{order_id}."}), 500
 
 
 @escrow_bp.route('/confirm-delivery-by-token', methods=['POST'])
@@ -1620,6 +1648,7 @@ def confirm_delivery_by_token():
     data = request.get_json() or {}
     order_id = data.get('order_id')
     token = (data.get('token') or '').strip()
+    code = str(data.get('code') or '').strip()
     user_id = get_jwt_identity()
 
     if not order_id:
@@ -1657,7 +1686,12 @@ def confirm_delivery_by_token():
             pass
 
     if not token_valid and not is_buyer:
-        return jsonify({"message": "Invalid or expired confirmation token. Only the buyer can confirm package receipt."}), 403
+        if not code:
+            return jsonify({"message": "Only the buyer can confirm receipt. Request a code to your email to continue.",
+                            "code": "BUYER_CODE_REQUIRED"}), 403
+        ok, message = _check_delivery_code(order, code)
+        if not ok:
+            return jsonify({"message": message, "code": "BUYER_CODE_INVALID"}), 403
 
     escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
     if not escrow:
@@ -1686,3 +1720,113 @@ def confirm_delivery_by_token():
         "message": "Delivery confirmed! Payment has been released to the vendor. Thank you for shopping on Siiqo.",
     }), 200
 
+
+# ---------------------------------------------------------------------------
+# BUYER CODE FOR SHARED LINKS
+# The seller may share the order link (e.g. on WhatsApp), but only the buyer
+# can release escrow: confirming from a shared link needs a one-time code sent
+# to the buyer's email on the order.
+# ---------------------------------------------------------------------------
+
+DELIVERY_CODE_TTL_MINUTES = 15
+DELIVERY_CODE_MAX_ATTEMPTS = 5
+DELIVERY_CODE_RESEND_SECONDS = 60
+
+
+def _buyer_contact_email(order):
+    email = ((order.buyer.email if order.buyer else None) or order.buyer_email or "").strip()
+    # Pay Link guests without an email get a placeholder address; it can't receive codes.
+    if not email or (email.startswith("guest-") and email.endswith("@siiqo.com")):
+        return None
+    return email
+
+
+def _mask_email(email):
+    if not email or "@" not in email:
+        return None
+    name, domain = email.split("@", 1)
+    return f"{name[:1]}{'*' * max(len(name) - 1, 2)}@{domain}"
+
+
+def _delivery_code_hash(order_id, code):
+    secret = (os.environ.get("SECRET_KEY") or "siiqo-secret-key-salt-2026").encode()
+    return hmac.new(secret, f"delivery-code-{order_id}-{code}".encode(), hashlib.sha256).hexdigest()
+
+
+def _aware_dt(dt):
+    return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
+
+
+def _check_delivery_code(order, code):
+    from app.models.escrow import DeliveryConfirmationCode
+    row = DeliveryConfirmationCode.query.filter_by(order_id=order.id).with_for_update().first()
+    if not row or _aware_dt(row.expires_at) < _utcnow():
+        return False, "This code has expired. Request a new one."
+    if row.attempts >= DELIVERY_CODE_MAX_ATTEMPTS:
+        return False, "Too many wrong codes. Request a new one."
+    if not hmac.compare_digest(row.code_hash, _delivery_code_hash(order.id, code)):
+        row.attempts += 1
+        db.session.commit()
+        return False, "That code is not correct."
+    db.session.delete(row)
+    return True, None
+
+
+@escrow_bp.route('/confirm-delivery/send-code', methods=['POST'])
+@limiter.limit("5 per 15 minutes")
+def send_delivery_code():
+    """Email the buyer a one-time code to confirm delivery from a shared link."""
+    from app.models.order import Order
+    from app.models.escrow import DeliveryConfirmationCode
+    from app.utils.email import send_siiqo_email
+
+    data = request.get_json() or {}
+    try:
+        order_id = int(data.get('order_id'))
+    except (TypeError, ValueError):
+        return jsonify({"message": "order_id is required"}), 400
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+
+    email = _buyer_contact_email(order)
+    if not email:
+        return jsonify({
+            "message": "This order has no buyer email. Use the link from your payment receipt, or sign in.",
+            "code": "NO_BUYER_EMAIL",
+        }), 409
+
+    row = db.session.get(DeliveryConfirmationCode, order.id)
+    now = _utcnow()
+    if row and row.sent_at and (now - _aware_dt(row.sent_at)).total_seconds() < DELIVERY_CODE_RESEND_SECONDS:
+        return jsonify({"message": "A code was just sent. Please wait a minute before asking again.",
+                        "sent_to": _mask_email(email)}), 429
+
+    import secrets
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    if row is None:
+        row = DeliveryConfirmationCode(order_id=order.id)
+        db.session.add(row)
+    row.code_hash = _delivery_code_hash(order.id, code)
+    row.expires_at = now + timedelta(minutes=DELIVERY_CODE_TTL_MINUTES)
+    row.attempts = 0
+    row.sent_at = now
+    db.session.commit()
+
+    try:
+        send_siiqo_email(
+            to_email=email,
+            subject=f"Your code to confirm Order #{order.id} | Siiqo",
+            template_name="system_notice",
+            first_name=(order.buyer.first_name if order.buyer else None) or order.buyer_name or "there",
+            notice_text=(
+                f"Your code to confirm you received Order #{order.id} is <strong>{code}</strong>.<br><br>"
+                f"It expires in {DELIVERY_CODE_TTL_MINUTES} minutes. Only enter it once you have your order: "
+                "confirming releases the payment to the seller. Never share this code with the seller."
+            ),
+        )
+    except Exception as e:
+        logging.warning(f"[DELIVERY CODE] Email failed for Order #{order.id}: {e}")
+        return jsonify({"message": "We couldn't send the code. Please try again shortly."}), 502
+
+    return jsonify({"status": "success", "sent_to": _mask_email(email)}), 200

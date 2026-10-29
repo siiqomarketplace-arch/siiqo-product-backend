@@ -1,7 +1,7 @@
 from .user import User, Storefront, UserRole, PasswordResetAttempt
 from .product import Category, Catalog, Product
 from .order import Cart, CartItem, Order, OrderItem
-from .escrow import EscrowTransaction, LogisticsAssignment, EscrowStatus
+from .escrow import EscrowTransaction, LogisticsAssignment, EscrowStatus, DeliveryConfirmationCode
 from .finance import Invoice, Receipt, Ledger, InventoryItem, StockMovement, Expense, BrandingSettings
 from .crm import CustomerProfile
 from .marketing import Coupon, Campaign

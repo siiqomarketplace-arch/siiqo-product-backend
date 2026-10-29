@@ -58,7 +58,12 @@ class EscrowTransaction(db.Model):
     # Relationships
     order = db.relationship('Order', back_populates='escrow')
 
-    def to_dict(self) -> dict:
+    # Fields only the buyer (or the payer holding the payment reference) may see:
+    # they can release escrow, reveal paid files/tickets, or contact the buyer.
+    PRIVATE_FIELDS = ("transaction_number", "payment_link", "escrow_code", "event_tickets",
+                      "digital_downloads", "confirmation_url", "buyer_phone", "buyer_email")
+
+    def to_dict(self, include_private: bool = False) -> dict:
         # Check if this order contains event tickets
         is_event = False
         event_tickets_data = []
@@ -129,7 +134,7 @@ class EscrowTransaction(db.Model):
                     if (item.product and item.product.product_type == 'digital' and item.product.file_url)
                 ])
 
-        return {
+        data = {
             "id": self.id,
             "order_id": self.order_id,
             "transaction_number": self.transaction_number,
@@ -159,6 +164,22 @@ class EscrowTransaction(db.Model):
             "buyer_email": self.order.buyer_email if self.order else None,
             "is_guest": bool(self.order.is_guest) if self.order else True,
         }
+        if not include_private:
+            for key in self.PRIVATE_FIELDS:
+                data[key] = [] if key in ("event_tickets", "digital_downloads") else None
+        return data
+
+
+class DeliveryConfirmationCode(db.Model):
+    """One-time code emailed to the buyer so they can confirm delivery from a
+    link the seller shared. Only a keyed hash of the code is stored."""
+    __tablename__ = 'delivery_confirmation_codes'
+
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id', ondelete='CASCADE'), primary_key=True)
+    code_hash = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    sent_at = db.Column(db.DateTime(timezone=True), default=utcnow)
 
 
 class LogisticsAssignment(db.Model):
