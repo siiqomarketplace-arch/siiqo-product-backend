@@ -32,6 +32,7 @@ RESERVED_STORE_SLUGS = frozenset({
     'vendor', 'buyer', 'community', 'finance-tools', 'home',
     'market', 'search', 'ask', 'check', 't', 'sell', 'pay', 'developers', 'help', 'id',
     'me',  # /api/passport/me is the seller's own Passport
+    'fonts', 'images', 'assets',  # static folders served by the website
 })
 
 
