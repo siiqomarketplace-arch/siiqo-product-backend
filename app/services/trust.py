@@ -191,32 +191,34 @@ def calculate_responsiveness_score(vendor_id) -> float:
 
 def calculate_compliance_score(vendor_id) -> float:
     """Pillar 4: Profile Verification & Compliance (Weight: 15% - Max 200 pts)"""
-    from app.models.user import User, Storefront
+    from app.models.user import User
     from app.models.withdrawal import VendorBankAccount
     try:
         user = db.session.get(User, vendor_id)
         if not user:
             return 0.0
 
-        # The trust score is earned by using Siiqo and is free for everyone:
-        # nothing here depends on a paid plan, the paid Verified mark, or
-        # numbers a seller merely typed in.
+        # The trust score is earned by using Siiqo and is free for everyone.
+        # Only checks that can't be faked count: nothing for a paid plan, the
+        # paid Verified mark, typed ID/bank numbers, or uploaded logos/banners.
+        from app.models.order import Order
         score = 0.0
 
-        # Email confirmed (50 pts)
+        # Email confirmed with a code (50 pts)
         if user.is_verified:
             score += 50.0
 
-        # Store logo or banner (50 pts)
-        sf = user.storefront
-        if sf and (getattr(sf, 'store_logo', None) or getattr(sf, 'logo', None)
-                   or getattr(sf, 'banner_url', None) or getattr(sf, 'avatar', None)):
-            score += 50.0
-
-        # Payout bank account linked (100 pts)
-        bank_acc = VendorBankAccount.query.filter_by(vendor_id=vendor_id, is_verified=True).first()
-        if bank_acc or (sf and getattr(sf, 'account_number', None)):
+        # Payout bank account verified with Paystack (100 pts)
+        if VendorBankAccount.query.filter_by(vendor_id=vendor_id, is_verified=True).first():
             score += 100.0
+
+        # Tenure: 90+ days on Siiqo with at least one completed order (50 pts)
+        joined = user.created_at
+        if joined is not None and joined.tzinfo is None:
+            joined = joined.replace(tzinfo=timezone.utc)
+        if joined and joined <= utcnow() - timedelta(days=90):
+            if Order.query.filter_by(vendor_id=int(vendor_id), status='COMPLETED').first():
+                score += 50.0
 
         return round(min(200.0, score), 2)
     except Exception as e:
