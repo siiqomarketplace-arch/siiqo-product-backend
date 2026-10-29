@@ -731,7 +731,12 @@ def telegram_login():
     if not user:
         if create_new:
             virtual_email = f"tg_{tg_id}@siiqo.app"
-            tg_secret = os.environ.get('TG_AUTH_SECRET', 'siiqo_secret_2024')
+            # Shared with the bot; no built-in default (a known default would
+            # let anyone sign in to these accounts).
+            tg_secret = os.environ.get('TG_AUTH_SECRET', '')
+            if not tg_secret.strip():
+                logging.error("[AUTH] TG_AUTH_SECRET is not set; Telegram account creation disabled")
+                return jsonify({"message": "Telegram sign-up is temporarily unavailable. Please sign up with email."}), 503
             virtual_password = f"tg_{tg_id}_{tg_secret}"
             
             # Register new user (pre-verified because authenticated via Telegram OAuth)

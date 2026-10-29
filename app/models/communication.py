@@ -66,8 +66,13 @@ def _send_telegram_notification_async(telegram_id, title, message, type_, order_
     bot_url = os.environ.get('BOT_ORCHESTRATOR_URL', 'https://bot.siiqo.app')
     if not bot_url:
         return
+    # The bot rejects unsigned notifications once SIIQO_NOTIFY_SECRET is set there.
+    headers = {}
+    notify_secret = os.environ.get('SIIQO_NOTIFY_SECRET', '')
+    if notify_secret:
+        headers['X-Siiqo-Notify-Secret'] = notify_secret
     try:
-        requests.post(f"{bot_url.rstrip('/')}/telegram-notification", json={
+        requests.post(f"{bot_url.rstrip('/')}/telegram-notification", headers=headers, json={
             "telegram_id": telegram_id,
             "title": title,
             "message": message,
