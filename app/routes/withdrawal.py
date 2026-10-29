@@ -365,7 +365,9 @@ def get_balance():
         status='PENDING'
     ).scalar() or Decimal('0')
     
-    available = balance - Decimal(str(pending_amount))
+    # Withdrawals are debited when requested, so the ledger balance already
+    # excludes them; subtracting pending again would count them twice.
+    available = balance
     
     return jsonify({
         'status': 'success',
@@ -422,17 +424,21 @@ def request_withdrawal():
         }), 400
 
     vendor_id = _get_user_id()
+    data = request.get_json() or {}
 
-    # Check available balance
-    balance = _get_ledger_balance(int(vendor_id))
-    pending_amount = db.session.query(func.sum(Withdrawal.amount)).filter_by(
-        vendor_id=vendor_id,
-        status='PENDING',
-    ).scalar() or Decimal('0')
-    available = balance - Decimal(str(pending_amount))
+    # Serialise withdrawals per vendor: hold a row lock on the vendor until the
+    # withdrawal and its DEBIT are committed, so two requests can't both spend
+    # the same balance.
+    from app.models.user import User
+    db.session.query(User).filter_by(id=vendor_id).with_for_update().first()
+
+    # Withdrawals are debited when requested, so the ledger balance is what
+    # is still owed to the vendor.
+    available = _get_ledger_balance(int(vendor_id))
 
     MIN_WITHDRAWAL = Decimal('1000')  # ₦1,000 minimum
     if available < MIN_WITHDRAWAL:
+        db.session.rollback()
         return jsonify({
             'message': f'Insufficient balance. Minimum withdrawal is ₦{MIN_WITHDRAWAL:,.2f}. '
                        f'Your available balance is ₦{available:,.2f}.'
@@ -446,39 +452,67 @@ def request_withdrawal():
         bank_acc = VendorBankAccount.query.filter_by(vendor_id=vendor_id).first()
 
     if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
+        db.session.rollback()
         return jsonify({
             'message': 'No verified bank account found. '
                        'Please add and verify a bank account in your payout settings first.'
         }), 400
 
-    data = request.get_json() or {}
+    if not has_flw and not bank_acc.recipient_code:
+        db.session.rollback()
+        return jsonify({'message': 'Paystack recipient not set up for this bank account.'}), 400
+
     requested_amount = data.get('amount')
     if requested_amount:
         try:
             requested_amount = Decimal(str(requested_amount))
-            if requested_amount <= 0 or requested_amount > available:
-                return jsonify({'message': 'Invalid withdrawal amount.'}), 400
         except Exception:
+            db.session.rollback()
             return jsonify({'message': 'Invalid amount format.'}), 400
+        if requested_amount <= 0 or requested_amount > available:
+            db.session.rollback()
+            return jsonify({'message': 'Invalid withdrawal amount.'}), 400
     else:
         requested_amount = available  # default: withdraw all
 
     import uuid as _uuid
     reference = f"WD-{_uuid.uuid4().hex[:12].upper()}"
-    transfer_code = ""
+
+    # Record the withdrawal and its DEBIT before any money moves.
+    withdrawal = Withdrawal(
+        vendor_id=int(vendor_id),
+        amount=requested_amount,
+        fee_amount=Decimal('0'),
+        net_amount=requested_amount,
+        status='PENDING',
+        bank_account_id=bank_acc.id,
+        transfer_reference=reference,
+    )
+    db.session.add(withdrawal)
+    _debit_ledger(
+        vendor_id=int(vendor_id),
+        amount=requested_amount,
+        description=f"Withdrawal to {bank_acc.bank_name} {bank_acc.account_number[-4:]}",
+        reference_id=reference,
+    )
+    db.session.commit()
 
     # Primary transfer channel: Flutterwave if configured, else Paystack
-    if has_flw:
-        flw_res = _flw.transfer_to_vendor(
-            account_bank=bank_acc.bank_code,
-            account_number=bank_acc.account_number,
-            amount_ngn=float(requested_amount),
-            reference=reference,
-            narration="Siiqo vendor withdrawal",
-        )
-        if not flw_res.get("success"):
-            # If Flutterwave rejected and Paystack is available with recipient_code, try Paystack fallback
-            if has_paystack and bank_acc.recipient_code:
+    transfer_code, error_message = "", None
+    try:
+        result = None
+        if has_flw:
+            flw_res = _flw.transfer_to_vendor(
+                account_bank=bank_acc.bank_code,
+                account_number=bank_acc.account_number,
+                amount_ngn=float(requested_amount),
+                reference=reference,
+                narration="Siiqo vendor withdrawal",
+            )
+            if flw_res.get("success"):
+                transfer_code = flw_res.get("transfer_id", "")
+            elif has_paystack and bank_acc.recipient_code:
+                # Flutterwave rejected it; fall back to Paystack
                 from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
                 result = paystack_transfer_to_vendor(
                     recipient_code=bank_acc.recipient_code,
@@ -487,53 +521,52 @@ def request_withdrawal():
                     reason="Siiqo vendor withdrawal",
                 )
                 if not result.get("success"):
-                    return jsonify({
-                        'message': f"Withdrawal failed: {result.get('error_message', flw_res.get('error_message'))}"
-                    }), 400
-                transfer_code = result.get("transfer_code", "")
+                    error_message = result.get('error_message', flw_res.get('error_message'))
             else:
-                return jsonify({
-                    'message': f"Withdrawal failed: {flw_res.get('error_message', 'Payment gateway error')}"
-                }), 400
+                error_message = flw_res.get('error_message', 'Payment gateway error')
         else:
-            transfer_code = flw_res.get("transfer_id", "")
-    elif has_paystack:
-        if not bank_acc.recipient_code:
-            return jsonify({'message': 'Paystack recipient not set up for this bank account.'}), 400
-        from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-        result = paystack_transfer_to_vendor(
-            recipient_code=bank_acc.recipient_code,
-            amount_ngn=float(requested_amount),
-            reference=reference,
-            reason="Siiqo vendor withdrawal",
-        )
-        if not result.get("success"):
-            return jsonify({
-                'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
-            }), 400
-        transfer_code = result.get("transfer_code", "")
+            from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+            result = paystack_transfer_to_vendor(
+                recipient_code=bank_acc.recipient_code,
+                amount_ngn=float(requested_amount),
+                reference=reference,
+                reason="Siiqo vendor withdrawal",
+            )
+            if not result.get("success"):
+                error_message = result.get('error_message', 'Unknown error.')
+        if result and result.get("success"):
+            transfer_code = result.get("transfer_code", "")
+    except Exception as exc:
+        # We can't tell whether the money left. Keep the DEBIT and leave the
+        # withdrawal PENDING for an admin to check against the gateway.
+        logging.error(f"[WITHDRAWAL] {reference} transfer outcome unknown: {exc}", exc_info=True)
+        withdrawal.failure_reason = f"Transfer outcome unknown: {exc}"[:500]
+        db.session.commit()
+        return jsonify({
+            'message': 'Your withdrawal is being checked. If it does not arrive within 24 hours, contact support@siiqo.com.',
+            'amount': str(requested_amount),
+        }), 202
 
-    # Record withdrawal + debit ledger
-    # Note: transfer_code is already set in each branch above (flw_res or result).
-    new_withdrawal = Withdrawal(
-        vendor_id=int(vendor_id),
-        amount=requested_amount,
-        fee_amount=Decimal('0'),
-        net_amount=requested_amount,
-        status='PENDING',
-        bank_account_id=bank_acc.id,
-        transfer_code=transfer_code,
-        transfer_reference=reference,
-    )
-    db.session.add(new_withdrawal)
+    if error_message:
+        # The gateway refused it: no money left, so give the balance back.
+        withdrawal.status = 'FAILED'
+        withdrawal.failure_reason = str(error_message)[:500]
+        withdrawal.processed_at = _utcnow()
+        balance_after = _get_ledger_balance(int(vendor_id)) + requested_amount
+        db.session.add(Ledger(
+            vendor_id=int(vendor_id),
+            transaction_type='CREDIT',
+            amount=requested_amount,
+            description=f"Reversal of failed withdrawal {reference}",
+            reference_id=f"{reference}-REVERSAL",
+            balance_after=balance_after,
+        ))
+        db.session.commit()
+        return jsonify({'message': f"Withdrawal failed: {error_message}"}), 400
 
-    _debit_ledger(
-        vendor_id=int(vendor_id),
-        amount=requested_amount,
-        description=f"Withdrawal to {bank_acc.bank_name} {bank_acc.account_number[-4:]}",
-        reference_id=reference,
-    )
-
+    withdrawal.status = 'SENT'
+    withdrawal.transfer_code = transfer_code
+    withdrawal.processed_at = _utcnow()
     db.session.commit()
 
     return jsonify({
