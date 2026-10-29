@@ -604,6 +604,10 @@ def create_app(config_name: str | None = None) -> Flask:
 
     from app.routes.passport import passport_bp
     app.register_blueprint(passport_bp, url_prefix='/api/passport')
+    from app.routes.check import check_bp
+    app.register_blueprint(check_bp, url_prefix='/api/check')
+    from app.routes.privacy import privacy_bp
+    app.register_blueprint(privacy_bp, url_prefix='/api/privacy')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
