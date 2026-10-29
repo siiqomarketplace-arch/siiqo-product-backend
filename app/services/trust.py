@@ -198,29 +198,25 @@ def calculate_compliance_score(vendor_id) -> float:
         if not user:
             return 0.0
 
+        # The trust score is earned by using Siiqo and is free for everyone:
+        # nothing here depends on a paid plan, the paid Verified mark, or
+        # numbers a seller merely typed in.
         score = 0.0
-        
-        # Email verified (25 pts)
-        if user.is_verified:
-            score += 25.0
-            
-        # Storefront details
-        sf = user.storefront
-        if sf:
-            # Store logo or banner (25 pts)
-            if getattr(sf, 'logo', None) or getattr(sf, 'banner_url', None) or getattr(sf, 'avatar', None):
-                score += 25.0
-            # Paid Verified Accreditation (75 pts)
-            if sf.is_pro_verified or getattr(user, 'is_pro_verified', False) or sf.verification_status == 'VERIFIED':
-                score += 75.0
-            # CAC or NIN provided (50 pts)
-            if sf.cac_reg or getattr(user, 'nin', None):
-                score += 50.0
 
-        # Linked bank account verified via Paystack (50 pts)
+        # Email confirmed (50 pts)
+        if user.is_verified:
+            score += 50.0
+
+        # Store logo or banner (50 pts)
+        sf = user.storefront
+        if sf and (getattr(sf, 'store_logo', None) or getattr(sf, 'logo', None)
+                   or getattr(sf, 'banner_url', None) or getattr(sf, 'avatar', None)):
+            score += 50.0
+
+        # Payout bank account linked (100 pts)
         bank_acc = VendorBankAccount.query.filter_by(vendor_id=vendor_id, is_verified=True).first()
         if bank_acc or (sf and getattr(sf, 'account_number', None)):
-            score += 50.0
+            score += 100.0
 
         return round(min(200.0, score), 2)
     except Exception as e:

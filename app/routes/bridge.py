@@ -950,11 +950,8 @@ def initiate_pro_subscription():
     billing_cycle = data.get('billing_cycle', 'monthly')
     now = _utcnow()
 
-    # Lifetime was only for the first onboarded sellers and is discontinued.
-    # Existing Lifetime holders keep their plan; payments already started
-    # are still completed by the webhook.
-    if billing_cycle == 'lifetime':
-        return jsonify({"message": "Lifetime plans are no longer available."}), 410
+    if billing_cycle not in ('monthly', 'annual'):
+        return jsonify({"message": "Choose a monthly or annual plan."}), 400
 
     # --- DUPLICATE PREVENTION ---
     # Check if user already has an active subscription
@@ -991,16 +988,13 @@ def initiate_pro_subscription():
     if not PAYSTACK_SECRET_KEY:
         return jsonify({"message": "Payment gateway not configured"}), 503
 
-    if not plan_code and billing_cycle != 'lifetime':
+    if not plan_code:
         return jsonify({"message": "Subscription plan not configured"}), 503
 
     # Determine amount in kobo and plan label
     if billing_cycle == 'annual':
         amount_kobo = 2400000   # ₦24,000
         plan_label  = 'PRO_ANNUAL'
-    elif billing_cycle == 'lifetime':
-        amount_kobo = 8700000   # ₦87,000
-        plan_label  = 'LIFETIME'
     else:
         amount_kobo = 300000    # ₦3,000
         plan_label  = 'PRO_MONTHLY'
@@ -1022,9 +1016,7 @@ def initiate_pro_subscription():
                 "cancel_action": f"{SITE_URL}/finance-tools/upgrade",
             }
         }
-        # Only attach a recurring plan code for monthly/annual (not lifetime one-time)
-        if plan_code and billing_cycle != 'lifetime':
-            payload["plan"] = plan_code
+        payload["plan"] = plan_code
 
         resp = http_requests.post(
             f"{PAYSTACK_BASE_URL}/transaction/initialize",
@@ -1475,7 +1467,7 @@ def paystack_webhook():
         # reached this point matched no handler and is ignored.
         is_subscription_payment = (
             reference.startswith('SUB-')
-            or meta_plan_name in ('PRO_MONTHLY', 'PRO_ANNUAL', 'LIFETIME')
+            or meta_plan_name in ('PRO_MONTHLY', 'PRO_ANNUAL')
             or (plan_code and plan_code in (PAYSTACK_MONTHLY_PLAN, PAYSTACK_ANNUAL_PLAN))
         )
         if not is_subscription_payment:
@@ -1485,26 +1477,17 @@ def paystack_webhook():
         if customer_email and status == 'success':
             user = User.query.filter_by(email=customer_email).first()
             if user:
-                # Check metadata for plan_name (Lifetime payments embed this since they
-                # are one-time transactions, not recurring Paystack plan subscriptions)
-                is_lifetime = (meta_plan_name == 'LIFETIME' or 'LIFETIME' in reference.upper())
-
-                if is_lifetime:
-                    billing_cycle = 'lifetime'
-                    plan_name = 'LIFETIME'
-                else:
-                    # Determine billing cycle from plan code
-                    is_annual = (
-                        meta_plan_name == 'PRO_ANNUAL'
-                        or (bool(PAYSTACK_ANNUAL_PLAN) and plan_code == PAYSTACK_ANNUAL_PLAN)
-                    )
-                    billing_cycle = 'annual' if is_annual else 'monthly'
-                    plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
+                is_annual = (
+                    meta_plan_name == 'PRO_ANNUAL'
+                    or (bool(PAYSTACK_ANNUAL_PLAN) and plan_code == PAYSTACK_ANNUAL_PLAN)
+                )
+                billing_cycle = 'annual' if is_annual else 'monthly'
+                plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
 
                 # Find or create the SubscriptionPlan record
                 plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
                 if not plan:
-                    price_map = {'LIFETIME': 87000, 'PRO_ANNUAL': 24000, 'PRO_MONTHLY': 3000}
+                    price_map = {'PRO_ANNUAL': 24000, 'PRO_MONTHLY': 3000}
                     plan = SubscriptionPlan(
                         name=plan_name,
                         price_ngn=price_map.get(plan_name, 3000),
@@ -1523,11 +1506,8 @@ def paystack_webhook():
 
                 # Calculate end date
                 from dateutil.relativedelta import relativedelta
-                from datetime import datetime as _dt_cls
                 now = _utcnow()
-                if billing_cycle == 'lifetime':
-                    end_date = _dt_cls(2099, 12, 31, 23, 59, 59)  # permanent access
-                elif billing_cycle == 'annual':
+                if billing_cycle == 'annual':
                     end_date = now + relativedelta(years=1)
                 else:
                     end_date = now + relativedelta(months=1)
@@ -1557,7 +1537,7 @@ def paystack_webhook():
                     vendor_id=user.id, status='ACTIVE'
                 ).first()
                 plan_name = (active_sub.plan.name or '') if active_sub and active_sub.plan else ''
-                if active_sub and plan_name != 'LIFETIME':
+                if active_sub:
                     # Extend from whichever is later: now or existing end_date (avoids
                     # gaps), by the plan's own interval.
                     base = max(_aware(active_sub.end_date) or _utcnow(), _utcnow())
@@ -2003,8 +1983,7 @@ def vendor_crypto_wallet_post():
 # ===========================================================================
 # SUBSCRIPTION PLANS  — GET /payments/plans
 # Returns all available plans so the frontend can show pricing.
-# Upserts the listed plans; unlisted plans (e.g. discontinued Lifetime) are left
-# untouched so existing holders keep them.
+# Upserts the listed plans so the database matches the catalogue.
 # ===========================================================================
 
 PLAN_CATALOGUE = [
@@ -2110,21 +2089,16 @@ def get_subscription_status():
         }), 200
 
     plan_name = active_sub.plan.name if active_sub.plan else "FREE"
-    if "ANNUAL" in plan_name:
-        billing_cycle = "annual"
-    elif "LIFETIME" in plan_name:
-        billing_cycle = "lifetime"
-    else:
-        billing_cycle = "monthly"
+    billing_cycle = "annual" if "ANNUAL" in plan_name else "monthly"
 
     return jsonify({
-        "plan": "PRO" if "PRO" in plan_name or "LIFETIME" in plan_name else "FREE",
+        "plan": "PRO" if "PRO" in plan_name else "FREE",
         "plan_name": plan_name,
         "status": active_sub.status,
         "billing_cycle": billing_cycle,
         "end_date": active_sub.end_date.isoformat() if active_sub.end_date else None,
         "can_upgrade": billing_cycle == "monthly",
-        "can_cancel": active_sub.status == "ACTIVE" and billing_cycle != "lifetime",
+        "can_cancel": active_sub.status == "ACTIVE",
     }), 200
 
 
@@ -2143,10 +2117,6 @@ def cancel_subscription():
     ).first()
     if not sub:
         return jsonify({"message": "No active subscription found"}), 404
-
-    plan_name = sub.plan.name if sub.plan else ""
-    if "LIFETIME" in plan_name:
-        return jsonify({"message": "Lifetime subscriptions cannot be cancelled"}), 400
 
     sub.status = 'CANCELLED_PENDING_EXPIRY'
     db.session.commit()

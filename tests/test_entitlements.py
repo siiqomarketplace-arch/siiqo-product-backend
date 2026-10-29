@@ -1,6 +1,6 @@
 """Verified Pro step 1: one feature catalogue decides what a seller can use.
 A cancelled plan keeps its features until the paid period ends; the old paid
-badge keeps invoicing; Lifetime is no longer sold."""
+badge keeps invoicing; Lifetime is gone."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -78,23 +78,16 @@ def test_cancelled_but_paid_seller_keeps_pod(make_vendor):
     assert ent.has_feature(vendor.id, "pod")
 
 
-def test_lifetime_no_longer_sold(client, make_vendor, auth_headers, monkeypatch):
+def test_lifetime_is_gone(client, make_vendor, auth_headers, monkeypatch):
     from app.routes import bridge
     monkeypatch.setattr(bridge, "PAYSTACK_SECRET_KEY", "sk_test_not_a_real_key")
     vendor, _ = make_vendor()
     res = client.post("/api/payments/initiate-pro-subscription", json={"billing_cycle": "lifetime"},
                       headers=auth_headers(vendor))
-    assert res.status_code == 410
+    assert res.status_code == 400
 
 
 def test_plan_list_shows_real_fee_and_no_lifetime(client):
     plans = client.get("/api/payments/plans").get_json()["plans"]
     assert all(p["name"] != "LIFETIME" for p in plans)
     assert {p["transaction_fee_pct"] for p in plans} == {3.0}
-
-
-def test_existing_lifetime_holder_keeps_pro(make_vendor):
-    vendor, _ = make_vendor()
-    _subscribe(vendor, days=365 * 70, plan_name="LIFETIME")
-    assert ent.has_feature(vendor.id, "crm")
-    assert ent.plan_summary(vendor.id)["billing_cycle"] == "lifetime"

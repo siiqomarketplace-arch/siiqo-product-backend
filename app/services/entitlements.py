@@ -114,7 +114,7 @@ def plan_summary(user_id, now=None) -> dict:
     if not sub:
         return {"name": "FREE", "status": None, "billing_cycle": None, "end_date": None}
     name = sub.plan.name if sub.plan else "FREE"
-    cycle = "annual" if "ANNUAL" in name else "lifetime" if "LIFETIME" in name else "monthly"
+    cycle = "annual" if "ANNUAL" in name else "monthly"
     return {
         "name": name,
         "status": sub.status,
