@@ -756,7 +756,8 @@ def escrow_status():
                 lookup_tx_id = tx_id or request.args.get("transaction_id") or request.args.get("tx_id")
                 if lookup_tx_id:
                     verif = _flw.verify_transaction(lookup_tx_id)
-                    if verif.get("success") and verif.get("status") == "successful":
+                    from app.routes.payments import flutterwave_verification_matches
+                    if flutterwave_verification_matches(escrow, verif):
                         _handle_flutterwave_payment_confirmed(escrow.transaction_number, str(lookup_tx_id), verif)
                         db.session.refresh(escrow)
             except Exception as _flw_err:

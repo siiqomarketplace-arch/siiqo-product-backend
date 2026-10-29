@@ -1545,6 +1545,38 @@ def flutterwave_webhook():
     return jsonify({"status": "success"}), 200
 
 
+def flutterwave_verification_matches(escrow, verif: dict) -> bool:
+    """True only if a verified Flutterwave transaction really paid THIS escrow:
+    successful, same reference/order, same currency, and at least the amount.
+    Shared by /payments/flutterwave/status and /escrow/status so a successful
+    transaction for one order can never confirm another."""
+    if not (verif and verif.get("success") and verif.get("status") == "successful"):
+        return False
+    flw_tx_ref = verif.get("tx_ref") or ""
+    flw_currency = (verif.get("currency") or "").upper()
+    flw_amount = float(verif.get("amount") or 0)
+    expected_currency = (escrow.currency or "NGN").upper()
+    expected_amount = float(escrow.amount or 0)
+
+    ref_matches = bool(
+        flw_tx_ref == escrow.transaction_number
+        or (escrow.order_id and str(escrow.order_id) == str(verif.get("order_id")))
+        or (escrow.order_id and f"ORD-{escrow.order_id}" in flw_tx_ref)
+        or (escrow.order_id and f"-{escrow.order_id}-" in flw_tx_ref)
+    )
+    currency_matches = flw_currency == expected_currency
+    amount_sufficient = flw_amount >= expected_amount - 0.01
+
+    if not (ref_matches and currency_matches and amount_sufficient):
+        logger.warning(
+            "[FLW VERIFY] Transaction does not match escrow %s: ref_matches=%s, "
+            "currency %s vs %s, amount %s vs %s",
+            escrow.id, ref_matches, flw_currency, expected_currency, flw_amount, expected_amount,
+        )
+        return False
+    return True
+
+
 @payments_bp.route("/flutterwave/status", methods=["GET"])
 @jwt_required(optional=True)
 def flutterwave_status():
@@ -1598,37 +1630,13 @@ def flutterwave_status():
     if escrow.status == EscrowStatus.PENDING_PAYMENT and tx_id:
         try:
             verif = _flw.verify_transaction(tx_id)
-            if verif.get("success") and verif.get("status") == "successful":
-                flw_tx_ref = verif.get("tx_ref") or ""
-                flw_currency = (verif.get("currency") or "").upper()
-                flw_amount = float(verif.get("amount") or 0)
-                expected_currency = (escrow.currency or "NGN").upper()
-                expected_amount = float(escrow.amount or 0)
-
-                ref_matches = (
-                    flw_tx_ref == escrow.transaction_number
-                    or (escrow.order_id and str(escrow.order_id) == str(verif.get("order_id")))
-                    or (escrow.order_id and f"ORD-{escrow.order_id}" in flw_tx_ref)
-                    or (escrow.order_id and f"-{escrow.order_id}-" in flw_tx_ref)
+            if flutterwave_verification_matches(escrow, verif):
+                _handle_flutterwave_payment_confirmed(
+                    tx_ref=escrow.transaction_number,
+                    tx_id=str(tx_id),
+                    verification=verif,
                 )
-                currency_matches = (flw_currency == expected_currency)
-                amount_sufficient = (flw_amount >= expected_amount - 0.01)
-
-                if ref_matches and currency_matches and amount_sufficient:
-                    _handle_flutterwave_payment_confirmed(
-                        tx_ref=escrow.transaction_number,
-                        tx_id=str(tx_id),
-                        verification=verif,
-                    )
-                    db.session.refresh(escrow)
-                else:
-                    logger.warning(
-                        "[FLW STATUS] Verification criteria not met: ref_matches=%s, "
-                        "currency_matches=%s (got %s, expected %s), "
-                        "amount_sufficient=%s (got %s, expected %s)",
-                        ref_matches, currency_matches, flw_currency, expected_currency,
-                        amount_sufficient, flw_amount, expected_amount
-                    )
+                db.session.refresh(escrow)
         except Exception as exc:
             logger.warning("[FLW STATUS] Proactive verification error: %s", exc)
 
