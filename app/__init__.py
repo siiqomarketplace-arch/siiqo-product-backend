@@ -14,6 +14,16 @@ def create_app(config_name: str | None = None) -> Flask:
     if config_name is None:
         config_name = os.environ.get('FLASK_ENV', 'default')
 
+    # Error monitoring (P4): only when SENTRY_DSN is set; no personal data sent.
+    if os.environ.get('SENTRY_DSN'):
+        try:
+            import sentry_sdk
+            sentry_sdk.init(dsn=os.environ['SENTRY_DSN'], send_default_pii=False,
+                            traces_sample_rate=float(os.environ.get('SENTRY_TRACES_SAMPLE_RATE', '0')),
+                            environment=os.environ.get('SENTRY_ENVIRONMENT', 'production'))
+        except Exception:
+            pass
+
     app = Flask(__name__)
     # Trust reverse proxy headers (Cloudflare & Elastic Beanstalk ALB/Nginx)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=2, x_proto=2, x_host=1)
@@ -591,6 +601,9 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(verification_bp, url_prefix='/api/verification')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
+
+    from app.routes.passport import passport_bp
+    app.register_blueprint(passport_bp, url_prefix='/api/passport')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
