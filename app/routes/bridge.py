@@ -583,6 +583,12 @@ def get_buyer_order_detail(order_id):
 @bridge_bp.route('/buyer-orders/<int:order_id>/escrow-code', methods=['GET'])
 @jwt_required()
 def get_escrow_code(order_id):
+    # The escrow code is the buyer's delivery OTP: only the buyer (or an admin) may read it.
+    identity = get_jwt_identity()
+    user = db.session.get(User, int(identity)) if identity and str(identity).isdigit() else None
+    order = db.session.get(Order, order_id)
+    if not user or not order or (order.buyer_id != user.id and user.role != UserRole.ADMIN):
+        return jsonify({"message": "No escrow transaction found"}), 404
     escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
     if not escrow:
         return jsonify({"message": "No escrow transaction found"}), 404
