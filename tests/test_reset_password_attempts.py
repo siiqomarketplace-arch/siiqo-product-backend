@@ -2,18 +2,8 @@
 the code is invalidated after 5 misses, and a new code starts a fresh count."""
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from app.extensions import db
 from app.models.user import PasswordResetAttempt, User
-
-
-@pytest.fixture(autouse=True)
-def _no_rate_limit(app):
-    from app.extensions import limiter
-    limiter.enabled = False
-    yield
-    limiter.enabled = True
 
 
 def _issue(user, code):
