@@ -117,7 +117,7 @@ def register():
                 logging.warning(f"[ERROR] OTP email failed for {existing_user.email}: {e}")
                 return jsonify({
                     "status": "error",
-                    "message": f"Account registered but verification email could not be sent. Please contact support. Error: {str(e)}"
+                    "message": "Account registered, but we couldn't send your verification code. Please tap 'Resend code' or contact support@siiqo.com."
                 }), 500
 
             return jsonify({
@@ -173,7 +173,7 @@ def register():
         # Account is created — user can resend OTP but we tell them what went wrong
         return jsonify({
             "status": "email_error",
-            "message": f"Account created but verification email failed to send. Please use 'Resend OTP'. Error: {str(e)}",
+            "message": "Account created, but we couldn't send your verification code. Please tap 'Resend code'.",
             "email": new_user.email,
         }), 201
 
