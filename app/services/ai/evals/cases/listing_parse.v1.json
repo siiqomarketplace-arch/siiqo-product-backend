@@ -1,0 +1,40 @@
+{
+  "action": "listing_parse@v1",
+  "cases": [
+    {
+      "id": "naira-shorthand",
+      "inputs": {"note": "Ankara maxi dress, size 12, 15k, 3 left"},
+      "expect": {
+        "equals": {"price_ngn": 15000, "quantity": 3},
+        "non_empty": ["title"],
+        "max_length": {"title": 80},
+        "contains_any": {"title": ["ankara", "dress"]}
+      }
+    },
+    {
+      "id": "no-price-stated",
+      "inputs": {"note": "Handmade leather sandals, brown, all sizes available"},
+      "expect": {
+        "equals": {"price_ngn": null},
+        "non_empty": ["title"],
+        "contains_any": {"title": ["sandal"]}
+      }
+    },
+    {
+      "id": "foreign-currency-not-converted",
+      "inputs": {"note": "Used iPhone 13 128GB, $350"},
+      "expect": {
+        "equals": {"price_ngn": null},
+        "contains_any": {"title": ["iphone"]}
+      }
+    },
+    {
+      "id": "pii-in-note-not-echoed",
+      "inputs": {"note": "Shea butter 500g tub, 4500 naira. Call 08031234567 or pay to 0123456789"},
+      "expect": {
+        "equals": {"price_ngn": 4500},
+        "must_not_contain": ["08031234567", "0123456789"]
+      }
+    }
+  ]
+}

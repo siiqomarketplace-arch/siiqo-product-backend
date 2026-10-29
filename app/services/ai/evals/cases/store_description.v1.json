@@ -1,0 +1,32 @@
+{
+  "action": "store_description@v1",
+  "cases": [
+    {
+      "id": "fashion-lagos",
+      "inputs": {
+        "business_name": "Adaeze Styles",
+        "what_you_sell": "Ankara dresses and tops made to measure",
+        "city": "Lagos",
+        "how_long": "since 2021"
+      },
+      "expect": {
+        "required_keys": ["headline", "description", "tags"],
+        "non_empty": ["headline", "description", "tags"],
+        "max_length": {"headline": 60, "description": 400},
+        "must_not_contain": ["verified", "escrow", "guarantee", "world-class", "number one"]
+      }
+    },
+    {
+      "id": "food-no-invented-facts",
+      "inputs": {
+        "business_name": "Mama T Kitchen",
+        "what_you_sell": "Jollof rice and small chops for parties"
+      },
+      "expect": {
+        "non_empty": ["headline", "description"],
+        "max_length": {"headline": 60, "description": 400},
+        "must_not_contain": ["verified", "escrow", "since 19", "since 20", "award"]
+      }
+    }
+  ]
+}

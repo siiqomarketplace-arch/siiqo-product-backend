@@ -43,7 +43,7 @@ def test_paid_seller_gets_pro_tools(make_vendor, status):
 
 def test_expired_or_cancelled_plan_is_free(make_vendor):
     vendor, _ = make_vendor()
-    _subscribe(vendor, days=-1)
+    _subscribe(vendor, days=-(ent.GRACE_DAYS + 1))
     _subscribe(vendor, status="CANCELLED")
     assert not ent.plan_active(vendor.id)
 

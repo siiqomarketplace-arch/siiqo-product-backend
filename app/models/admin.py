@@ -61,6 +61,9 @@ class VendorSubscription(db.Model):
     # ACTIVE, EXPIRED, CANCELLED
     start_date = db.Column(db.DateTime(timezone=True), default=utcnow)
     end_date = db.Column(db.DateTime(timezone=True), nullable=False)
+    # Paystack's subscription handle, used to stop auto-renew on a refund.
+    paystack_subscription_code = db.Column(db.String(100), nullable=True)
+    paystack_email_token = db.Column(db.String(100), nullable=True)
 
     # Relationships
     vendor = db.relationship('User', backref='subscriptions')

@@ -992,12 +992,11 @@ def initiate_pro_subscription():
         return jsonify({"message": "Subscription plan not configured"}), 503
 
     # Determine amount in kobo and plan label
-    if billing_cycle == 'annual':
-        amount_kobo = 2400000   # ₦24,000
-        plan_label  = 'PRO_ANNUAL'
-    else:
-        amount_kobo = 300000    # ₦3,000
-        plan_label  = 'PRO_MONTHLY'
+    # Verified Pro. Paystack charges the amount set on the plan code, so the
+    # plans in the Paystack dashboard must carry the same prices.
+    from app.services.billing import PLAN_PRICES_NGN
+    plan_label = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
+    amount_kobo = PLAN_PRICES_NGN[plan_label] * 100
 
     import uuid as _sub_uuid
     ref = f"SUB-{plan_label}-{user_id}-{_sub_uuid.uuid4().hex[:8].upper()}"
@@ -1481,48 +1480,14 @@ def paystack_webhook():
                     meta_plan_name == 'PRO_ANNUAL'
                     or (bool(PAYSTACK_ANNUAL_PLAN) and plan_code == PAYSTACK_ANNUAL_PLAN)
                 )
-                billing_cycle = 'annual' if is_annual else 'monthly'
-                plan_name = 'PRO_ANNUAL' if billing_cycle == 'annual' else 'PRO_MONTHLY'
-
-                # Find or create the SubscriptionPlan record
-                plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
-                if not plan:
-                    price_map = {'PRO_ANNUAL': 24000, 'PRO_MONTHLY': 3000}
-                    plan = SubscriptionPlan(
-                        name=plan_name,
-                        price_ngn=price_map.get(plan_name, 3000),
-                        features={"unlimited_invoices": True, "crm": True},
-                        is_active=True,
-                    )
-                    db.session.add(plan)
-                    db.session.flush()
-
-                # Supersede any existing active subscriptions
-                existing = VendorSubscription.query.filter_by(
-                    vendor_id=user.id, status='ACTIVE'
-                ).all()
-                for sub in existing:
-                    sub.status = 'SUPERSEDED'
-
-                # Calculate end date
-                from dateutil.relativedelta import relativedelta
-                now = _utcnow()
-                if billing_cycle == 'annual':
-                    end_date = now + relativedelta(years=1)
-                else:
-                    end_date = now + relativedelta(months=1)
-
-                # Create new subscription record
-                new_sub = VendorSubscription(
-                    vendor_id=user.id,
-                    plan_id=plan.id,
-                    status='ACTIVE',
-                    start_date=now,
-                    end_date=end_date,
+                from app.services.billing import apply_subscription_payment, remember_paystack_subscription
+                apply_subscription_payment(
+                    user, 'PRO_ANNUAL' if is_annual else 'PRO_MONTHLY',
+                    reference=reference or None,
+                    amount_ngn=(data.get('amount') or 0) / 100 if data.get('amount') else None,
                 )
-                db.session.add(new_sub)
-                db.session.commit()
-                logging.info(f'[PAYSTACK] Subscription activated for user {user.id} ({billing_cycle}) until {end_date}')
+                if event_type == 'subscription.create':
+                    remember_paystack_subscription(user, data.get('subscription_code'), data.get('email_token'))
 
     # Handle subscription renewal invoice payment
     elif event_type in ('invoice.update', 'invoice.payment_success'):
@@ -1532,19 +1497,15 @@ def paystack_webhook():
         if customer_email and invoice_status in ('success', 'paid'):
             user = User.query.filter_by(email=customer_email).first()
             if user:
-                from dateutil.relativedelta import relativedelta
-                active_sub = VendorSubscription.query.filter_by(
-                    vendor_id=user.id, status='ACTIVE'
-                ).first()
-                plan_name = (active_sub.plan.name or '') if active_sub and active_sub.plan else ''
-                if active_sub:
-                    # Extend from whichever is later: now or existing end_date (avoids
-                    # gaps), by the plan's own interval.
-                    base = max(_aware(active_sub.end_date) or _utcnow(), _utcnow())
-                    interval = relativedelta(years=1) if 'ANNUAL' in plan_name else relativedelta(months=1)
-                    active_sub.end_date = base + interval
-                    db.session.commit()
-                    logging.info(f'[PAYSTACK] Subscription renewed for user {user.id} — new end_date: {active_sub.end_date}')
+                from app.services.entitlements import active_subscription
+                from app.services.billing import apply_subscription_payment
+                active_sub = active_subscription(user.id)
+                plan_name = (active_sub.plan.name if active_sub and active_sub.plan else '') or 'PRO_MONTHLY'
+                # The renewal's charge.success carries the same reference, so the
+                # plan is extended once whichever event arrives first.
+                reference = (data.get('transaction') or {}).get('reference') or data.get('invoice_code')
+                apply_subscription_payment(user, plan_name, reference=reference,
+                                           amount_ngn=(data.get('amount') or 0) / 100 if data.get('amount') else None)
 
     # Handle subscription cancellation / disable
     elif event_type in ('subscription.not_renew', 'subscription.disable'):
@@ -1553,10 +1514,8 @@ def paystack_webhook():
         if customer_email:
             user = User.query.filter_by(email=customer_email).first()
             if user:
-                VendorSubscription.query.filter_by(
-                    vendor_id=user.id, status='ACTIVE'
-                ).update({'status': 'CANCELLED'})
-                db.session.commit()
+                from app.services.billing import stop_auto_renew
+                stop_auto_renew(user)
                 logging.info(f'[PAYSTACK] Subscription cancelled for user {user.id} (event: {event_type})')
 
     return jsonify({"status": "ok"}), 200
@@ -1986,20 +1945,22 @@ def vendor_crypto_wallet_post():
 # Upserts the listed plans so the database matches the catalogue.
 # ===========================================================================
 
+def _verified_pro_features():
+    from app.services.entitlements import FEATURES
+    return [f.label for f in FEATURES.values()] + ["Your trust score stays free and earned by how you sell"]
+
+
 PLAN_CATALOGUE = [
     {
         "name": "FREE",
         "price_ngn": 0,
         "billing": "forever",
-        "label": "Starter",
-        "tagline": "Get started for free",
+        "label": "Free",
+        "tagline": "Free to start",
         "features": [
-            "1 storefront theme",
-            "Up to 10 products",
-            "3 active Pay Links",
-            "7-day analytics",
-            "Siiqo escrow on all orders",
-            "Standard trust badge",
+            "Storefront, Pay Links and escrow on every order",
+            "Up to 10 product listings",
+            "Free Trust Passport and trust score",
         ],
         "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
         "cta": "Start Free",
@@ -2007,41 +1968,25 @@ PLAN_CATALOGUE = [
     },
     {
         "name": "PRO_MONTHLY",
-        "price_ngn": 3000,
+        "price_ngn": 1999,
         "billing": "monthly",
-        "label": "Pro",
-        "tagline": "For growing businesses",
-        "features": [
-            "Unlimited products & catalogs",
-            "All storefront themes + customization",
-            "Unlimited Pay Links",
-            "Full analytics (all time)",
-            "Invoice & receipt generator",
-            "CRM + customer database",
-            "Marketing card generator",
-            "3 campaign email blasts/month",
-            "Coupon creation & management",
-            "Priority marketplace placement",
-            "Telegram bot access",
-        ],
+        "label": "Verified Pro",
+        "tagline": "Get verified and unlock Pro tools",
+        "features": _verified_pro_features(),
         "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
-        "cta": "Start Pro — ₦3,000/mo",
-        "highlight": False,
+        "cta": "Get Verified Pro — ₦1,999/mo",
+        "highlight": True,
     },
     {
         "name": "PRO_ANNUAL",
-        "price_ngn": 24000,
+        "price_ngn": 19990,
         "billing": "annual",
-        "label": "Pro Annual",
-        "tagline": "Save ₦12,000 vs monthly",
-        "features": [
-            "Everything in Pro Monthly",
-            "₦12,000 savings per year",
-            "Priority support (24h response)",
-        ],
+        "label": "Verified Pro (yearly)",
+        "tagline": "Two months free",
+        "features": _verified_pro_features(),
         "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
-        "cta": "Go Annual — ₦24,000/yr",
-        "highlight": True,
+        "cta": "Get Verified Pro — ₦19,990/yr",
+        "highlight": False,
     },
 ]
 

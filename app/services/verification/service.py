@@ -146,6 +146,12 @@ def start_identity(user: User, *, seller_type: str, nin: str, consent: bool) -> 
                                 "or contact support.", 429)
 
     provider = get_provider()
+    # Pay first: a real provider check is part of Verified Pro. Mock checks are
+    # staff testing and need no plan.
+    if provider.name != "mock":
+        from app.services.entitlements import plan_active
+        if not plan_active(user.id):
+            raise VerificationError("PLAN_REQUIRED", "Get Verified Pro to verify your identity.", 402)
     id_hash = hash_id_number(nin_digits)
     case = VerificationCase(
         user_id=user.id,
@@ -227,6 +233,11 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
         case.reason_code = case.reason_code or "UNKNOWN_OUTCOME"
 
     db.session.commit()
+    if case.status == CaseStatus.FAILED and case.provider != "mock":
+        # Details didn't match: after the free retries, refund and end the plan.
+        # Fraud signals (FAILED_FRAUD) are never refunded.
+        from app.services.billing import handle_identity_mismatch
+        handle_identity_mismatch(case.user_id)
     return case
 
 

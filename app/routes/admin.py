@@ -1397,6 +1397,17 @@ def admin_verify_payment(order_id):
 # a backend error (e.g. Notification import crash on Order #226-228).
 # ---------------------------------------------------------------------------
 
+@admin_bp.route('/billing/verified-pro-notice', methods=['POST'])
+@jwt_required()
+def admin_send_verified_pro_notice():
+    """Superadmin: tell current Pro subscribers that Pro is now Verified Pro.
+    Each seller is notified once, so running it again is harmless."""
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "Superadmin access required"}), 403
+    from app.services.billing import send_verified_pro_notice
+    return jsonify({"status": "success", "notified": send_verified_pro_notice()}), 200
+
+
 @admin_bp.route('/escrow/fix-crypto-order/<int:order_id>', methods=['POST'])
 @jwt_required()
 def admin_fix_crypto_order(order_id):

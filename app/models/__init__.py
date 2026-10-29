@@ -8,6 +8,7 @@ from .marketing import Coupon, Campaign
 from .community import Article, Comment, Review, BlogAuthor
 from .partnerships import PartnerApplication, Referral, PartnerStaff
 from .admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription, SponsoredListing, Favorite
+from .billing import SubscriptionPayment
 from .communication import Notification, Message
 from .social import Post, PostLike, PostComment, Follow, PostView, UserActivity
 from .withdrawal import VendorBankAccount, Withdrawal, PODPayment, VendorCryptoWallet, DayaPayment
@@ -19,6 +20,7 @@ from .event import Event, TicketType, TicketPurchase, EventReview
 from .fee_sweep import SiiqoFeeSweep
 from .telemetry import PlatformEvent, TrustEvidence
 from .verification import VerificationCase, VerificationCheck, VerificationStatus
+from .ai import AIUsage
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',
@@ -30,7 +32,7 @@ __all__ = [
     'Coupon', 'Campaign',
     'Article', 'Comment', 'Review', 'BlogAuthor',
     'PartnerApplication', 'Referral', 'PartnerStaff',
-    'AdminUser', 'PlatformSetting', 'SubscriptionPlan', 'VendorSubscription',
+    'AdminUser', 'PlatformSetting', 'SubscriptionPlan', 'VendorSubscription', 'SubscriptionPayment',
     'SponsoredListing', 'Favorite',
     'Notification', 'Message',
     'Post', 'PostLike', 'PostComment', 'Follow', 'PostView', 'UserActivity',
@@ -43,4 +45,5 @@ __all__ = [
     'SiiqoFeeSweep',
     'PlatformEvent', 'TrustEvidence',
     'VerificationCase', 'VerificationCheck', 'VerificationStatus',
+    'AIUsage',
 ]

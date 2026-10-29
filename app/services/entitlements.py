@@ -12,7 +12,7 @@ plans and add-ons can change in one place:
 - ADD_ON          bought separately (reserved for later add-ons)
 """
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.extensions import db
 
@@ -23,6 +23,8 @@ ADD_ON = "add_on"
 
 # A cancelled subscription keeps its features until the paid period ends.
 PAID_STATUSES = ("ACTIVE", "CANCELLED_PENDING_EXPIRY")
+# An auto-renewing plan stays usable this long after a missed renewal.
+GRACE_DAYS = 3
 
 
 @dataclass(frozen=True)
@@ -33,15 +35,16 @@ class Feature:
     # The old paid "Pro Verified" badge (storefront.is_pro_verified) also
     # unlocked a few tools; kept so nobody loses access they paid for.
     legacy_badge_grants: bool = False
+    # PLAN_VERIFIED features that paying sellers keep until identity
+    # verification opens to everyone, so nobody loses them before they can verify.
+    plan_only_until_verification_opens: bool = False
 
 
 FEATURES = {f.key: f for f in (
     Feature("unlimited_products", PLAN, "Unlimited product listings"),
     Feature("crm", PLAN, "CRM customer records and marketing tools"),
     Feature("invoices_unlimited", PLAN, "Unlimited invoices and billing tools", legacy_badge_grants=True),
-    # Pay on Delivery stays a Pro feature for now; it moves to PLAN_VERIFIED
-    # when Verified Pro billing ships (build step 3).
-    Feature("pod", PLAN, "Accept Pay on Delivery"),
+    Feature("pod", PLAN_VERIFIED, "Accept Pay on Delivery", plan_only_until_verification_opens=True),
     Feature("verified_badge", PLAN_VERIFIED, "Verified mark on your store and Trust Passport"),
 )}
 
@@ -69,9 +72,23 @@ def active_subscription(user_id, now=None):
             .order_by(VendorSubscription.end_date.desc())
             .all())
     for sub in subs:
-        if sub.end_date and _aware(sub.end_date) > now:
+        if not sub.end_date:
+            continue
+        end = _aware(sub.end_date)
+        if sub.status == "ACTIVE":
+            end = end + timedelta(days=GRACE_DAYS)
+        if end > now:
             return sub
     return None
+
+
+def in_grace(sub, now=None) -> bool:
+    return bool(sub and sub.status == "ACTIVE" and sub.end_date and _aware(sub.end_date) <= (now or _now()))
+
+
+def verification_open() -> bool:
+    from app.services.verification.service import is_public
+    return is_public()
 
 
 def plan_active(user_id, now=None) -> bool:
@@ -105,6 +122,8 @@ def has_feature(user_id, key, now=None) -> bool:
     if feature.rule == PLAN:
         return paid
     if feature.rule == PLAN_VERIFIED:
+        if paid and feature.plan_only_until_verification_opens and not verification_open():
+            return True
         return paid and identity_verified(user_id, now)
     return False
 
@@ -117,7 +136,7 @@ def plan_summary(user_id, now=None) -> dict:
     cycle = "annual" if "ANNUAL" in name else "monthly"
     return {
         "name": name,
-        "status": sub.status,
+        "status": "GRACE" if in_grace(sub, now) else sub.status,
         "billing_cycle": cycle,
         "end_date": _aware(sub.end_date).isoformat() if sub.end_date else None,
     }

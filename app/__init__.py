@@ -82,6 +82,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS ga4_measurement_id VARCHAR(50)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS confirmation_email_sent BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE sponsored_listings ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(100)",
+                "ALTER TABLE vendor_subscriptions ADD COLUMN IF NOT EXISTS paystack_subscription_code VARCHAR(100)",
+                "ALTER TABLE vendor_subscriptions ADD COLUMN IF NOT EXISTS paystack_email_token VARCHAR(100)",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
                 # ── Payment link product type, digital file & currency ──────────
@@ -505,6 +507,18 @@ def create_app(config_name: str | None = None) -> Flask:
     def health_check():
         return jsonify({"status": "healthy", "version": "2.0.0"}), 200
 
+    @app.route("/health/ready")
+    @limiter.exempt
+    def readiness_check():
+        """Liveness stays on /health; this also checks the database."""
+        from sqlalchemy import text as _health_text
+        try:
+            db.session.execute(_health_text("SELECT 1"))
+            return jsonify({"status": "ready", "database": "ok"}), 200
+        except Exception:
+            db.session.rollback()
+            return jsonify({"status": "unavailable", "database": "error"}), 503
+
     @app.route("/")
     @limiter.exempt
     def index():
@@ -683,6 +697,19 @@ def create_app(config_name: str | None = None) -> Flask:
             except Exception as expiry_err:
                 logger.warning(f"Ticket expiry task registration skipped: {expiry_err}")
 
+            # Verified Pro: renewal reminders and Verified-mark sync, once a day
+            try:
+                from app.services.billing import run_daily_billing_tasks
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_daily_billing_tasks),
+                    trigger=IntervalTrigger(hours=24),
+                    id='daily_billing_tasks',
+                    name='Verified Pro renewal reminders and Verified-mark sync',
+                    replace_existing=True,
+                )
+            except Exception as billing_err:
+                logger.warning(f"Billing task registration skipped: {billing_err}")
+
             # Platform fee auto-sweep — check every 6 hours, sweep when >= threshold
             try:
                 from app.tasks.fee_sweep_tasks import run_platform_fee_sweep
@@ -723,12 +750,37 @@ def create_app(config_name: str | None = None) -> Flask:
 
 
 def _run_in_context(app, task_fn):
-    """Run an escrow task function inside the Flask application context."""
+    """Run a scheduled task inside the Flask application context.
+
+    The file lock above keeps one scheduler per server. With several servers,
+    each would run the money jobs (auto-release, fee sweep), so every task also
+    takes a cluster-wide Postgres advisory lock and is skipped if another
+    server is already running it."""
+    import logging
+    import zlib
     with app.app_context():
+        conn = None
         try:
+            if db.engine.dialect.name == "postgresql":
+                from sqlalchemy import text as _lock_text
+                key = zlib.crc32(task_fn.__name__.encode())
+                conn = db.engine.connect()
+                got = conn.execute(_lock_text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar()
+                if not got:
+                    logging.getLogger(__name__).info(
+                        f"[SCHEDULER] '{task_fn.__name__}' already running on another server; skipped")
+                    conn.close()
+                    return
             task_fn()
         except Exception as e:
-            import logging
             logging.getLogger(__name__).error(
                 f"[SCHEDULER] Error in task '{task_fn.__name__}': {e}"
             )
+        finally:
+            if conn is not None and not conn.closed:
+                try:
+                    from sqlalchemy import text as _unlock_text
+                    conn.execute(_unlock_text("SELECT pg_advisory_unlock(:k)"),
+                                 {"k": zlib.crc32(task_fn.__name__.encode())})
+                finally:
+                    conn.close()
