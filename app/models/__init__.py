@@ -1,4 +1,4 @@
-from .user import User, Storefront, UserRole
+from .user import User, Storefront, UserRole, PasswordResetAttempt
 from .product import Category, Catalog, Product
 from .order import Cart, CartItem, Order, OrderItem
 from .escrow import EscrowTransaction, LogisticsAssignment, EscrowStatus
@@ -21,7 +21,7 @@ from .telemetry import PlatformEvent, TrustEvidence
 from .verification import VerificationCase, VerificationCheck, VerificationStatus
 
 __all__ = [
-    'User', 'Storefront', 'UserRole',
+    'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',
     'Category', 'Catalog', 'Product',
     'Cart', 'CartItem', 'Order', 'OrderItem',
     'EscrowTransaction', 'LogisticsAssignment', 'EscrowStatus',

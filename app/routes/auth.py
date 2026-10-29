@@ -497,7 +497,23 @@ def forgot_password():
 # Reset Password
 # ---------------------------------------------------------------------------
 
-_failed_reset_attempts = {}
+MAX_RESET_ATTEMPTS = 5
+
+
+def _reset_attempts(user):
+    """The failed-guess counter for the user's current reset code, locked for
+    this request. Kept in the database so all workers share one count."""
+    import hashlib
+    from app.models.user import PasswordResetAttempt
+    fingerprint = hashlib.sha256(f"{user.id}:{user.reset_otp or ''}".encode()).hexdigest()
+    row = PasswordResetAttempt.query.filter_by(user_id=user.id).with_for_update().first()
+    if row is None:
+        row = PasswordResetAttempt(user_id=user.id, otp_fingerprint=fingerprint, failed_count=0)
+        db.session.add(row)
+    elif row.otp_fingerprint != fingerprint:
+        row.otp_fingerprint = fingerprint
+        row.failed_count = 0
+    return row
 
 @auth_bp.route('/reset-password', methods=['POST'])
 @limiter.limit("5 per minute; 20 per hour")
@@ -521,20 +537,23 @@ def reset_password():
     if user.otp_expiry and _utcnow() > user.otp_expiry.replace(tzinfo=timezone.utc):
         return jsonify({"message": "Code has expired. Please request a new one."}), 400
 
+    attempts = _reset_attempts(user)
+    if attempts.failed_count >= MAX_RESET_ATTEMPTS:
+        db.session.commit()
+        return jsonify({"message": "Too many invalid attempts. Please request a new code."}), 400
+
     if not user.reset_otp or user.reset_otp.strip() != otp:
-        # Increment failed attempts lockout
-        attempts = _failed_reset_attempts.get(user.id, 0) + 1
-        _failed_reset_attempts[user.id] = attempts
-        if attempts >= 5:
+        attempts.failed_count += 1
+        if attempts.failed_count >= MAX_RESET_ATTEMPTS:
             user.reset_otp = None
             user.otp_expiry = None
             db.session.commit()
-            _failed_reset_attempts.pop(user.id, None)
             return jsonify({"message": "Too many invalid attempts. Reset code has been invalidated. Please request a new code."}), 400
+        db.session.commit()
         return jsonify({"message": "Invalid or expired code"}), 400
 
     # Success: clear failed attempts and reset password
-    _failed_reset_attempts.pop(user.id, None)
+    db.session.delete(attempts)
     user.set_password(new_password)
     user.reset_otp = None
     user.otp_expiry = None

@@ -294,3 +294,14 @@ class Storefront(db.Model):
             data["nin_document_url"] = self.nin_document_url
             data["cac_document_url"] = self.cac_document_url
         return data
+
+
+class PasswordResetAttempt(db.Model):
+    """Failed reset-code guesses, shared by every worker and server.
+    The count belongs to one code (by fingerprint): a new code starts at 0."""
+    __tablename__ = 'password_reset_attempts'
+
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), primary_key=True)
+    otp_fingerprint = db.Column(db.String(64), nullable=False)
+    failed_count = db.Column(db.Integer, nullable=False, default=0)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
