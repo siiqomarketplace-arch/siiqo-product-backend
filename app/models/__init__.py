@@ -9,6 +9,7 @@ from .community import Article, Comment, Review, BlogAuthor
 from .partnerships import PartnerApplication, Referral, PartnerStaff
 from .admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription, SponsoredListing, Favorite
 from .billing import SubscriptionPayment
+from .foundations import OrderStatusHistory, FeeLedgerEntry, SellerIdentifier
 from .communication import Notification, Message
 from .social import Post, PostLike, PostComment, Follow, PostView, UserActivity
 from .withdrawal import VendorBankAccount, Withdrawal, PODPayment, VendorCryptoWallet, DayaPayment
@@ -45,5 +46,5 @@ __all__ = [
     'SiiqoFeeSweep',
     'PlatformEvent', 'TrustEvidence',
     'VerificationCase', 'VerificationCheck', 'VerificationStatus',
-    'AIUsage',
+    'AIUsage', 'OrderStatusHistory', 'FeeLedgerEntry', 'SellerIdentifier',
 ]

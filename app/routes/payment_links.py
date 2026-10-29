@@ -188,7 +188,10 @@ def get_public_payment_link(slug):
         return jsonify({"message": "Payment link not found"}), 404
 
     sf = link.vendor.storefront if link.vendor else None
-    
+
+    from app.services.foundations import record_event
+    record_event("paylink_viewed", vendor_id=link.vendor_id, payment_link_id=link.id)
+
     return jsonify({
         "link": link.to_dict(),
         "vendor": {

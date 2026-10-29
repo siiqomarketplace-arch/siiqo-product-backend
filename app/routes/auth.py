@@ -608,11 +608,15 @@ def delete_account():
     if not user.check_password(password):
         return jsonify({"message": "Incorrect password"}), 403
 
+    # Anonymise instead of deleting: personal details go, orders and the trust
+    # record stay (app/services/accounts.py).
+    from app.services.accounts import AccountDeletionBlocked, anonymise_user
     try:
-        db.session.delete(user)
-        db.session.commit()
-        return jsonify({"status": "success", "message": "Account permanently deleted"}), 200
-    except Exception as e:
+        anonymise_user(user)
+        return jsonify({"status": "success", "message": "Your account has been deleted."}), 200
+    except AccountDeletionBlocked as e:
+        return jsonify({"message": str(e), "code": "OPEN_ORDERS"}), 409
+    except Exception:
         db.session.rollback()
         return jsonify({"message": "Failed to delete account. Please try again."}), 500
 

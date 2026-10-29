@@ -69,6 +69,15 @@ class Order(db.Model):
     
     payment_link_id = db.Column(db.Integer, db.ForeignKey('payment_links.id'), nullable=True)
 
+    # Phase 0B: currency and the NGN rate at charge time (None until known),
+    # and when the order was paid, delivered and released. Set automatically
+    # by app/services/foundations.py.
+    currency = db.Column(db.String(10), nullable=True, default='NGN')
+    fx_rate_to_ngn = db.Column(db.Numeric(18, 6), nullable=True)
+    paid_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    delivered_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    released_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
     # Relationships
     buyer = db.relationship('User', foreign_keys=[buyer_id])
     vendor = db.relationship('User', foreign_keys=[vendor_id])

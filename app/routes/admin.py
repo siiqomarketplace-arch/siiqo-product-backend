@@ -489,100 +489,21 @@ def delete_user_admin(user_id):
     if not user:
         return jsonify({"message": "User not found"}), 404
 
+    # Anonymise instead of hard-deleting: personal details go; orders, escrow,
+    # ledger, reviews and trust evidence stay (app/services/accounts.py).
+    # ?force=true overrides the open-orders check (e.g. fraud takedown).
+    from app.services.accounts import AccountDeletionBlocked, anonymise_user
     try:
-        from app.models.escrow import EscrowTransaction as ET
-        from app.models.order import Order, OrderItem
-        from app.models.trust import VendorTrustProfile, TrustScoreHistory
-        from app.models.withdrawal import VendorBankAccount, Withdrawal, PODPayment, VendorCryptoWallet, DayaPayment
-        from app.models.payment_link import PaymentLink
-        from app.models.social import Post, PostLike, PostComment, Follow, PostView, UserActivity
-        from app.models.communication import Notification, Message
-        from app.models.finance import Invoice, Receipt, Ledger
-        from app.models.admin import VendorSubscription, SponsoredListing, Favorite
-        from app.models.partnerships import PartnerApplication, Referral, PartnerStaff
-        from app.models.community import Review
-
-        uid = user.id
-
-        # ── 1. Trust ──────────────────────────────────────────────────
-        TrustScoreHistory.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        VendorTrustProfile.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-
-        # ── 2. Social ─────────────────────────────────────────────────
-        UserActivity.query.filter_by(user_id=uid).delete(synchronize_session=False)
-        Follow.query.filter(
-            (Follow.follower_id == uid) | (Follow.following_id == uid)
-        ).delete(synchronize_session=False)
-        PostView.query.filter_by(user_id=uid).delete(synchronize_session=False)
-        PostLike.query.filter_by(user_id=uid).delete(synchronize_session=False)
-        PostComment.query.filter_by(user_id=uid).delete(synchronize_session=False)
-        Post.query.filter_by(user_id=uid).delete(synchronize_session=False)
-
-        # ── 3. Notifications & Messages ───────────────────────────────
-        Notification.query.filter_by(user_id=uid).delete(synchronize_session=False)
-        Message.query.filter(
-            (Message.sender_id == uid) | (Message.receiver_id == uid)
-        ).delete(synchronize_session=False)
-
-        # ── 4. Reviews ────────────────────────────────────────────────
-        Review.query.filter(
-            (Review.vendor_id == uid) | (Review.buyer_id == uid)
-        ).delete(synchronize_session=False)
-
-        # ── 5. Finance ────────────────────────────────────────────────
-        Invoice.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        Receipt.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        Ledger.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-
-        # ── 6. Payment links ──────────────────────────────────────────
-        PaymentLink.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-
-        # ── 7. Withdrawals & bank accounts ────────────────────────────
-        Withdrawal.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        VendorBankAccount.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        VendorCryptoWallet.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        DayaPayment.query.filter_by(buyer_id=uid).delete(synchronize_session=False)
-
-        # ── 8. Subscriptions & sponsored listings & favorites ─────────
-        VendorSubscription.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        SponsoredListing.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
-        Favorite.query.filter_by(user_id=uid).delete(synchronize_session=False)
-
-        # ── 9. Partnerships & referrals ───────────────────────────────
-        Referral.query.filter(
-            (Referral.referrer_id == uid) | (Referral.referred_id == uid)
-        ).delete(synchronize_session=False)
-        PartnerStaff.query.filter_by(partner_id=uid).delete(synchronize_session=False)
-        PartnerApplication.query.filter_by(user_id=uid).delete(synchronize_session=False)
-
-        # ── 10. Orders & escrow ───────────────────────────────────────
-        orders = Order.query.filter(
-            (Order.buyer_id == uid) | (Order.vendor_id == uid)
-        ).all()
-        for order in orders:
-            ET.query.filter_by(order_id=order.id).delete(synchronize_session=False)
-            OrderItem.query.filter_by(order_id=order.id).delete(synchronize_session=False)
-            db.session.delete(order)
-
-        # ── 11. Products & storefront ─────────────────────────────────
-        if user.storefront:
-            from app.models.product import Product
-            Product.query.filter_by(storefront_id=user.storefront.id).delete(synchronize_session=False)
-            db.session.delete(user.storefront)
-
-        # ── 12. Delete user ───────────────────────────────────────────
-        user_email = user.email  # Store before deletion
+        user_email = user.email
         user_data_summary = {
             'email': user.email,
             'role': user.role,
             'storefront_id': user.storefront.id if user.storefront else None,
             'storefront_name': user.storefront.store_name if user.storefront else None,
+            'anonymised': True,
         }
-        
-        db.session.delete(user)
-        db.session.commit()
-        
-        # Audit log the deletion
+        anonymise_user(user, force=request.args.get('force') == 'true')
+
         AdminAuditLog.log_action(
             admin=admin,
             action='USER_DELETE',
@@ -590,13 +511,15 @@ def delete_user_admin(user_id):
             resource_id=user_id,
             details=user_data_summary
         )
+        logging.warning(f"[ADMIN CRITICAL] User {user_email} anonymised by {admin.email}")
         
-        logging.warning(f"[ADMIN CRITICAL] User {user_email} DELETED by {admin.email}")
-        
-        return jsonify({"message": f"User {user_email} and all data deleted."}), 200
-    except Exception as e:
+        return jsonify({"message": f"User {user_email} deleted. Personal details were removed; orders and trust records are kept."}), 200
+    except AccountDeletionBlocked as e:
+        return jsonify({"message": f"{e} Add ?force=true to override.", "code": "OPEN_ORDERS"}), 409
+    except Exception:
         db.session.rollback()
-        return jsonify({"message": f"Failed to delete user: {str(e)}"}), 500
+        logging.exception("[ADMIN] User deletion failed")
+        return jsonify({"message": "Failed to delete user."}), 500
 
 
 # ---------------------------------------------------------------------------

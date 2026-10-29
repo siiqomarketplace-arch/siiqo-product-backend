@@ -84,6 +84,11 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE sponsored_listings ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(100)",
                 "ALTER TABLE vendor_subscriptions ADD COLUMN IF NOT EXISTS paystack_subscription_code VARCHAR(100)",
                 "ALTER TABLE vendor_subscriptions ADD COLUMN IF NOT EXISTS paystack_email_token VARCHAR(100)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'NGN'",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS fx_rate_to_ngn NUMERIC(18, 6)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMP WITH TIME ZONE",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
                 # ── Payment link product type, digital file & currency ──────────
@@ -586,6 +591,11 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(verification_bp, url_prefix='/api/verification')
     # Bridge: aliases + missing endpoints the frontend expects at /api/*
     app.register_blueprint(bridge_bp,       url_prefix='/api')
+
+    # Phase 0B: record order history, fees, trust evidence, funnel events and
+    # seller identifiers automatically on every database write.
+    from app.services.foundations import register as _register_foundations
+    _register_foundations()
 
     # -----------------------------------------------------------------------
     # Background scheduler — escrow auto-release and delivery reminders
