@@ -249,7 +249,6 @@ class Storefront(db.Model):
             "city": self.city,
             "state": self.state,
             "address": ", ".join(filter(None, [self.address, self.city, self.state])) or None,
-            "vendor_email": self.vendor.email if self.vendor else None,
             "phone": self.phone,
             "website": self.website,
             "social_links": self.social_links or {},
@@ -277,7 +276,6 @@ class Storefront(db.Model):
             "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
             # ── verification fields ──
             "account_type": self.account_type,
-            "cac_reg": self.cac_reg,
             "verification_status": self.verification_status,
             # ── calculated fields ──
             "avg_rating": avg_rating,
@@ -291,6 +289,9 @@ class Storefront(db.Model):
             "ga4_measurement_id": self.ga4_measurement_id or None,
         }
         if include_sensitive:
+            # Never in public store data: the owner's login email and CAC number.
+            data["vendor_email"] = self.vendor.email if self.vendor else None
+            data["cac_reg"] = self.cac_reg
             data["nin_document_url"] = self.nin_document_url
             data["cac_document_url"] = self.cac_document_url
         return data

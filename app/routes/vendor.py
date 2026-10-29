@@ -532,10 +532,6 @@ def onboard_vendor():
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
 
-    # Auto-flag as pending verification if CAC/NIN or verification files are submitted
-    if storefront.cac_reg or user.nin or storefront.nin_document_url or storefront.cac_document_url:
-        storefront.verification_status = 'PENDING_VERIFY_SUB'
-
     db.session.add(storefront)
     db.session.commit()
 
@@ -689,12 +685,10 @@ def update_settings():
             return jsonify({"message": str(e)}), 400
 
     # Verification file uploads
-    uploaded_doc = False
     if 'nin_document' in request.files or 'nin_doc' in request.files:
         nin_file = request.files.get('nin_document') or request.files.get('nin_doc')
         try:
             sf.nin_document_url = save_uploaded_file(nin_file, subfolder='verifications')
-            uploaded_doc = True
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
 
@@ -702,14 +696,8 @@ def update_settings():
         cac_file = request.files.get('cac_document') or request.files.get('cac_doc')
         try:
             sf.cac_document_url = save_uploaded_file(cac_file, subfolder='verifications')
-            uploaded_doc = True
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
-
-    # Auto-flag as pending if identity details or documents are updated and not verified yet
-    if 'cac_reg' in data or 'nin' in data or uploaded_doc:
-        if sf.verification_status != 'VERIFIED':
-            sf.verification_status = 'PENDING_VERIFY_SUB'
 
     db.session.commit()
 
@@ -1796,6 +1784,12 @@ def get_vendor_dashboard_stats_legacy():
 @vendor_bp.route('/pro-verified/checkout', methods=['POST'])
 @jwt_required()
 def checkout_pro_verified():
+    # The document-review verification is phased out; the new check opens
+    # once the provider is live. Payments already made are still processed.
+    return jsonify({
+        "message": "Verification is being upgraded and will be available soon.",
+        "coming_soon": True,
+    }), 410
     user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:
@@ -1851,6 +1845,12 @@ def checkout_pro_verified():
 @vendor_bp.route('/pro-verified/daya-initiate', methods=['POST'])
 @jwt_required()
 def initiate_daya_pro_verified():
+    # The document-review verification is phased out; the new check opens
+    # once the provider is live. Payments already made are still processed.
+    return jsonify({
+        "message": "Verification is being upgraded and will be available soon.",
+        "coming_soon": True,
+    }), 410
     user_id = _get_user_id()
     user, sf = _require_vendor_storefront(user_id)
     if not user or not sf:

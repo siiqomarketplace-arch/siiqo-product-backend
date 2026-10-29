@@ -324,7 +324,7 @@ def get_user_detail(user_id):
         "user": {
             **user.to_public_dict(),
             "total_orders": orders,
-            "storefront": user.storefront.to_public_dict() if user.storefront else None,
+            "storefront": user.storefront.to_public_dict(include_sensitive=True) if user.storefront else None,
             "referrals_made": referrals_list,
         }
     }), 200
@@ -2999,7 +2999,7 @@ def admin_verify_pro_storefront(storefront_id):
     return jsonify({
         "status": "success",
         "message": f"Storefront #{sf.id} '{sf.store_name}' is now Pro Verified until {sf.pro_verified_expires_at.strftime('%Y-%m-%d')}.",
-        "storefront": sf.to_public_dict()
+        "storefront": sf.to_public_dict(include_sensitive=True)
     }), 200
 
 

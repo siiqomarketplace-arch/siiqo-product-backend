@@ -940,6 +940,18 @@ def get_vendor_trust_breakdown(vendor_id):
 
     storefront = vendor.storefront if hasattr(vendor, 'storefront') else None
 
+    # A typed NIN or CAC number proves nothing; only a completed v2 check
+    # does. Sellers approved under the old manual review keep their mark
+    # until it expires.
+    from app.models.verification import VerificationStatus
+    v2_status = VerificationStatus.query.filter_by(user_id=vendor_id).first()
+    v2_flags = v2_status.public_flags() if v2_status else {"identity_verified": False, "business_registered": False}
+    legacy_expiry = storefront.pro_verified_expires_at if storefront else None
+    if legacy_expiry is not None and legacy_expiry.tzinfo is None:
+        legacy_expiry = legacy_expiry.replace(tzinfo=timezone.utc)
+    legacy_verified = bool(storefront and storefront.is_pro_verified
+                           and (legacy_expiry is None or legacy_expiry > datetime.now(timezone.utc)))
+
     return jsonify({
         "vendor_id": vendor_id,
         "tier": tier,
@@ -949,8 +961,8 @@ def get_vendor_trust_breakdown(vendor_id):
             "email": bool(vendor.is_verified),
             "phone": bool(vendor.phone),
             "bank_account": bool(getattr(vendor, 'bank_account', None) or getattr(vendor, 'account_number', None)),
-            "cac_registered": bool(getattr(vendor, 'cac_number', None)),
-            "id_verified": bool(vendor.nin),
+            "cac_registered": v2_flags["business_registered"],
+            "id_verified": v2_flags["identity_verified"] or legacy_verified,
         },
     }), 200
 
