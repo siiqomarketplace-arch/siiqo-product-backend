@@ -1407,7 +1407,8 @@ def admin_fix_crypto_order(order_id):
     from app.models.order import Order
     from app.models.communication import Notification
     from app.routes.events import activate_tickets_for_order
-    from app.routes.escrow import _deliver_digital_products, _deliver_service_products, _credit_vendor_ledger
+    from app.routes.escrow import (_deliver_digital_products, _deliver_service_products,
+                                   _credit_vendor_ledger, _record_payout_debit)
     from app.routes.payments import _payout_vendor_via_daya
     from app.utils.email import send_siiqo_email
 
@@ -1416,8 +1417,8 @@ def admin_fix_crypto_order(order_id):
         parsed_id = _parse_admin_id(admin_id)
     except (ValueError, TypeError):
         return jsonify({"message": "Unauthorized"}), 401
-    if not _get_admin(parsed_id):
-        return jsonify({"message": "Unauthorized"}), 403
+    if not _require_superadmin(parsed_id):
+        return jsonify({"message": "Superadmin access required"}), 403
 
     order = db.session.get(Order, order_id)
     if not order:
@@ -1426,6 +1427,26 @@ def admin_fix_crypto_order(order_id):
     escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
     if not escrow:
         return jsonify({"message": f"No escrow record for Order #{order_id}"}), 404
+
+    # This tool only rescues orders that never completed. It must never run
+    # twice or touch an order whose money was already released or credited.
+    if (order.status or '').upper() != 'PENDING' or escrow.status == EscrowStatus.RELEASED:
+        return jsonify({"message": f"Order #{order_id} is {order.status}; only PENDING orders can be fixed."}), 409
+    if Ledger.query.filter_by(vendor_id=order.vendor_id, reference_id=escrow.transaction_number).first():
+        return jsonify({"message": f"Order #{order_id} has already been credited to the vendor."}), 409
+
+    is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
+
+    def _daya_payout():
+        # Only crypto orders are paid from the Daya balance. Other orders keep
+        # the ledger credit, which the vendor withdraws normally.
+        if not is_crypto:
+            return
+        try:
+            if _payout_vendor_via_daya(order, escrow):
+                _record_payout_debit(order, escrow, float(escrow.amount) - float(escrow.fee_amount or 0))
+        except Exception as e:
+            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
 
     old_order_status  = order.status
     old_escrow_status = escrow.status
@@ -1449,10 +1470,7 @@ def admin_fix_crypto_order(order_id):
             reference_id=escrow.transaction_number,
             description=f"Admin-released payout for Event Order #{order.id}",
         )
-        try:
-            _payout_vendor_via_daya(order, escrow)
-        except Exception as e:
-            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+        _daya_payout()
 
     # 2. Digital Order?
     is_digital = _deliver_digital_products(order, escrow)
@@ -1478,10 +1496,7 @@ def admin_fix_crypto_order(order_id):
                 reference_id=escrow.transaction_number,
                 description=f"Admin-released payout for {_ltype.title()} PayLink #{order.id}",
             )
-            try:
-                _payout_vendor_via_daya(order, escrow)
-            except Exception as e:
-                logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+            _daya_payout()
             is_digital = (_ltype == 'digital')
             is_service = (_ltype == 'service')
 
@@ -1497,17 +1512,11 @@ def admin_fix_crypto_order(order_id):
             reference_id=escrow.transaction_number,
             description=f"Admin-released payout for Order #{order.id}",
         )
-        try:
-            _payout_vendor_via_daya(order, escrow)
-        except Exception as e:
-            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+        _daya_payout()
 
     # If digital or service order, trigger Daya vendor payout if crypto/Daya
     if is_digital or is_service:
-        try:
-            _payout_vendor_via_daya(order, escrow)
-        except Exception as e:
-            logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
+        _daya_payout()
 
     # Send notifications
     if order.buyer_id:
