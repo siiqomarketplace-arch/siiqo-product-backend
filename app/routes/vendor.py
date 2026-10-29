@@ -25,6 +25,14 @@ from app.utils.scraper import scrape_product_url, analyze_storefront_url
 
 vendor_bp = Blueprint('vendor', __name__)
 
+# Store URLs that can never be claimed: system paths, plus the Siiqo 2.0
+# pages planned at siiqo.com/<word> (market, search, ask, check, ...).
+RESERVED_STORE_SLUGS = frozenset({
+    'api', 'admin', 'www', 'auth', 'cart', 'checkout', 'dashboard', 'marketplace',
+    'vendor', 'buyer', 'community', 'finance-tools', 'home',
+    'market', 'search', 'ask', 'check', 't', 'sell', 'pay', 'developers', 'help', 'id',
+})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -402,7 +410,7 @@ def check_slug():
     if not slug:
         return jsonify({"available": False, "message": "Slug is required"}), 400
         
-    RESERVED_WORDS = ['api', 'admin', 'www', 'auth', 'cart', 'checkout', 'dashboard', 'marketplace', 'vendor', 'buyer', 'community', 'finance-tools']
+    RESERVED_WORDS = RESERVED_STORE_SLUGS
     if slug in RESERVED_WORDS:
         return jsonify({"available": False, "message": "Reserved keyword"}), 200
         
@@ -438,7 +446,7 @@ def onboard_vendor():
     store_slug = base_slug
     
     # RESERVED WORDS CHECK
-    RESERVED_WORDS = ['api', 'admin', 'www', 'auth', 'cart', 'checkout', 'dashboard', 'marketplace', 'vendor', 'buyer', 'community', 'finance-tools']
+    RESERVED_WORDS = RESERVED_STORE_SLUGS
     if store_slug in RESERVED_WORDS:
         return jsonify({"message": f"The store URL '{store_slug}' is a reserved system keyword. Please choose another."}), 400
         
