@@ -13,6 +13,13 @@ from app.models.admin import SponsoredListing
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _public_file_url(p):
+    """A paid product's file is only released through the paid-order path;
+    public product data carries it for free products only."""
+    is_free = bool(p.is_free) or (p.price is not None and float(p.price) == 0)
+    return p.file_url if is_free else None
 public_bp = Blueprint('public', __name__)
 
 
@@ -136,7 +143,7 @@ def get_products():
             "latitude": p.latitude,
             "longitude": p.longitude,
             "product_type": p.product_type or "physical",
-            "file_url": p.file_url,
+            "file_url": _public_file_url(p),
             "booking_link": p.booking_link,
             # Category-specific attributes â€” null for old listings, safe to show
             "attributes": p.attributes or {},
@@ -200,7 +207,7 @@ def get_product_details(product_id):
         "review_count": review_count,
         "is_negotiable": p.is_negotiable,
         "product_type": p.product_type,
-        "file_url": p.file_url,
+        "file_url": _public_file_url(p),
         "booking_link": p.booking_link,
         "sku": p.sku,
         "weight": str(p.weight) if p.weight else None,
@@ -322,7 +329,7 @@ def get_storefront_details(slug):
             "longitude": p.longitude,
             "is_negotiable": p.is_negotiable,
             "product_type": p.product_type or "physical",
-            "file_url": p.file_url,
+            "file_url": _public_file_url(p),
             "booking_link": p.booking_link,
         })
 

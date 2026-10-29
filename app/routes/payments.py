@@ -535,15 +535,20 @@ def daya_status():
         else:
             pl_product_type = 'digital'
 
+    # This endpoint is public (guest Pay Link buyers poll it by order id), so
+    # the release link and buyer contact details go only to the signed-in
+    # buyer; guests already received the link when they started paying.
+    # Paid files are only revealed once the payment has completed.
+    is_owner = bool(buyer_user_id) and dp.buyer_id == int(buyer_user_id)
     return jsonify({
         "orderId": str(order_id),
         "status":  dp.status,
         "paidAt":  dp.updated_at.isoformat() if dp.status == "COMPLETED" else None,
-        "confirmation_url": conf_url,
-        "buyer_phone": b_phone,
-        "buyer_email": b_email,
+        "confirmation_url": conf_url if is_owner else None,
+        "buyer_phone": b_phone if is_owner else None,
+        "buyer_email": b_email if is_owner else None,
         "is_existing_account": is_existing,
-        "file_url": pl_file_url,
+        "file_url": pl_file_url if dp.status == "COMPLETED" else None,
         "product_type": pl_product_type,
     }), 200
 
