@@ -33,7 +33,7 @@ class EscrowTransaction(db.Model):
     status = db.Column(db.String(50), default=EscrowStatus.PENDING_PAYMENT, nullable=False)
 
     amount = db.Column(db.Numeric(10, 2), nullable=False)
-    fee_percent = db.Column(db.Numeric(5, 2), default=12.00)   # Siiqo's cut
+    fee_percent = db.Column(db.Numeric(5, 2), default=3.00)    # Siiqo's cut (app/services/fees.py)
     fee_amount = db.Column(db.Numeric(10, 2), nullable=True)   # Computed at creation
     currency = db.Column(db.String(10), default='NGN')
 

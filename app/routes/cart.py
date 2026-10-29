@@ -19,6 +19,7 @@ from app.models.withdrawal import PODPayment, VendorBankAccount
 from app.utils.email import send_siiqo_email
 from app.utils.telegram import send_telegram_message
 from app.routes.escrow import generate_order_token
+from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
 
 cart_bp = Blueprint('cart', __name__)
 
@@ -448,8 +449,8 @@ def checkout():
         )
         vendor_user = db.session.get(User, vid)
         is_pro = bool(vendor_user and vendor_user.storefront and vendor_user.storefront.is_pro_active)
-        fee_percent = 3.00  # Flat 3% Safe Pay fee for all vendors
-        fee_amount = total * (fee_percent / 100)
+        fee_percent = float(PLATFORM_FEE_PERCENT)
+        fee_amount = platform_fee_float(total)
         has_physical_items = is_physical
         logistics_fee = 0.0
         logistics_provider_id = None
@@ -584,15 +585,14 @@ def checkout():
             # For crypto, create an escrow transaction record in PENDING_PAYMENT state.
             # The DayaPayment record is created by /payments/daya/initiate AFTER checkout.
             # When Daya confirms payment, _handle_crypto_payment_confirmed() updates both.
-            fee_rate = 0.03  # Flat 3% Safe Pay fee for all vendors
             txn_number = f"ESC-{uuid.uuid4().hex[:12].upper()}"
             new_escrow = EscrowTransaction(
                 order_id=new_order.id,
                 transaction_number=txn_number,
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=total,
-                fee_percent=fee_rate * 100,
-                fee_amount=round(total * fee_rate, 2),
+                fee_percent=float(PLATFORM_FEE_PERCENT),
+                fee_amount=platform_fee_float(total),
                 currency='NGN',
             )
             db.session.add(new_escrow)

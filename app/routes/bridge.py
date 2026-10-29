@@ -30,6 +30,7 @@ from app.models.community import Review
 from app.models.communication import Notification
 from app.models.finance import Ledger
 from app.utils.upload import save_uploaded_file
+from app.services.fees import PLATFORM_FEE_PERCENT
 
 bridge_bp = Blueprint('bridge', __name__)
 
@@ -334,7 +335,7 @@ def vendor_balance():
         "available_balance": available,
         "payout_threshold": payout_threshold,
         "can_withdraw": can_withdraw,
-        "siiqo_fee_percent": 12,
+        "siiqo_fee_percent": float(PLATFORM_FEE_PERCENT),
         "currency": "NGN",
     }), 200
 

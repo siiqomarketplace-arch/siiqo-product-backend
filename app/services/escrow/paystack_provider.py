@@ -131,13 +131,11 @@ class PaystackProvider(BaseEscrowProvider):
         amount_kobo = int(round(buyer_total_ngn * 100))
 
         # Siiqo's fee is 3% of the listed price (NOT of the inflated buyer total)
+        # One platform fee for every seller (D1): 3% of each order subtotal.
+        from app.services.fees import platform_fee
         siiqo_fee_total = Decimal("0.00")
         for o in orders:
-            subtotal = Decimal(str(o.total_amount))
-            fee_rate = Decimal("0.05")
-            if o.vendor and o.vendor.storefront and o.vendor.storefront.is_pro_verified:
-                fee_rate = Decimal("0.03")
-            siiqo_fee_total += (subtotal * fee_rate).quantize(Decimal("0.01"))
+            siiqo_fee_total += platform_fee(o.total_amount)
         siiqo_fee_kobo = int(round(float(siiqo_fee_total) * 100))
 
         # ── buyer info ──────────────────────────────────────────────────

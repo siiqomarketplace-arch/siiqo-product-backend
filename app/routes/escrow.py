@@ -95,6 +95,7 @@ def _debit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, descr
 
 
 from app.services.escrow import get_escrow_provider
+from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
 
 
 def _deliver_digital_products(order, escrow):
@@ -643,14 +644,13 @@ def initiate_escrow():
         if not escrow_txn:
             # fee_amount for an individual order in a master transaction
             # the result['fee_amount'] is total, so we calculate proportional
-            fee_rate = 0.03  # Flat 3% Safe Pay fee for all vendors
-            individual_fee = round(float(order.total_amount) * fee_rate, 2)
+            individual_fee = platform_fee_float(order.total_amount)
             escrow_txn = EscrowTransaction(
                 order_id=order.id,
                 transaction_number=result['transaction_number'],
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(order.total_amount),
-                fee_percent=fee_rate * 100,
+                fee_percent=float(PLATFORM_FEE_PERCENT),
                 fee_amount=individual_fee,
                 payment_link=result['payment_link'],
                 payscrow_transaction_id=result['provider_transaction_id'],

@@ -27,6 +27,7 @@ from app.extensions import db
 from app.models.order import Order
 from app.models.withdrawal import VendorCryptoWallet, DayaPayment
 from app.services import daya_service
+from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
 
 logger = logging.getLogger(__name__)
 payments_bp = Blueprint("payments", __name__)
@@ -739,15 +740,14 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
 
         escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
         if not escrow:
-            fee_rate = 0.03  # Flat 3% Safe Pay fee for all vendors
-            fee_amount = round(float(order.total_amount) * fee_rate, 2)
+            fee_amount = platform_fee_float(order.total_amount)
             txn_number = f"DYA-{uuid.uuid4().hex[:12].upper()}"
             escrow = EscrowTransaction(
                 order_id=order_id,
                 transaction_number=txn_number,
                 status=EscrowStatus.IN_ESCROW,
                 amount=float(order.total_amount),
-                fee_percent=fee_rate * 100,
+                fee_percent=float(PLATFORM_FEE_PERCENT),
                 fee_amount=fee_amount,
                 payment_link=None,
                 payscrow_transaction_id=f"DAYA-{dp.daya_deposit_id or dp.daya_funding_account_id}",
@@ -1341,7 +1341,7 @@ def flutterwave_initiate():
     if total_listed_ngn <= 0:
         return jsonify({"message": "Total amount must be greater than zero"}), 400
 
-    siiqo_fee_total = round(total_listed_ngn * 0.03, 2)  # Flat 3% Safe Pay fee
+    siiqo_fee_total = sum(platform_fee_float(o.total_amount) for o in orders)
 
     # Buyer contact info
     primary_order = orders[0]
@@ -1439,7 +1439,7 @@ def flutterwave_initiate():
     # Create or update EscrowTransaction for each order
     for o in orders:
         o.payment_method = "FLUTTERWAVE"
-        indiv_fee = round(float(o.total_amount) * 0.03, 2)
+        indiv_fee = platform_fee_float(o.total_amount)
         escrow = EscrowTransaction.query.filter_by(order_id=o.id).first()
         if not escrow:
             escrow = EscrowTransaction(
@@ -1447,7 +1447,7 @@ def flutterwave_initiate():
                 transaction_number=tx_ref,
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(o.total_amount),
-                fee_percent=3.0,
+                fee_percent=float(PLATFORM_FEE_PERCENT),
                 fee_amount=indiv_fee,
                 payment_link=flw_result["payment_link"],
                 payscrow_transaction_id=tx_ref,

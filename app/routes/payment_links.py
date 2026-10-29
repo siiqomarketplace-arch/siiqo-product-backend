@@ -4,6 +4,7 @@ import re
 import logging
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -323,8 +324,8 @@ def pay_payment_link(link_id):
     _is_v_pro = bool(
         _sf and _sf.is_pro_verified and (not _sf.pro_verified_expires_at or _sf.pro_verified_expires_at > _now)
     )
-    fee_percent = 3.00  # Flat 3% Safe Pay fee for all vendors
-    fee_amount = amount * Decimal(str(fee_percent / 100.0))
+    fee_percent = float(PLATFORM_FEE_PERCENT)
+    fee_amount = platform_fee(amount)
 
     # Build the return URL so buyer lands on a proper success/tracking page
     site_url = os.environ.get('SITE_URL', 'https://siiqo.com').rstrip('/')
