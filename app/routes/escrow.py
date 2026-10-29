@@ -94,6 +94,17 @@ def _debit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, descr
     ))
 
 
+def _record_payout_debit(order, escrow, net_amount: float):
+    """An automatic payout (transfer or gateway split) has paid the vendor:
+    write the matching DEBIT so the ledger credit cannot be withdrawn again."""
+    _debit_vendor_ledger(
+        vendor_id=order.vendor_id,
+        amount=net_amount,
+        reference_id=f"PAYOUT-{escrow.transaction_number or order.id}",
+        description=f"Automated gateway payout settlement for Order #{order.id}",
+    )
+
+
 from app.services.escrow import get_escrow_provider
 from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
 
@@ -165,6 +176,7 @@ def _deliver_digital_products(order, escrow):
         not is_crypto and not is_flutterwave
         and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
     )
+    dispatched = False
     if is_paystack:
         vendor_used_split = False
         try:
@@ -188,11 +200,14 @@ def _deliver_digital_products(order, escrow):
                 "split already settled vendor. Skipping manual transfer."
             )
         else:
-            _paystack_payout_vendor(order, escrow)
+            dispatched = _paystack_payout_vendor(order, escrow)
+        dispatched = bool(dispatched or vendor_used_split)
     elif is_flutterwave:
         vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
         if not vendor_already_paid_via_split:
-            _flutterwave_payout_vendor(order, escrow)
+            dispatched = _flutterwave_payout_vendor(order, escrow)
+        else:
+            dispatched = True
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -200,6 +215,8 @@ def _deliver_digital_products(order, escrow):
         reference_id=escrow.transaction_number,
         description=f"Auto-released payout for digital Order #{order.id}",
     )
+    if dispatched:
+        _record_payout_debit(order, escrow, net_amount)
 
     from app.models.finance import Receipt
     if not Receipt.query.filter_by(order_id=order.id).first():
@@ -351,6 +368,7 @@ def _deliver_service_products(order, escrow):
         not is_crypto and not is_flutterwave
         and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
     )
+    dispatched = False
     if is_paystack:
         vendor_used_split = False
         try:
@@ -374,11 +392,14 @@ def _deliver_service_products(order, escrow):
                 "split already settled vendor. Skipping manual transfer."
             )
         else:
-            _paystack_payout_vendor(order, escrow)
+            dispatched = _paystack_payout_vendor(order, escrow)
+        dispatched = bool(dispatched or vendor_used_split)
     elif is_flutterwave:
         vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
         if not vendor_already_paid_via_split:
-            _flutterwave_payout_vendor(order, escrow)
+            dispatched = _flutterwave_payout_vendor(order, escrow)
+        else:
+            dispatched = True
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -386,6 +407,8 @@ def _deliver_service_products(order, escrow):
         reference_id=escrow.transaction_number,
         description=f"Auto-released payout for service Order #{order.id}",
     )
+    if dispatched:
+        _record_payout_debit(order, escrow, net_amount)
 
     from app.models.finance import Receipt
     if not Receipt.query.filter_by(order_id=order.id).first():
@@ -508,6 +531,7 @@ def _deliver_event_tickets(order, escrow):
         not is_crypto and not is_flutterwave
         and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
     )
+    dispatched = False
     if is_paystack:
         vendor_used_split = False
         try:
@@ -528,15 +552,18 @@ def _deliver_event_tickets(order, escrow):
         if vendor_used_split:
             logging.info(f"[EVENT] Order #{order.id} — vendor has Paystack subaccount, split already settled vendor.")
         else:
-            _paystack_payout_vendor(order, escrow)
+            dispatched = _paystack_payout_vendor(order, escrow)
+        dispatched = bool(dispatched or vendor_used_split)
     elif is_flutterwave:
         vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
         if not vendor_already_paid_via_split:
-            _flutterwave_payout_vendor(order, escrow)
+            dispatched = _flutterwave_payout_vendor(order, escrow)
+        else:
+            dispatched = True
     elif is_crypto:
         try:
             from app.routes.payments import _payout_vendor_via_daya
-            _payout_vendor_via_daya(order, escrow)
+            dispatched = bool(_payout_vendor_via_daya(order, escrow))
         except Exception as _e:
             logging.warning(f"[EVENT] Daya payout failed for Order #{order.id}: {_e}")
 
@@ -546,6 +573,8 @@ def _deliver_event_tickets(order, escrow):
         reference_id=escrow.transaction_number,
         description=f"Auto-released payout for Event Ticket Order #{order.id}",
     )
+    if dispatched:
+        _record_payout_debit(order, escrow, net_amount)
 
     if not Receipt.query.filter_by(order_id=order.id).first():
         db.session.add(Receipt(order_id=order.id))
@@ -837,8 +866,8 @@ def escrow_status():
                                             vendor_used_split = True
                                 except Exception:
                                     pass
-                                if not vendor_used_split:
-                                    _paystack_payout_vendor(escrow.order, escrow)
+                                if vendor_used_split or _paystack_payout_vendor(escrow.order, escrow):
+                                    _record_payout_debit(escrow.order, escrow, net_amount)
 
                     db.session.commit()
                     logging.info(f"[ESCROW STATUS] Proactively verified & activated transaction {escrow.transaction_number}")
@@ -1154,8 +1183,7 @@ def execute_order_escrow_release(order, escrow, source="admin"):
     elif is_daya_order:
         try:
             from app.routes.payments import _payout_vendor_via_daya
-            _payout_vendor_via_daya(order, escrow)
-            payout_dispatched = True
+            payout_dispatched = bool(_payout_vendor_via_daya(order, escrow))
         except Exception as _d_err:
             logging.warning(f"[ESCROW RELEASE] Daya payout error for Order #{order.id}: {_d_err}")
     else:

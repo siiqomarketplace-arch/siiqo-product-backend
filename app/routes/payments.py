@@ -778,7 +778,9 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 reference_id=escrow.transaction_number,
                 description=f"Auto-released payout for Event Order #{order.id}",
             )
-            _payout_vendor_via_daya(order, escrow)
+            if _payout_vendor_via_daya(order, escrow):
+                from app.routes.escrow import _record_payout_debit
+                _record_payout_debit(order, escrow, net_amount)
 
             if not Receipt.query.filter_by(order_id=order.id).first():
                 db.session.add(Receipt(order_id=order.id))
@@ -940,7 +942,10 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         # based orders handled by _deliver_* and Pay Link orders handled above).
         # Physical orders are paid out when the buyer confirms delivery.
         if is_digital or is_service:
-            _payout_vendor_via_daya(order, escrow)
+            if _payout_vendor_via_daya(order, escrow):
+                from app.routes.escrow import _record_payout_debit
+                _record_payout_debit(order, escrow,
+                                     float(escrow.amount) - float(escrow.fee_amount or 0))
 
         if not is_ticket_order and not is_digital and not is_service:
             # Physical order — create or activate the LogisticsAssignment
@@ -1149,7 +1154,7 @@ def _payout_vendor_via_daya(order, escrow):
                     type="ESCROW",
                     order_id=order.id,
                 ))
-                return
+                return True
             except RuntimeError as exc:
                 logger.error(
                     "[DAYA PAYOUT] Order %s -- on-chain withdrawal failed: %s. "
@@ -1215,7 +1220,7 @@ def _payout_vendor_via_daya(order, escrow):
                 )
             except Exception as _em_err:
                 logger.info("[EMAIL] Could not send payout bank alert email: %s", _em_err)
-        return
+        return False
 
     # Attempt the NGN transfer directly — no pre-resolve needed.
     # Daya validates the account internally on transfer.
@@ -1240,11 +1245,12 @@ def _payout_vendor_via_daya(order, escrow):
             message=(
                 f"Order #{order.id} is complete. "
                 f"NGN{net_amount_ngn:,.2f} is being transferred to your bank account "
-                f"({bank_acc.bank_name or bank_acc.bank_code} ···{bank_acc.account_number[-4:]})."
+                f"({(bank_acc.bank_name if bank_acc else None) or bank_code} ···{str(account_number)[-4:]})."
             ),
             type="ESCROW",
             order_id=order.id,
         ))
+        return True
     else:
         # Daya NGN transfer failed — funds are still safely in Daya withdrawal balance.
         # Log clearly so support can manually retry. Do NOT attempt Paystack (no balance there).
@@ -1264,6 +1270,7 @@ def _payout_vendor_via_daya(order, escrow):
             type="ESCROW",
             order_id=order.id,
         ))
+        return False
 
 
 

@@ -1120,9 +1120,10 @@ def paystack_webhook():
                                             vendor_used_split = True
                                 except Exception:
                                     pass
-                                if not vendor_used_split:
-                                    from app.routes.escrow import _paystack_payout_vendor
-                                    _paystack_payout_vendor(pl_order, pl_escrow)
+                                from app.routes.escrow import _paystack_payout_vendor, _record_payout_debit
+                                paid_out = vendor_used_split or _paystack_payout_vendor(pl_order, pl_escrow)
+                                if paid_out:
+                                    _record_payout_debit(pl_order, pl_escrow, net_amount)
 
                                 from app.models.communication import Notification
                                 db.session.add(Notification(
