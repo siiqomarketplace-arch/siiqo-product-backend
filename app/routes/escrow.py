@@ -94,6 +94,38 @@ def _debit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, descr
     ))
 
 
+def _hold_if_foreign_currency(order, escrow) -> bool:
+    """Payout transfers send naira. Until the exchange rate at charge time is
+    stored (Phase 0B), an order paid in another currency is held for Siiqo
+    support instead of sending its foreign face value as naira. A matching
+    DEBIT keeps the held amount out of the withdrawable balance.
+    Returns True when the payout was held."""
+    currency = (escrow.currency or 'NGN').upper()
+    if currency == 'NGN':
+        return False
+    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    logging.warning(
+        f"[FX HOLD] Order #{order.id} paid in {currency} {net_amount:,.2f} — payout held for support"
+    )
+    _debit_vendor_ledger(
+        vendor_id=order.vendor_id,
+        amount=net_amount,
+        reference_id=f"FX-HOLD-{escrow.transaction_number or order.id}",
+        description=f"Held for conversion: Order #{order.id} was paid in {currency}",
+    )
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title="Payout Being Processed",
+        message=(
+            f"Order #{order.id} was paid in {currency}. Our team will convert it and send your payout. "
+            "Contact support@siiqo.com with your order number if you have questions."
+        ),
+        type="ESCROW",
+        order_id=order.id,
+    ))
+    return True
+
+
 def _record_payout_debit(order, escrow, net_amount: float):
     """An automatic payout (transfer or gateway split) has paid the vendor:
     write the matching DEBIT so the ledger credit cannot be withdrawn again."""
@@ -900,6 +932,8 @@ def _paystack_payout_vendor(order, escrow):
     Push vendor's net share via Paystack Transfers API.
     Used for instant payouts of digital/service orders or upon buyer delivery confirmation.
     """
+    if _hold_if_foreign_currency(order, escrow):
+        return False
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
     
     bank_acc = VendorBankAccount.query.filter_by(
@@ -1024,6 +1058,8 @@ def _flutterwave_payout_vendor(order, escrow):
     Used for instant payouts of digital/service/event orders or upon delivery confirmation
     when subaccount split was not applied at checkout (e.g. multi-vendor cart).
     """
+    if _hold_if_foreign_currency(order, escrow):
+        return False
     net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
     bank_acc = VendorBankAccount.query.filter_by(
         vendor_id=order.vendor_id, is_default=True

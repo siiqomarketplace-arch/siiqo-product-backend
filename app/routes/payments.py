@@ -1062,6 +1062,10 @@ def _payout_vendor_via_daya(order, escrow):
     """
     from app.models.withdrawal import VendorBankAccount, VendorCryptoWallet, DayaPayment
     from app.models.communication import Notification
+    from app.routes.escrow import _hold_if_foreign_currency
+
+    if _hold_if_foreign_currency(order, escrow):
+        return False
 
     net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
 
