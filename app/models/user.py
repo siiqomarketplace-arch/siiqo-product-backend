@@ -236,6 +236,16 @@ class Storefront(db.Model):
             self.is_pro_verified and
             (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
         )
+        # Verification v2: a passed identity check shows the mark only while the
+        # seller's Verified Pro plan is active (public_flags checks both).
+        v2_verified = False
+        try:
+            from app.models.verification import VerificationStatus
+            v2 = VerificationStatus.query.filter_by(user_id=self.vendor_id).first()
+            v2_verified = bool(v2 and v2.public_flags()["identity_verified"])
+        except Exception:
+            v2_verified = False
+        is_pro_active = bool(is_pro_active or v2_verified)
         badge_verified = bool(is_pro_active or self.verification_status == 'VERIFIED')
 
         data = {
