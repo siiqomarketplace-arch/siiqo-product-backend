@@ -1320,6 +1320,20 @@ def admin_verify_payment(order_id):
 # a backend error (e.g. Notification import crash on Order #226-228).
 # ---------------------------------------------------------------------------
 
+@admin_bp.route('/metrics/monthly', methods=['GET'])
+@jwt_required()
+def admin_monthly_metrics():
+    """Superadmin: monthly traction report from real records (?month=YYYY-MM)."""
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "Superadmin access required"}), 403
+    from app.services.metrics import monthly_metrics
+    month = request.args.get('month') or datetime.now(timezone.utc).strftime('%Y-%m')
+    try:
+        return jsonify(monthly_metrics(month)), 200
+    except ValueError:
+        return jsonify({"message": "month must look like 2026-10"}), 400
+
+
 @admin_bp.route('/billing/verified-pro-notice', methods=['POST'])
 @jwt_required()
 def admin_send_verified_pro_notice():
