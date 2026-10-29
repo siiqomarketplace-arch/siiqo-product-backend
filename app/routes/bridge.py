@@ -950,6 +950,12 @@ def initiate_pro_subscription():
     billing_cycle = data.get('billing_cycle', 'monthly')
     now = _utcnow()
 
+    # Lifetime was only for the first onboarded sellers and is discontinued.
+    # Existing Lifetime holders keep their plan; payments already started
+    # are still completed by the webhook.
+    if billing_cycle == 'lifetime':
+        return jsonify({"message": "Lifetime plans are no longer available."}), 410
+
     # --- DUPLICATE PREVENTION ---
     # Check if user already has an active subscription
     existing_sub = VendorSubscription.query.filter_by(
@@ -1997,7 +2003,8 @@ def vendor_crypto_wallet_post():
 # ===========================================================================
 # SUBSCRIPTION PLANS  — GET /payments/plans
 # Returns all available plans so the frontend can show pricing.
-# Ensures Lifetime plan exists in the DB on every call (idempotent upsert).
+# Upserts the listed plans; unlisted plans (e.g. discontinued Lifetime) are left
+# untouched so existing holders keep them.
 # ===========================================================================
 
 PLAN_CATALOGUE = [
@@ -2015,7 +2022,7 @@ PLAN_CATALOGUE = [
             "Siiqo escrow on all orders",
             "Standard trust badge",
         ],
-        "transaction_fee_pct": 6.0,
+        "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
         "cta": "Start Free",
         "highlight": False,
     },
@@ -2038,7 +2045,7 @@ PLAN_CATALOGUE = [
             "Priority marketplace placement",
             "Telegram bot access",
         ],
-        "transaction_fee_pct": 6.0,
+        "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
         "cta": "Start Pro — ₦3,000/mo",
         "highlight": False,
     },
@@ -2053,26 +2060,9 @@ PLAN_CATALOGUE = [
             "₦12,000 savings per year",
             "Priority support (24h response)",
         ],
-        "transaction_fee_pct": 6.0,
+        "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
         "cta": "Go Annual — ₦24,000/yr",
         "highlight": True,
-    },
-    {
-        "name": "LIFETIME",
-        "price_ngn": 87000,
-        "billing": "lifetime",
-        "label": "Lifetime Access",
-        "tagline": "Pay once. Own forever.",
-        "features": [
-            "Everything in Pro, forever",
-            "No monthly or annual fees",
-            "Priority support (24h response)",
-            "Early access to new features",
-            "Exclusive 'Lifetime Member' badge",
-        ],
-        "transaction_fee_pct": 6.0,
-        "cta": "Get Lifetime — ₦87,000",
-        "highlight": False,
     },
 ]
 
@@ -2106,14 +2096,8 @@ def get_plans():
 def get_subscription_status():
     """Return the current vendor's subscription status."""
     user_id = get_jwt_identity()
-    from datetime import datetime as _dt
-    now = _dt.utcnow()
-
-    active_sub = VendorSubscription.query.filter(
-        VendorSubscription.vendor_id == int(user_id),
-        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
-        VendorSubscription.end_date > now,
-    ).order_by(VendorSubscription.end_date.desc()).first()
+    from app.services.entitlements import active_subscription
+    active_sub = active_subscription(user_id)
 
     if not active_sub:
         return jsonify({

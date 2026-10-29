@@ -97,14 +97,8 @@ def get_settings():
     sf = user.storefront
     full_name = user.full_name
     
-    from app.models.admin import VendorSubscription
-    from datetime import datetime
-    now = datetime.utcnow()
-    active_sub = VendorSubscription.query.filter(
-        VendorSubscription.vendor_id == int(user_id),
-        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
-        VendorSubscription.end_date > now
-    ).order_by(VendorSubscription.end_date.desc()).first()
+    from app.services.entitlements import active_subscription
+    active_sub = active_subscription(user_id)
     
     plan_name = active_sub.plan.name if active_sub and active_sub.plan else "Free"
     plan_renews = active_sub.end_date.strftime("%b %d, %Y") if active_sub and active_sub.end_date else None
@@ -718,19 +712,11 @@ def add_product():
     # ── FREE PLAN: 10-product lifetime limit ─────────────────────────────────
     # Count ALL products ever created (including deleted/inactive) so vendors
     # can't bypass the limit by deleting and re-listing.
-    from app.models.admin import VendorSubscription
-    from datetime import datetime as _dt_limit
-    _now_limit = _dt_limit.utcnow()
-    _active_sub = VendorSubscription.query.filter(
-        VendorSubscription.vendor_id == user.id,
-        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
-        VendorSubscription.end_date > _now_limit,
-    ).first()
-    _is_pro = _active_sub is not None
+    from app.services.entitlements import has_feature, FREE_LIMITS
 
-    if not _is_pro:
+    if not has_feature(user.id, 'unlimited_products'):
         _total_ever = Product.query.filter_by(storefront_id=sf.id).count()
-        if _total_ever >= 10:
+        if _total_ever >= FREE_LIMITS['products']:
             return jsonify({
                 "message": "You've reached the 10-product limit on the free plan. Upgrade to Pro for unlimited listings and other premium features.",
                 "upgrade_required": True,
@@ -1236,6 +1222,14 @@ def my_products():
 # Orders
 # ---------------------------------------------------------------------------
 
+@vendor_bp.route('/entitlements', methods=['GET'])
+@jwt_required()
+def get_entitlements():
+    """What the seller's plan unlocks: one source for the website and bots."""
+    from app.services.entitlements import entitlements
+    return jsonify(entitlements(_get_user_id())), 200
+
+
 @vendor_bp.route('/orders', methods=['GET'])
 @jwt_required()
 def get_orders():
@@ -1457,16 +1451,9 @@ def get_customers():
         return jsonify({"message": "Vendor access required"}), 403
 
     # ── Subscription Gate: Pro required for CRM Customer Data ──────────────
-    from app.models.admin import VendorSubscription
-    from datetime import datetime as _dt_crm
-    _now_crm = _dt_crm.utcnow()
-    active_sub = VendorSubscription.query.filter(
-        VendorSubscription.vendor_id == user.id,
-        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
-        VendorSubscription.end_date > _now_crm
-    ).first()
+    from app.services.entitlements import has_feature
 
-    if not active_sub:
+    if not has_feature(user.id, 'crm'):
         return jsonify({
             "message": "Pro subscription required to access CRM customer records and marketing tools.",
             "upgrade_required": True,

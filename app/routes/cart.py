@@ -393,13 +393,9 @@ def checkout():
 
     # Validate POD access (exclusive to Pro Subscribed vendors)
     if payment_method == 'POD':
-        from app.models.admin import VendorSubscription
-        now_dt = _utcnow()
+        from app.services.entitlements import has_feature
         for (vid, is_physical) in vendors.keys():
-            active_sub = VendorSubscription.query.filter_by(
-                vendor_id=vid, status='ACTIVE'
-            ).filter(VendorSubscription.end_date > now_dt).first()
-            if not active_sub:
+            if not has_feature(vid, 'pod'):
                 vendor_user = db.session.get(User, vid)
                 v_name = (vendor_user.storefront.store_name if (vendor_user and vendor_user.storefront) else "This seller")
                 return jsonify({
@@ -448,7 +444,6 @@ def checkout():
             for item in items
         )
         vendor_user = db.session.get(User, vid)
-        is_pro = bool(vendor_user and vendor_user.storefront and vendor_user.storefront.is_pro_active)
         fee_percent = float(PLATFORM_FEE_PERCENT)
         fee_amount = platform_fee_float(total)
         has_physical_items = is_physical

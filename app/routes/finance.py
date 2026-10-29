@@ -324,16 +324,8 @@ def create_invoice():
     user_id = int(get_jwt_identity())
 
     # Enforce Siiqo Pro subscription for invoicing
-    from app.models.admin import VendorSubscription
-    sf = Storefront.query.filter_by(vendor_id=user_id).first()
-    _now = datetime.now(timezone.utc)
-    active_sub = VendorSubscription.query.filter(
-        VendorSubscription.vendor_id == user_id,
-        VendorSubscription.status.in_(['ACTIVE', 'CANCELLED_PENDING_EXPIRY']),
-        VendorSubscription.end_date > _now,
-    ).first()
-    is_pro = bool((sf and sf.is_pro_active) or active_sub)
-    if not is_pro:
+    from app.services.entitlements import has_feature
+    if not has_feature(user_id, 'invoices_unlimited'):
         return jsonify({
             'message': 'Invoicing and billing tools require an active Siiqo Pro subscription.',
             'upgrade_required': True,
@@ -789,18 +781,10 @@ def revenue_status():
     month_count = month_invoices + month_receipts
 
     # Check for an active subscription in the database
-    from app.models.admin import VendorSubscription
-    now = utcnow()
-    active_sub = VendorSubscription.query.filter(
-        VendorSubscription.vendor_id == int(user_id),
-        VendorSubscription.status == 'ACTIVE',
-        VendorSubscription.end_date > now,
-    ).first()
-
-    has_sub = active_sub is not None
-    plan_type = 'FREE'
-    if has_sub and active_sub.plan:
-        plan_type = active_sub.plan.name
+    from app.services.entitlements import entitlements
+    ent = entitlements(user_id)
+    has_sub = ent['plan']['name'] != 'FREE'
+    plan_type = ent['plan']['name']
 
     return jsonify({
         'status': 'success',
@@ -808,7 +792,7 @@ def revenue_status():
         'plan_type': plan_type,
         'usage': {
             'current_month_invoices': month_count,
-            'limit': None if has_sub else 6,  # None = unlimited for Pro users
+            'limit': ent['limits']['invoices_per_month'],  # None = unlimited
         }
     }), 200
 
