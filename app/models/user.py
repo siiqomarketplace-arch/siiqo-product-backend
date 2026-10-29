@@ -112,7 +112,6 @@ class User(db.Model):
             "state": self.state,
             "trust_score": self.trust_score_or_default,
             "trust_tier": self.trust_tier_or_default,
-            "nin": self.nin or "",
             "telegram_id": self.telegram_id,
             "telegram_notification_prefs": self.telegram_notification_prefs or {},
         }

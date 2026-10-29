@@ -131,9 +131,6 @@ def get_settings():
             "pro_verified_expires_at": sf.pro_verified_expires_at.isoformat() if sf.pro_verified_expires_at else None,
             "verification_status": sf.verification_status or "NOT_SUBMITTED",
             "account_type": sf.account_type or "INDIVIDUAL",
-            "nin_document_url": sf.nin_document_url,
-            "cac_document_url": sf.cac_document_url,
-            "nin": user.nin,
             "bank_code": sf.bank_code,
             "account_number": sf.account_number,
             "account_name": sf.account_name,
@@ -175,9 +172,6 @@ def get_settings():
             "pro_verified_expires_at": None,
             "verification_status": "NOT_SUBMITTED",
             "account_type": "INDIVIDUAL",
-            "nin_document_url": None,
-            "cac_document_url": None,
-            "nin": user.nin,
             "bank_code": None,
             "account_number": None,
             "account_name": None,
@@ -500,13 +494,11 @@ def onboard_vendor():
         is_verified=False,
     )
 
-    if 'nin' in data:
-        user.nin = data['nin']
+    # Verification runs through a provider (verification v2); Siiqo no longer
+    # collects ID documents or stores typed NIN numbers.
 
     logo_file = request.files.get('logo') or request.files.get('store_logo')
     banner_file = request.files.get('banner') or request.files.get('banner_url')
-    nin_doc = request.files.get('nin_document') or request.files.get('nin_doc')
-    cac_doc = request.files.get('cac_document') or request.files.get('cac_doc')
 
     if logo_file:
         try:
@@ -517,18 +509,6 @@ def onboard_vendor():
     if banner_file:
         try:
             storefront.banner_url = save_uploaded_file(banner_file, subfolder='storefronts')
-        except ValueError as e:
-            return jsonify({"message": str(e)}), 400
-
-    if nin_doc:
-        try:
-            storefront.nin_document_url = save_uploaded_file(nin_doc, subfolder='verifications')
-        except ValueError as e:
-            return jsonify({"message": str(e)}), 400
-
-    if cac_doc:
-        try:
-            storefront.cac_document_url = save_uploaded_file(cac_doc, subfolder='verifications')
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
 
@@ -619,8 +599,6 @@ def update_settings():
     if 'phone' in data:
         user.phone = data['phone']
 
-    if 'nin' in data:
-        user.nin = data['nin']
         
     if 'fullname' in data:
         name_parts = data['fullname'].strip().split(' ', 1)
@@ -684,20 +662,8 @@ def update_settings():
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
 
-    # Verification file uploads
-    if 'nin_document' in request.files or 'nin_doc' in request.files:
-        nin_file = request.files.get('nin_document') or request.files.get('nin_doc')
-        try:
-            sf.nin_document_url = save_uploaded_file(nin_file, subfolder='verifications')
-        except ValueError as e:
-            return jsonify({"message": str(e)}), 400
-
-    if 'cac_document' in request.files or 'cac_doc' in request.files:
-        cac_file = request.files.get('cac_document') or request.files.get('cac_doc')
-        try:
-            sf.cac_document_url = save_uploaded_file(cac_file, subfolder='verifications')
-        except ValueError as e:
-            return jsonify({"message": str(e)}), 400
+    # Verification runs through a provider (verification v2); Siiqo no longer
+    # collects ID documents or stores typed NIN numbers.
 
     db.session.commit()
 
