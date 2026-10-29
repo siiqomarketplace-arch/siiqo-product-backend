@@ -752,53 +752,6 @@ def scrape_product():
         
     return jsonify(result), 200
 
-@vendor_bp.route('/products/scrape-debug', methods=['POST'])
-@jwt_required()
-def scrape_product_debug():
-    """Debug endpoint to see detailed scraping information"""
-    user_id = _get_user_id()
-    user, sf = _require_vendor_storefront(user_id)
-    if not user or not sf:
-        return jsonify({"message": "Vendor access required"}), 403
-    
-    data = request.get_json() or {}
-    url = data.get('url')
-    if not url:
-        return jsonify({"message": "URL is required"}), 400
-    
-    import os
-    
-    debug_info = {
-        "url": url,
-        "proxy_configured": bool(os.environ.get("BRIGHT_DATA_PROXY")),
-        "steps": []
-    }
-    
-    try:
-        # Just run the regular scraper and return detailed info
-        result = scrape_product_url(url)
-        
-        if result.get("success"):
-            data = result.get("data", {})
-            debug_info["steps"].append("✅ Scraping completed successfully")
-            debug_info["steps"].append(f"Name: {'✅ Found' if data.get('name') else '❌ Empty'}")
-            debug_info["steps"].append(f"Description: {'✅ Found (' + str(len(data.get('description', ''))) + ' chars)' if data.get('description') else '❌ Empty'}")
-            debug_info["steps"].append(f"Price: {'✅ Found ($' + str(data.get('price', '0')) + ')' if data.get('price') and data.get('price') != '0' else '❌ Not found (0)'}")
-            debug_info["steps"].append(f"Image: {'✅ Found' if data.get('image_url') else '❌ Empty'}")
-            debug_info["scraper_result"] = result
-        else:
-            debug_info["steps"].append(f"❌ Scraping failed: {result.get('message')}")
-            debug_info["error"] = result.get("message")
-        
-        return jsonify(debug_info), 200
-        
-    except Exception as e:
-        import traceback
-        debug_info["error"] = str(e)
-        debug_info["traceback"] = traceback.format_exc()
-        debug_info["steps"].append(f"❌ Error: {str(e)}")
-        return jsonify(debug_info), 500
-
 @vendor_bp.route('/products/add', methods=['POST'])
 @jwt_required()
 def add_product():

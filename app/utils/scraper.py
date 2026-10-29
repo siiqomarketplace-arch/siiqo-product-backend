@@ -1,13 +1,50 @@
 import logging
 logger = logging.getLogger(__name__)
 import os
+import ipaddress
+import socket
+from urllib.parse import urljoin, urlparse
+
 import requests
 from bs4 import BeautifulSoup
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+MAX_REDIRECTS = 5
+
+
+class UnsafeURLError(ValueError):
+    pass
+
+
+def _check_public_url(url):
+    """Only fetch http(s) URLs whose host resolves to public addresses, so a
+    vendor can't make the server read internal services or cloud metadata."""
+    parsed = urlparse(url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise UnsafeURLError("Only http and https links are supported")
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror:
+        raise UnsafeURLError("Could not resolve that link")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global or ip.is_multicast:
+            raise UnsafeURLError("That link points to a private address")
+
+
+def _safe_get(url, **kwargs):
+    """requests.get that re-checks the address on every redirect hop."""
+    for _ in range(MAX_REDIRECTS + 1):
+        _check_public_url(url)
+        response = requests.get(url, allow_redirects=False, **kwargs)
+        if response.is_redirect and response.headers.get("location"):
+            url = urljoin(url, response.headers["location"])
+            continue
+        return response
+    raise UnsafeURLError("Too many redirects")
+
 
 def _fetch_page_content(url):
+    _check_public_url(url)
     proxy_val = os.environ.get("BRIGHT_DATA_PROXY")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
@@ -29,7 +66,7 @@ def _fetch_page_content(url):
                         "http": f"http://{username}:{password}@{host}:{port}",
                         "https": f"http://{username}:{password}@{host}:{port}"
                     }
-                    response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=30)
+                    response = requests.get(url, headers=headers, proxies=proxies, timeout=30)
                     response.raise_for_status()
                     return response.text
             except Exception as e:
@@ -58,7 +95,7 @@ def _fetch_page_content(url):
                 pass
     
     # Fallback: direct request without proxy
-    response = requests.get(url, headers=headers, verify=False, timeout=30)
+    response = _safe_get(url, headers=headers, timeout=30)
     response.raise_for_status()
     return response.text
 
@@ -308,7 +345,7 @@ def analyze_storefront_url(url):
             try:
                 import tempfile
                 from colorthief import ColorThief
-                img_resp = requests.get(image_url, timeout=15)
+                img_resp = _safe_get(image_url, timeout=15)
                 if img_resp.status_code == 200:
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
                         tmp.write(img_resp.content)
