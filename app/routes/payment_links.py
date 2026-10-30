@@ -222,6 +222,10 @@ def pay_payment_link(link_id):
     buyer_name = (data.get('buyer_name') or '').strip()
     buyer_email = (data.get('buyer_email') or '').strip().lower()
     buyer_phone = (data.get('buyer_phone') or '').strip()
+    # Delivery address for physical Pay Links (optional here so older clients keep working)
+    delivery_address = str(data.get('delivery_address') or '').strip()[:255] or None
+    delivery_city = str(data.get('delivery_city') or '').strip()[:100] or None
+    delivery_state = str(data.get('delivery_state') or '').strip()[:100] or None
 
     link_product_type = getattr(link, 'product_type', 'service') or 'service'
 
@@ -306,6 +310,9 @@ def pay_payment_link(link_id):
         buyer_phone=buyer_phone or None,
         delivery_phone=buyer_phone or None,
         delivery_name=buyer_name,
+        delivery_address=delivery_address if link_product_type == 'physical' else None,
+        delivery_city=delivery_city if link_product_type == 'physical' else None,
+        delivery_state=delivery_state if link_product_type == 'physical' else None,
         is_guest=not existing_account,
     )
     db.session.add(new_order)
