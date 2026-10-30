@@ -19,9 +19,16 @@ Where the rate comes from, in order of preference:
      (https://developer.flutterwave.com/v3.0.0/reference/verify-transaction,
      https://developer.flutterwave.com/v3.0.0/docs/webhooks), so no gateway
      rate can be read from it and we fall through to a quote.
-2. A quote from a rate source already used in the code: Daya ``get_rate``
-   (NGN per USDT, side SELL = stablecoin to naira). USDT tracks USD, so this
-   only quotes USD. Other currencies get no quote.
+   * Flutterwave payments: Flutterwave's own transfer rate
+     (GET /v3/transfers/rates, https://developer.flutterwave.com/docs/transfer-rates),
+     asked for source = the order currency, destination = NGN, the same
+     direction as the payout. Flutterwave says these rates are estimates
+     updated a few times a day, so the payout can differ slightly from what
+     Flutterwave settles.
+2. A quote from Daya ``get_rate`` (NGN per USDT, side SELL). USDT tracks USD,
+   so this only quotes USD. It is used as a sanity check against the gateway
+   rate, and as the rate itself only for Daya-paid orders (Daya's own rate).
+   It is never used as the rate for Flutterwave or Paystack payments.
 3. Nothing: the rate stays NULL and the payout is held for support.
 
 A rate is never invented. When the gateway rate and the quote both exist and
@@ -45,6 +52,9 @@ _KOBO = Decimal("0.01")
 
 SOURCE_DAYA_AMOUNT = "gateway:daya_amount_ngn"
 SOURCE_DAYA_QUOTE = "quote:daya_usdt_sell"
+SOURCE_FLW_RATE = "gateway:flutterwave_transfer_rate"
+
+DAYA_METHODS = ("CRYPTO", "DAYA", "USDT", "USDC", "DAYA_BANK_TRANSFER")
 
 
 def _dec(value):
@@ -94,6 +104,42 @@ def quoted_rate(currency: str):
     return rate, SOURCE_DAYA_QUOTE
 
 
+def is_daya_paid(order, escrow) -> bool:
+    return ((getattr(order, "payment_method", None) or "").upper() in DAYA_METHODS
+            or getattr(escrow, "gateway", None) == "DAYA"
+            or bool(getattr(order, "crypto_hash", None))
+            or (getattr(escrow, "transaction_number", None) or "").startswith("DYA-")
+            or (getattr(escrow, "payscrow_transaction_id", None) or "").startswith("DAYA-"))
+
+
+def is_flutterwave_paid(order, escrow) -> bool:
+    """Daya wins: a Daya order is never treated as Flutterwave, whatever its reference."""
+    if is_daya_paid(order, escrow):
+        return False
+    return ((getattr(order, "payment_method", None) or "").upper() == "FLUTTERWAVE"
+            or (getattr(escrow, "transaction_number", None) or "").startswith("FLW-"))
+
+
+def flutterwave_rate(currency: str):
+    """NGN per 1 unit of `currency` from Flutterwave's transfer rates, or None. Never raises."""
+    if not currency or currency.upper() == "NGN" or not os.environ.get("FLW_SECRET_KEY"):
+        return None
+    try:
+        from app.services import flutterwave_service
+        data = flutterwave_service.get_transfer_rate(
+            source_currency=currency.upper(), destination_currency="NGN", amount=1000)
+    except Exception as exc:
+        logger.info("[FX] Flutterwave rate unavailable: %s", exc)
+        return None
+    if not data or not data.get("success"):
+        return None
+    src = _dec((data.get("source") or {}).get("amount"))
+    dst = _dec((data.get("destination") or {}).get("amount"))
+    if not src or not dst or src <= 0 or dst <= 0:
+        return None
+    return dst / src, SOURCE_FLW_RATE
+
+
 def _record_event(order, name: str, source: str, properties: dict):
     try:
         from app.models.telemetry import PlatformEvent
@@ -108,7 +154,7 @@ def _record_event(order, name: str, source: str, properties: dict):
         logger.warning("[FX] Could not record %s for Order #%s: %s", name, order.id, exc)
 
 
-def capture_rate(order, escrow, gateway_payload=None):
+def capture_rate(order, escrow, gateway_payload=None, stage="payment"):
     """Record the NGN rate on ``order.fx_rate_to_ngn`` when payment is confirmed.
 
     Idempotent: a rate already stored is kept. Returns ``{"rate", "source"}``
@@ -133,10 +179,12 @@ def capture_rate(order, escrow, gateway_payload=None):
         order.currency = currency
         order.fx_rate_to_ngn = None
 
-    gw = gateway_rate(escrow, gateway_payload)
+    flw = is_flutterwave_paid(order, escrow)
+    gw = gateway_rate(escrow, gateway_payload) or (flutterwave_rate(currency) if flw else None)
     quote = quoted_rate(currency)
     props = {
         "currency": currency,
+        "stage": stage,
         "gateway_rate": str(gw[0]) if gw else None,
         "gateway_source": gw[1] if gw else None,
         "quoted_rate": str(quote[0]) if quote else None,
@@ -154,7 +202,8 @@ def capture_rate(order, escrow, gateway_payload=None):
             _record_event(order, "fx_rate_rejected", gw[1], props)
             return None
 
-    chosen = gw or quote
+    # The Daya quote stands in only for Daya's own payments.
+    chosen = gw or (quote if is_daya_paid(order, escrow) else None)
     if not chosen:
         logger.warning("[FX] Order #%s paid in %s — no rate available, payout will be held", order.id, currency)
         return None
@@ -167,6 +216,19 @@ def capture_rate(order, escrow, gateway_payload=None):
     _record_event(order, "fx_rate_captured", chosen[1], props)
     logger.info("[FX] Order #%s %s rate captured: %s NGN (%s)", order.id, currency, rate, chosen[1])
     return {"rate": rate, "source": chosen[1]}
+
+
+def capture_for_order(order, escrow, stage="release"):
+    """Capture a missing rate on any payout path (bridge, admin, auto-release).
+    Daya orders use the naira amount Daya collected, so the late rate is still
+    the payment-time rate; other gateways use their rate at this moment."""
+    payload = None
+    if is_daya_paid(order, escrow):
+        from app.models.withdrawal import DayaPayment
+        payload = (DayaPayment.query.filter_by(order_id=order.id)
+                   .filter(DayaPayment.status.in_(("COMPLETED", "SUCCESS", "PAID")))
+                   .order_by(DayaPayment.id.desc()).first())
+    return capture_rate(order, escrow, payload, stage=stage)
 
 
 def naira_net(order, escrow):

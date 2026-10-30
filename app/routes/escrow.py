@@ -100,6 +100,10 @@ def _vendor_net_amount(order, escrow) -> float:
     (app/services/fx.py); otherwise the escrow's face value, as before."""
     from app.services import fx
     converted = fx.naira_net(order, escrow)
+    if converted is None and fx.order_currency(order, escrow) != 'NGN':
+        # Paths that confirmed payment without capturing a rate get one now.
+        fx.capture_for_order(order, escrow)
+        converted = fx.naira_net(order, escrow)
     if converted is not None:
         return float(converted)
     return float(escrow.amount) - float(escrow.fee_amount or 0)
@@ -223,10 +227,9 @@ def _deliver_digital_products(order, escrow):
     # NOTE: CRYPTO orders skip all Paystack payout — funds sit in Siiqo's Daya
     #       merchant balance and are paid out to the vendor separately via Daya.
     is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
-    is_flutterwave = (
-        (order.payment_method or '').upper() == 'FLUTTERWAVE'
-        or (escrow.transaction_number or '').startswith('FLW-')
-    )
+    # A Daya order is paid out by the Daya confirmation handler, never here.
+    from app.services.fx import is_flutterwave_paid
+    is_flutterwave = not is_crypto and is_flutterwave_paid(order, escrow)
     # Use payment_method exclusively — the old payscrow_transaction_id heuristic
     # incorrectly flagged FLW orders as Paystack.
     is_paystack = (
@@ -417,10 +420,9 @@ def _deliver_service_products(order, escrow):
     # - Otherwise → fall back to manual Paystack Transfer (legacy flow).
     # NOTE: CRYPTO orders skip all Paystack payout (funds held in Daya balance).
     is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
-    is_flutterwave = (
-        (order.payment_method or '').upper() == 'FLUTTERWAVE'
-        or (escrow.transaction_number or '').startswith('FLW-')
-    )
+    # A Daya order is paid out by the Daya confirmation handler, never here.
+    from app.services.fx import is_flutterwave_paid
+    is_flutterwave = not is_crypto and is_flutterwave_paid(order, escrow)
     is_paystack = (
         not is_crypto and not is_flutterwave
         and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
@@ -580,10 +582,9 @@ def _deliver_event_tickets(order, escrow):
     order.status = 'COMPLETED'
 
     is_crypto = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA')
-    is_flutterwave = (
-        (order.payment_method or '').upper() == 'FLUTTERWAVE'
-        or (escrow.transaction_number or '').startswith('FLW-')
-    )
+    # A Daya order is paid out by the Daya confirmation handler, never here.
+    from app.services.fx import is_flutterwave_paid
+    is_flutterwave = not is_crypto and is_flutterwave_paid(order, escrow)
     is_paystack = (
         not is_crypto and not is_flutterwave
         and (order.payment_method or '').upper() in ('PAYSTACK', 'ESCROW')
@@ -883,8 +884,8 @@ def escrow_status():
                     if escrow.order:
                         escrow.order.status = 'PAID'
                         db.session.flush()
-                        from app.services.fx import capture_rate
-                        capture_rate(escrow.order, escrow)
+                        from app.services.fx import capture_for_order
+                        capture_for_order(escrow.order, escrow, stage="payment")
 
                         is_event = _deliver_event_tickets(escrow.order, escrow)
                         is_digital = False
@@ -1247,19 +1248,9 @@ def execute_order_escrow_release(order, escrow, source="admin"):
     )
 
     # Determine payout channel: Daya (crypto/NGN bank-transfer onramp) vs Paystack vs Flutterwave
-    DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'USDT', 'USDC', 'DAYA_BANK_TRANSFER')
-    is_daya_order = (
-        (order.payment_method or '') in DAYA_PAYMENT_METHODS
-        or getattr(escrow, 'gateway', None) == 'DAYA'
-        or getattr(order, 'crypto_hash', None)
-        or (escrow.transaction_number or '').startswith('DYA-')
-        or (escrow.payscrow_transaction_id or '').startswith('DAYA-')
-    )
-
-    is_flutterwave_order = (
-        (order.payment_method or '').upper() == 'FLUTTERWAVE'
-        or (escrow.transaction_number or '').startswith('FLW-')
-    )
+    from app.services.fx import is_daya_paid, is_flutterwave_paid
+    is_daya_order = is_daya_paid(order, escrow)
+    is_flutterwave_order = is_flutterwave_paid(order, escrow)  # never true for a Daya order
 
     payout_dispatched = False
     if is_flutterwave_order:

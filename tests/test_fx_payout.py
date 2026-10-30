@@ -41,6 +41,23 @@ def quote(monkeypatch):
 
 
 @pytest.fixture
+def flw_rate(monkeypatch):
+    """Flutterwave transfer rate: NGN per 1 unit; set .ngn = None to make it unavailable."""
+    state = SimpleNamespace(ngn=1500, calls=0)
+
+    def get_transfer_rate(source_currency, destination_currency, amount):
+        state.calls += 1
+        if state.ngn is None:
+            return {"success": False, "error_message": "unavailable"}
+        return {"success": True, "rate": 1 / state.ngn,
+                "source": {"currency": source_currency, "amount": amount / state.ngn},
+                "destination": {"currency": destination_currency, "amount": amount}}
+    monkeypatch.setenv("FLW_SECRET_KEY", "FLWSECK_TEST-dummy")
+    monkeypatch.setattr(flutterwave_service, "get_transfer_rate", get_transfer_rate)
+    return state
+
+
+@pytest.fixture
 def transfers(monkeypatch):
     calls = []
 
@@ -115,13 +132,33 @@ def test_capture_prefers_gateway_rate_from_daya_amount(make_vendor, make_product
     assert event.properties["quoted_rate"] == "1480"
 
 
-def test_capture_falls_back_to_quote_for_flutterwave_usd(make_vendor, make_product, make_order, quote):
+def test_capture_uses_flutterwave_rate_for_flutterwave_usd(make_vendor, make_product, make_order, quote, flw_rate):
+    quote.rate = 1480  # only a sanity check now
     _, order, escrow = _order(make_vendor, make_product, make_order, "USD")
     verification = {"success": True, "status": "successful", "currency": "USD", "amount": 103.0}
     result = fx.capture_rate(order, escrow, verification)
     db.session.commit()
-    assert result["source"] == fx.SOURCE_DAYA_QUOTE
+    assert result["source"] == fx.SOURCE_FLW_RATE
     assert Decimal(str(order.fx_rate_to_ngn)) == Decimal("1500")
+
+
+def test_flutterwave_order_never_uses_daya_quote_as_rate(make_vendor, make_product, make_order, quote, flw_rate):
+    flw_rate.ngn = None
+    _, order, escrow = _order(make_vendor, make_product, make_order, "USD")
+    assert fx.capture_rate(order, escrow, {"currency": "USD"}) is None
+    assert order.fx_rate_to_ngn is None
+
+
+def test_flutterwave_rate_rejected_when_far_from_quote(make_vendor, make_product, make_order, quote, flw_rate):
+    flw_rate.ngn = 2000  # 33% above the 1500 quote
+    _, order, escrow = _order(make_vendor, make_product, make_order, "USD")
+    assert fx.capture_rate(order, escrow, {"currency": "USD"}) is None
+    assert PlatformEvent.query.filter_by(order_id=order.id, event_name="fx_rate_rejected").count() == 1
+
+
+def test_paystack_order_never_uses_daya_quote_as_rate(make_vendor, make_product, make_order, quote):
+    _, order, escrow = _order(make_vendor, make_product, make_order, "USD", payment_method="PAYSTACK", prefix="PL")
+    assert fx.capture_rate(order, escrow) is None
 
 
 def test_capture_leaves_rate_null_without_any_source(make_vendor, make_product, make_order, quote):
@@ -139,10 +176,10 @@ def test_capture_leaves_rate_null_when_quote_unavailable(make_vendor, make_produ
     assert order.fx_rate_to_ngn is None
 
 
-def test_capture_is_idempotent(make_vendor, make_product, make_order, quote):
+def test_capture_is_idempotent(make_vendor, make_product, make_order, quote, flw_rate):
     _, order, escrow = _order(make_vendor, make_product, make_order, "USD")
     fx.capture_rate(order, escrow)
-    quote.rate = 1700
+    flw_rate.ngn = quote.rate = 1700
     assert fx.capture_rate(order, escrow)["source"] == "existing"
     assert Decimal(str(order.fx_rate_to_ngn)) == Decimal("1500")
 
@@ -225,7 +262,7 @@ def test_release_of_physical_fx_order_credits_and_pays_naira(
 # ── confirmation paths capture the rate ─────────────────────────────────────
 
 def test_flutterwave_confirmation_captures_rate_and_pays_naira(
-        make_vendor, make_product, make_order, transfers, quote):
+        make_vendor, make_product, make_order, transfers, quote, flw_rate):
     vendor, order, escrow = _order(make_vendor, make_product, make_order, "USD",
                                    status=EscrowStatus.PENDING_PAYMENT)
     verification = {"success": True, "status": "successful", "currency": "USD",
@@ -254,3 +291,70 @@ def test_daya_confirmation_captures_gateway_rate_and_pays_naira(
     assert [t["amount_ngn"] for t in transfers] == [145500.0]
     assert [float(r.amount) for r in _ledger(vendor.id, "PAYOUT-")] == [145500.0]
     assert _get_ledger_balance(vendor.id) == Decimal("0")
+
+
+# ── currency sync, payout channel, late capture ─────────────────────────────
+
+def test_new_escrow_with_only_order_id_sets_order_currency(make_vendor, make_order):
+    vendor, _ = make_vendor()
+    order = make_order(vendor, total=100, payment_method="FLUTTERWAVE")
+    assert order.currency == "NGN" and Decimal(str(order.fx_rate_to_ngn)) == Decimal("1")
+    order_id = order.id
+    db.session.expire_all()  # escrow.order not loaded, as on a fresh request
+    db.session.add(EscrowTransaction(order_id=order_id, transaction_number=f"FLW-PL-{order_id}-BBBB",
+                                     status=EscrowStatus.PENDING_PAYMENT, amount=100, fee_amount=3,
+                                     currency="USD"))
+    db.session.commit()
+    from app.models.order import Order
+    fresh = db.session.get(Order, order_id)
+    assert fresh.currency == "USD"
+    assert fresh.fx_rate_to_ngn is None  # a naira rate of 1 is never kept for a USD order
+
+
+def test_daya_order_with_flw_reference_is_paid_once_via_daya(
+        make_vendor, make_product, make_order, transfers, quote):
+    vendor, order, escrow = _order(make_vendor, make_product, make_order, "NGN",
+                                   payment_method="DAYA_BANK_TRANSFER", status=EscrowStatus.PENDING_PAYMENT,
+                                   prefix="FLW-ORD")
+    dp = DayaPayment(order_id=order.id, payment_type="ngn_onramp", amount_ngn=100,
+                     status="COMPLETED", daya_deposit_id="dep_2")
+    db.session.add(dp)
+    db.session.commit()
+    payments_routes._handle_crypto_payment_confirmed(order.id, dp)
+    assert len(transfers) == 1  # Daya only; no Flutterwave transfer as well
+    assert _get_ledger_balance(vendor.id) == Decimal("0")
+
+
+def test_release_without_rate_captures_daya_rate_late(make_vendor, make_product, make_order, transfers, quote):
+    vendor, order, escrow = _order(make_vendor, make_product, make_order, "USD",
+                                   payment_method="DAYA_BANK_TRANSFER", product_type="physical",
+                                   status=EscrowStatus.DELIVERED, prefix="ESC")
+    order.status = "DELIVERED"
+    db.session.add(DayaPayment(order_id=order.id, payment_type="ngn_onramp", amount_ngn=150000,
+                               status="COMPLETED", daya_deposit_id="dep_3"))
+    db.session.commit()
+    assert execute_order_escrow_release(order, escrow, source="admin") is True
+    db.session.commit()
+    assert Decimal(str(order.fx_rate_to_ngn)) == Decimal("1500")
+    assert [t["amount_ngn"] for t in transfers] == [145500.0]
+    event = PlatformEvent.query.filter_by(order_id=order.id, event_name="fx_rate_captured").one()
+    assert event.properties["stage"] == "release"
+    assert _ledger(vendor.id, "FX-HOLD-") == []
+    assert _get_ledger_balance(vendor.id) == Decimal("0")
+
+
+def test_admin_retry_payout_refuses_foreign_order_without_rate(client, make_vendor, make_product, make_order,
+                                                                transfers):
+    from flask_jwt_extended import create_access_token
+    from app.models.admin import AdminUser
+    admin = AdminUser(name="Root", email="root-fx@example.com", role="SUPERADMIN")
+    admin.set_password("x" * 12)
+    db.session.add(admin)
+    _, order, escrow = _order(make_vendor, make_product, make_order, "GBP", payment_method="CRYPTO", prefix="ESC")
+    order.status = "COMPLETED"
+    db.session.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(identity=f'admin:{admin.id}')}"}
+    res = client.post(f"/api/admin/payout/retry-order/{order.id}", headers=headers, json={})
+    assert res.status_code == 409
+    assert res.get_json()["code"] == "FX_RATE_REQUIRED"
+    assert transfers == []

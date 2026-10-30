@@ -1132,7 +1132,8 @@ def paystack_webhook():
                             # Send buyer email directly using the file_url on the PaymentLink record.
                             if not delivered:
                                 from app.models.escrow import EscrowStatus as _ES
-                                net_amount = float(pl_escrow.amount) - float(pl_escrow.fee_amount or 0)
+                                from app.routes.escrow import _vendor_net_amount
+                                net_amount = _vendor_net_amount(pl_order, pl_escrow)
                                 pl_escrow.status = _ES.RELEASED
                                 pl_escrow.released_at = _utcnow()
                                 pl_order.status = 'COMPLETED'

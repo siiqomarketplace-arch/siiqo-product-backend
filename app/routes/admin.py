@@ -1674,7 +1674,7 @@ def admin_fix_crypto_order(order_id):
     from app.models.communication import Notification
     from app.routes.events import activate_tickets_for_order
     from app.routes.escrow import (_deliver_digital_products, _deliver_service_products,
-                                   _credit_vendor_ledger, _record_payout_debit)
+                                   _credit_vendor_ledger, _record_payout_debit, _vendor_net_amount)
     from app.routes.payments import _payout_vendor_via_daya
     from app.utils.email import send_siiqo_email
 
@@ -1710,7 +1710,7 @@ def admin_fix_crypto_order(order_id):
             return
         try:
             if _payout_vendor_via_daya(order, escrow):
-                _record_payout_debit(order, escrow, float(escrow.amount) - float(escrow.fee_amount or 0))
+                _record_payout_debit(order, escrow, _vendor_net_amount(order, escrow))
         except Exception as e:
             logging.warning(f"[ADMIN FIX] Daya payout warning: {e}")
 
@@ -1723,10 +1723,13 @@ def admin_fix_crypto_order(order_id):
     escrow.paid_at = escrow.paid_at or _utcnow()
     db.session.flush()
 
+    from app.services.fx import capture_for_order
+    capture_for_order(order, escrow, stage="payment")
+
     # 1. Event Ticket Order?
     is_ticket = activate_tickets_for_order(order_id)
     if is_ticket:
-        net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+        net_amount = _vendor_net_amount(order, escrow)
         escrow.status = EscrowStatus.RELEASED
         escrow.released_at = escrow.released_at or _utcnow()
         order.status = 'COMPLETED'
@@ -1750,7 +1753,7 @@ def admin_fix_crypto_order(order_id):
         _link = db.session.get(_PL, order.payment_link_id)
         _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
         if _ltype in ('digital', 'service'):
-            net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+            net_amount = _vendor_net_amount(order, escrow)
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = escrow.released_at or _utcnow()
             order.status = 'COMPLETED'
@@ -1768,7 +1771,7 @@ def admin_fix_crypto_order(order_id):
 
     # 4. Physical Order (or fallback)
     if not is_digital and not is_service and not is_ticket:
-        net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+        net_amount = _vendor_net_amount(order, escrow)
         escrow.status = EscrowStatus.RELEASED
         escrow.released_at = escrow.released_at or _utcnow()
         order.status = 'COMPLETED'
@@ -2870,7 +2873,16 @@ def admin_retry_payout(order_id):
     if override_amount:
         net_amount_ngn = float(override_amount)
     else:
-        net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
+        from app.routes.escrow import _vendor_net_amount
+        from app.services import fx
+        net_amount_ngn = _vendor_net_amount(order, escrow)
+        if fx.order_currency(order, escrow) != 'NGN' and fx.naira_net(order, escrow) is None:
+            # Never send a foreign face value as naira.
+            return jsonify({
+                "message": f"Order #{order_id} was paid in {fx.order_currency(order, escrow)} and has no "
+                           "naira rate. Send amount_ngn to set the payout amount.",
+                "code": "FX_RATE_REQUIRED",
+            }), 409
 
     # Get vendor's current default bank account
     bank_acc = VendorBankAccount.query.filter_by(
@@ -3025,7 +3037,8 @@ def admin_retry_all_failed_payouts():
             vendor_id=order.vendor_id
         ).first()
 
-        net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
+        from app.routes.escrow import _vendor_net_amount
+        net_amount_ngn = _vendor_net_amount(order, escrow)
 
         entry = {
             "order_id": order.id,

@@ -529,6 +529,30 @@ def transfer_to_vendor(
     }
 
 
+def get_transfer_rate(source_currency: str, destination_currency: str, amount: float) -> dict:
+    """Flutterwave's rate for a transfer that debits `source_currency` and pays
+    `amount` of `destination_currency` (GET /v3/transfers/rates)."""
+    key = _secret_key()
+    if not key:
+        return {"success": False, "error_message": "Flutterwave not configured."}
+    try:
+        resp = requests.get(
+            f"{FLW_BASE_URL}/transfers/rates",
+            params={"amount": amount, "destination_currency": destination_currency,
+                    "source_currency": source_currency},
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        data = resp.json()
+    except Exception as exc:
+        return {"success": False, "error_message": str(exc)}
+    if data.get("status") != "success" or not isinstance(data.get("data"), dict):
+        return {"success": False, "error_message": data.get("message", "Rate unavailable.")}
+    d = data["data"]
+    return {"success": True, "rate": d.get("rate"), "source": d.get("source") or {},
+            "destination": d.get("destination") or {}}
+
+
 def get_transfer_status(transfer_id: str | int) -> dict:
     """Query the status of a Flutterwave transfer by ID."""
     key = _secret_key()

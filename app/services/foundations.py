@@ -117,8 +117,14 @@ def _before_flush(session, flush_context, instances):
                         obj.delivered_at = now
                     if new == "COMPLETED" and obj.released_at is None:
                         obj.released_at = now
-            elif isinstance(obj, EscrowTransaction) and obj.order is not None:
+            elif isinstance(obj, EscrowTransaction) and (obj.order is not None or obj.order_id):
                 order = obj.order
+                if order is None:
+                    # New escrows are often created with only order_id set.
+                    with session.no_autoflush:
+                        order = session.get(Order, obj.order_id)
+                    if order is None:
+                        continue
                 if obj.currency and obj.currency != order.currency and _changed(obj, "currency"):
                     order.currency = obj.currency
                     order.fx_rate_to_ngn = 1 if obj.currency == "NGN" else None
