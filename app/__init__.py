@@ -99,6 +99,16 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE passport_api_clients ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
+                "CREATE INDEX IF NOT EXISTS ix_passport_api_clients_owner_user_id ON passport_api_clients (owner_user_id)",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_secret_enc VARCHAR(255)",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_pending_secret_enc VARCHAR(255)",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_enabled_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_last_used_step BIGINT",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_recovery_hashes JSON",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_challenge_nonce VARCHAR(64)",
+                "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_challenge_failures INTEGER DEFAULT 0",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
                 # ── Payment link product type, digital file & currency ──────────
@@ -736,6 +746,19 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as billing_err:
                 logger.warning(f"Billing task registration skipped: {billing_err}")
+
+            # Data retention (NDPA): daily; reports only unless PRIVACY_RETENTION_APPLY=true
+            try:
+                from app.tasks.privacy_retention import run_scheduled as run_privacy_retention
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_privacy_retention),
+                    trigger=IntervalTrigger(hours=24),
+                    id='privacy_retention',
+                    name='Remove or reduce personal data past its retention period',
+                    replace_existing=True,
+                )
+            except Exception as retention_err:
+                logger.warning(f"Privacy retention task registration skipped: {retention_err}")
 
             # Platform fee auto-sweep — check every 6 hours, sweep when >= threshold
             try:
