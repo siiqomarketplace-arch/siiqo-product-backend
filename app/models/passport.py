@@ -32,5 +32,7 @@ class PassportApiClient(db.Model):
     key_hash = db.Column(db.String(64), unique=True, nullable=False, index=True)
     plan = db.Column(db.String(20), default='free', nullable=False)   # free | paid (platform tiers later)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    # Set for self-serve developer keys (users.id); NULL for superadmin-issued platform keys.
+    owner_user_id = db.Column(db.Integer, nullable=True, index=True)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     last_used_at = db.Column(db.DateTime(timezone=True), nullable=True)

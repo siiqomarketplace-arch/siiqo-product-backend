@@ -166,13 +166,34 @@ def _key_hash(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def create_api_client(name, plan="free"):
+MAX_KEYS_PER_USER = 3
+
+
+def create_api_client(name, plan="free", owner_user_id=None):
     from app.models.passport import PassportApiClient
     raw = f"sqp_{secrets.token_urlsafe(32)}"
-    client = PassportApiClient(name=name, key_prefix=raw[:12], key_hash=_key_hash(raw), plan=plan)
+    client = PassportApiClient(name=name, key_prefix=raw[:12], key_hash=_key_hash(raw), plan=plan,
+                               owner_user_id=owner_user_id)
     db.session.add(client)
     db.session.commit()
     return client, raw
+
+
+def keys_for_user(user_id, active_only=False):
+    from app.models.passport import PassportApiClient
+    q = PassportApiClient.query.filter_by(owner_user_id=user_id)
+    if active_only:
+        q = q.filter_by(is_active=True)
+    return q.order_by(PassportApiClient.created_at.desc(), PassportApiClient.id.desc()).all()
+
+
+def key_public(client):
+    """A developer key as listed back to its owner (never the raw key or its hash)."""
+    def iso(dt):
+        return _aware(dt).isoformat() if dt else None
+    return {"id": client.id, "name": client.name, "key_prefix": client.key_prefix, "plan": client.plan,
+            "is_active": bool(client.is_active), "created_at": iso(client.created_at),
+            "last_used_at": iso(client.last_used_at)}
 
 
 def client_for_key(raw):

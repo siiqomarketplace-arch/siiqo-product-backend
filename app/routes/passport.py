@@ -121,3 +121,62 @@ def create_client():
     client, raw = svc.create_api_client(name, plan=data.get('plan', 'free'))
     return jsonify({"id": client.id, "name": client.name, "api_key": raw,
                     "message": "Store this key now; it won't be shown again."}), 201
+
+
+# ── self-serve developer keys (developers portal) ──────────────────────────
+
+def _signed_in_user():
+    """The signed-in Siiqo user (any role), or None for admins and unknown ids."""
+    from app.models.user import User
+    identity = get_jwt_identity()
+    try:
+        user_id = int(identity)
+    except (TypeError, ValueError):
+        return None
+    user = db.session.get(User, user_id)
+    return user if user is not None and user.is_active else None
+
+
+@passport_bp.route('/keys', methods=['GET', 'POST'])
+@jwt_required()
+@limiter.limit("30 per minute")
+def developer_keys():
+    user = _signed_in_user()
+    if user is None:
+        return jsonify({"message": "Sign in with a Siiqo account to manage API keys."}), 403
+
+    if request.method == 'GET':
+        return jsonify({"keys": [svc.key_public(c) for c in svc.keys_for_user(user.id)],
+                        "max_active_keys": svc.MAX_KEYS_PER_USER}), 200
+
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    if not name:
+        return jsonify({"message": "name is required"}), 400
+    if len(name) > 120:
+        return jsonify({"message": "name must be 120 characters or fewer"}), 400
+    if len(svc.keys_for_user(user.id, active_only=True)) >= svc.MAX_KEYS_PER_USER:
+        return jsonify({"message": f"You can have up to {svc.MAX_KEYS_PER_USER} active keys. "
+                                   "Revoke one to create another."}), 409
+    client, raw = svc.create_api_client(name, plan="free", owner_user_id=user.id)
+    body = svc.key_public(client)
+    return jsonify({"id": body["id"], "name": body["name"], "key_prefix": body["key_prefix"],
+                    "api_key": raw, "plan": body["plan"], "created_at": body["created_at"],
+                    "message": "Store this key now; it won't be shown again."}), 201
+
+
+@passport_bp.route('/keys/<int:key_id>', methods=['DELETE'])
+@jwt_required()
+@limiter.limit("30 per minute")
+def revoke_developer_key(key_id):
+    from app.models.passport import PassportApiClient
+    user = _signed_in_user()
+    if user is None:
+        return jsonify({"message": "Sign in with a Siiqo account to manage API keys."}), 403
+    client = db.session.get(PassportApiClient, key_id)
+    # Someone else's key (or a platform key) looks the same as a missing one.
+    if client is None or client.owner_user_id != user.id:
+        return jsonify({"message": "Key not found"}), 404
+    client.is_active = False
+    db.session.commit()
+    return jsonify({"id": client.id, "is_active": False, "message": "Key revoked."}), 200
