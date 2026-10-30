@@ -13,7 +13,7 @@ Every call, in order:
   1. resolve the versioned prompt ("action" or "action@vN");
   2. kill switch: env AI_ENABLED, optional env allowlist, PlatformSetting overrides;
   3. strip personal data from the inputs;
-  4. caps: global daily cost cap, per-seller daily action caps (from ai_usage);
+  4. caps: optional global daily cost cap (off unless AI_DAILY_COST_CAP_USD > 0), per-seller daily action caps (from ai_usage);
   5. pick the model by prompt kind (generation -> Opus 5.5, parsing -> Haiku 5.5);
   6. call Claude with the system prompt marked for prompt caching, effort set
      explicitly, structured output when a schema applies, and (Opus only) the
@@ -119,7 +119,8 @@ class GatewayConfig:
             enabled=_env_bool("AI_ENABLED", False),
             allowed_actions=frozenset(_env_list("AI_ENABLED_ACTIONS")),
             seller_daily_action_cap=_env_number("AI_SELLER_DAILY_ACTION_CAP", 50, int),
-            daily_cost_cap_usd=_env_number("AI_DAILY_COST_CAP_USD", 10.0, float),
+            # 0 = no global cap (founder decision, 30 Oct 2026); spend is still metered.
+            daily_cost_cap_usd=_env_number("AI_DAILY_COST_CAP_USD", 0.0, float),
             max_input_chars=_env_number("AI_MAX_INPUT_CHARS", 20_000, int),
             timeout_seconds=_env_number("AI_TIMEOUT_SECONDS", 60.0, float),
             max_retries=_env_number("AI_MAX_RETRIES", 2, int),
@@ -474,7 +475,7 @@ def run(
     # 4. Caps (fail closed if metering cannot be read)
     try:
         spent = global_cost_today_usd()
-        if spent >= config.daily_cost_cap_usd:
+        if config.daily_cost_cap_usd > 0 and spent >= config.daily_cost_cap_usd:
             _record(**row, outcome="cap_exceeded", error_type="global_cost_cap")
             raise AICapExceeded(
                 f"global daily AI cost cap reached (${spent:.2f} of ${config.daily_cost_cap_usd:.2f})",
