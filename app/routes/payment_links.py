@@ -19,6 +19,11 @@ from app.routes.escrow import generate_order_token
 
 payment_links_bp = Blueprint('payment_links', __name__)
 
+
+class _RateUnavailable(Exception):
+    """No live exchange rate: the Daya path is not offered rather than guessing a rate."""
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -383,35 +388,33 @@ def pay_payment_link(link_id):
                 last_name=last_name,
             )
 
-            # FX cross rates to USD
-            FX_TO_USD = {
-                'USD': Decimal('1.00'),
-                'GBP': Decimal('1.30'),
-                'EUR': Decimal('1.08'),
-                'CAD': Decimal('0.73'),
-                'JPY': Decimal('0.0065'),
-                'CNY': Decimal('0.14'),
-                'NGN': Decimal('1.00'),
-            }
-
-            # 4. Get a firm exchange rate
+            # 4. Get a firm exchange rate (NGN per USDT). Never guess one.
             rate_side = "SELL" if daya_type == 'crypto_direct' else "BUY"
-            rate_data = _daya.get_rate(asset="USDT", side=rate_side)
-            rate = float(rate_data.get("rate", 1500))
+            rate_data = _daya.get_rate(asset="USDT", side=rate_side) or {}
+            try:
+                rate_dec = Decimal(str(rate_data.get("rate")))
+            except Exception:
+                rate_dec = None
+            if rate_dec is None or not rate_dec.is_finite() or rate_dec <= 0:
+                raise _RateUnavailable("Daya returned no USDT rate")
+            rate = float(rate_dec)
             rate_id = rate_data.get("rate_id", "")
             rate_expires_at = rate_data.get("expires_at")
 
-            # Calculate accurate converted amounts
+            # Convert at live rates: NGN as is, USD at Daya's rate, other
+            # currencies at Flutterwave's live rate to NGN (no fixed rates).
             if link_currency == 'NGN':
-                calc_amount_ngn = int(round(float(amount)))
-                calc_amount_usd = round(float(amount) / rate, 2)
+                amount_ngn_dec = amount
+            elif link_currency == 'USD':
+                amount_ngn_dec = amount * rate_dec
             else:
-                rate_dec = Decimal(str(rate))
-                fx_factor = FX_TO_USD.get(link_currency, Decimal('1.00'))
-                amount_usd_dec = amount * fx_factor
-                amount_ngn_dec = amount_usd_dec * rate_dec
-                calc_amount_ngn = int(round(float(amount_ngn_dec)))
-                calc_amount_usd = round(float(amount_usd_dec), 2)
+                from app.services import fx as _fx
+                live = _fx.flutterwave_rate(link_currency)
+                if not live:
+                    raise _RateUnavailable(f"no live {link_currency}/NGN rate")
+                amount_ngn_dec = amount * live[0]
+            calc_amount_ngn = int(round(float(amount_ngn_dec)))
+            calc_amount_usd = round(float(amount_ngn_dec / rate_dec), 2)
 
             idempotency_key = f"paylink-{new_order.id}-{daya_type}-{rate_id}-{int(time.time())}"
 
@@ -548,6 +551,16 @@ def pay_payment_link(link_id):
                 "status": EscrowStatus.PENDING_PAYMENT,
             }), 200
 
+        except _RateUnavailable as e:
+            logging.warning(f"[PAYLINK DAYA] No live rate for {link_currency} ({e}); bank transfer/crypto not offered")
+            db.session.rollback()
+            if link_product_type == 'physical':
+                msg = (f"Bank transfer for {link_currency} payments isn't available right now. "
+                       "Please try again in a few minutes.")
+            else:
+                msg = (f"Bank transfer and crypto aren't available for {link_currency} right now. "
+                       "Please pay by card (Flutterwave).")
+            return jsonify({"message": msg, "code": "FX_RATE_UNAVAILABLE"}), 409
         except Exception as e:
             logging.error(f"[PAYLINK DAYA] Failed to create Daya funding account: {e}")
             db.session.rollback()
