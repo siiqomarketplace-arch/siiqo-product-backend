@@ -94,16 +94,36 @@ def _debit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, descr
     ))
 
 
-def _hold_if_foreign_currency(order, escrow) -> bool:
-    """Payout transfers send naira. Until the exchange rate at charge time is
-    stored (Phase 0B), an order paid in another currency is held for Siiqo
-    support instead of sending its foreign face value as naira. A matching
-    DEBIT keeps the held amount out of the withdrawable balance.
-    Returns True when the payout was held."""
+def _vendor_net_amount(order, escrow) -> float:
+    """Vendor's net share (amount - fee) as used for the ledger and payouts.
+    In naira for a foreign-currency order whose payment-time rate is known
+    (app/services/fx.py); otherwise the escrow's face value, as before."""
+    from app.services import fx
+    converted = fx.naira_net(order, escrow)
+    if converted is not None:
+        return float(converted)
+    return float(escrow.amount) - float(escrow.fee_amount or 0)
+
+
+def _payout_amount_or_hold(order, escrow):
+    """Convert or hold. Payout transfers send naira:
+    - NGN order: returns the net amount.
+    - Foreign-currency order with a payment-time rate on the order: returns
+      the net amount converted to naira (half-up, 2 dp).
+    - Foreign-currency order without a usable rate: held for Siiqo support
+      instead of sending its foreign face value as naira. A matching DEBIT
+      keeps the held amount out of the withdrawable balance. Returns None."""
+    from app.services import fx
     currency = (escrow.currency or 'NGN').upper()
+    net_amount = _vendor_net_amount(order, escrow)
     if currency == 'NGN':
-        return False
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+        return net_amount
+    if fx.naira_net(order, escrow) is not None:
+        logging.info(
+            f"[FX] Order #{order.id} paid in {currency}: paying out NGN {net_amount:,.2f} "
+            f"at {order.fx_rate_to_ngn} NGN/{currency}"
+        )
+        return net_amount
     logging.warning(
         f"[FX HOLD] Order #{order.id} paid in {currency} {net_amount:,.2f} — payout held for support"
     )
@@ -123,7 +143,12 @@ def _hold_if_foreign_currency(order, escrow) -> bool:
         type="ESCROW",
         order_id=order.id,
     ))
-    return True
+    return None
+
+
+def _hold_if_foreign_currency(order, escrow) -> bool:
+    """True when the payout was held (see _payout_amount_or_hold)."""
+    return _payout_amount_or_hold(order, escrow) is None
 
 
 def _record_payout_debit(order, escrow, net_amount: float):
@@ -186,7 +211,7 @@ def _deliver_digital_products(order, escrow):
     ) or "<p>The vendor will share your download link shortly via Siiqo chat.</p>"
 
     # Release escrow immediately — no physical delivery required
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    net_amount = _vendor_net_amount(order, escrow)
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
@@ -381,7 +406,7 @@ def _deliver_service_products(order, escrow):
     ) or "<p>The vendor will reach out to you via Siiqo chat to schedule your service.</p>"
 
     # Release escrow immediately
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    net_amount = _vendor_net_amount(order, escrow)
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
@@ -549,7 +574,7 @@ def _deliver_event_tickets(order, escrow):
     activate_tickets_for_order(order.id)
 
     # Release escrow immediately — events are instant
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    net_amount = _vendor_net_amount(order, escrow)
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
@@ -858,6 +883,8 @@ def escrow_status():
                     if escrow.order:
                         escrow.order.status = 'PAID'
                         db.session.flush()
+                        from app.services.fx import capture_rate
+                        capture_rate(escrow.order, escrow)
 
                         is_event = _deliver_event_tickets(escrow.order, escrow)
                         is_digital = False
@@ -870,7 +897,7 @@ def escrow_status():
                             link = db.session.get(_PL, escrow.order.payment_link_id)
                             link_ptype = getattr(link, 'product_type', 'service') or 'service'
                             if link_ptype in ('digital', 'service'):
-                                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                                net_amount = _vendor_net_amount(escrow.order, escrow)
                                 escrow.status = EscrowStatus.RELEASED
                                 escrow.released_at = _utcnow()
                                 escrow.order.status = 'COMPLETED'
@@ -957,9 +984,9 @@ def _paystack_payout_vendor(order, escrow):
     Push vendor's net share via Paystack Transfers API.
     Used for instant payouts of digital/service orders or upon buyer delivery confirmation.
     """
-    if _hold_if_foreign_currency(order, escrow):
+    net_amount = _payout_amount_or_hold(order, escrow)
+    if net_amount is None:
         return False
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
     
     bank_acc = VendorBankAccount.query.filter_by(
         vendor_id=order.vendor_id, is_default=True
@@ -1083,9 +1110,9 @@ def _flutterwave_payout_vendor(order, escrow):
     Used for instant payouts of digital/service/event orders or upon delivery confirmation
     when subaccount split was not applied at checkout (e.g. multi-vendor cart).
     """
-    if _hold_if_foreign_currency(order, escrow):
+    net_amount = _payout_amount_or_hold(order, escrow)
+    if net_amount is None:
         return False
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
     bank_acc = VendorBankAccount.query.filter_by(
         vendor_id=order.vendor_id, is_default=True
     ).first() or VendorBankAccount.query.filter_by(
@@ -1207,7 +1234,7 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         )
         return False
 
-    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+    net_amount = _vendor_net_amount(order, escrow)
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
@@ -1435,7 +1462,7 @@ def release_escrow():
     return jsonify({
         "success": True,
         "message": "Funds released to vendor successfully.",
-        "net_amount": str(float(escrow.amount) - float(escrow.fee_amount or 0)),
+        "net_amount": str(_vendor_net_amount(order, escrow)),
     }), 200
 
 

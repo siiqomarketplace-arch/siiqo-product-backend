@@ -767,13 +767,17 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
 
         db.session.flush()
 
+        # Naira rate at payment time for orders priced in another currency
+        from app.services.fx import capture_rate
+        capture_rate(order, escrow, dp)
+
         # ── Event Ticket Orders: activate tickets and credit revenue ───────────
         from app.routes.events import activate_tickets_for_order
         is_ticket_order = activate_tickets_for_order(order_id)
         if is_ticket_order:
-            from app.routes.escrow import _credit_vendor_ledger
+            from app.routes.escrow import _credit_vendor_ledger, _vendor_net_amount
             from app.models.finance import Receipt
-            net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+            net_amount = _vendor_net_amount(order, escrow)
             escrow.status = EscrowStatus.RELEASED
             escrow.released_at = _utcnow()
             order.status = 'COMPLETED'
@@ -822,7 +826,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             _ltype = getattr(_link, 'product_type', 'physical') or 'physical'
             if _ltype == 'digital':
                 # Digital Pay Link — release immediately, credit vendor, single payout
-                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                from app.routes.escrow import _vendor_net_amount
+                net_amount = _vendor_net_amount(order, escrow)
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
                 order.status = 'COMPLETED'
@@ -881,7 +886,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 is_digital = True
             elif _ltype == 'service':
                 # Service Pay Link — release immediately, credit vendor, single payout
-                net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                from app.routes.escrow import _vendor_net_amount
+                net_amount = _vendor_net_amount(order, escrow)
                 escrow.status = EscrowStatus.RELEASED
                 escrow.released_at = _utcnow()
                 order.status = 'COMPLETED'
@@ -948,9 +954,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         # Physical orders are paid out when the buyer confirms delivery.
         if is_digital or is_service:
             if _payout_vendor_via_daya(order, escrow):
-                from app.routes.escrow import _record_payout_debit
-                _record_payout_debit(order, escrow,
-                                     float(escrow.amount) - float(escrow.fee_amount or 0))
+                from app.routes.escrow import _record_payout_debit, _vendor_net_amount
+                _record_payout_debit(order, escrow, _vendor_net_amount(order, escrow))
 
         if not is_ticket_order and not is_digital and not is_service:
             # Physical order — create or activate the LogisticsAssignment
@@ -1067,12 +1072,12 @@ def _payout_vendor_via_daya(order, escrow):
     """
     from app.models.withdrawal import VendorBankAccount, VendorCryptoWallet, DayaPayment
     from app.models.communication import Notification
-    from app.routes.escrow import _hold_if_foreign_currency
+    from app.routes.escrow import _payout_amount_or_hold
 
-    if _hold_if_foreign_currency(order, escrow):
+    # Convert or hold: naira at the payment-time rate, or held for support.
+    net_amount_ngn = _payout_amount_or_hold(order, escrow)
+    if net_amount_ngn is None:
         return False
-
-    net_amount_ngn = float(escrow.amount) - float(escrow.fee_amount or 0)
 
     dp = DayaPayment.query.filter_by(order_id=order.id).first()
     payment_type = dp.payment_type if dp else "ngn_onramp"
@@ -1724,6 +1729,10 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
             escrow.paid_at = _utcnow()
             escrow.payscrow_transaction_id = str(tx_id)
             db.session.flush()
+
+            # Naira rate at payment time for orders priced in another currency
+            from app.services.fx import capture_rate
+            capture_rate(order, escrow, verification)
             
             logger.info("[FLW CONFIRM] ✓ Order %d updated to PAID, escrow status=%s", order.id, escrow.status)
 
@@ -1745,7 +1754,8 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                 link = db.session.get(PaymentLink, order.payment_link_id)
                 link_ptype = getattr(link, "product_type", "service") or "service"
                 if link_ptype in ("digital", "service"):
-                    net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
+                    from app.routes.escrow import _vendor_net_amount
+                    net_amount = _vendor_net_amount(order, escrow)
                     escrow.status = EscrowStatus.RELEASED
                     escrow.released_at = _utcnow()
                     order.status = "COMPLETED"
