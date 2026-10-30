@@ -22,6 +22,20 @@ class AdminUser(db.Model):
     last_login = db.Column(db.DateTime(timezone=True), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
 
+    # ── Two-factor sign-in (TOTP). See app/services/totp.py. ─────────────────
+    # Secrets are stored sealed (encrypt-then-MAC), never in plaintext.
+    totp_secret_enc = db.Column(db.String(255), nullable=True)          # confirmed secret
+    totp_pending_secret_enc = db.Column(db.String(255), nullable=True)  # awaiting /2fa/enable
+    totp_enabled = db.Column(db.Boolean, nullable=True, default=False)
+    totp_enabled_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Highest TOTP time step already accepted; older/equal steps are refused (replay).
+    totp_last_used_step = db.Column(db.BigInteger, nullable=True)
+    # HMAC-SHA256 digests of the unused single-use recovery codes.
+    totp_recovery_hashes = db.Column(db.JSON, nullable=True)
+    # Nonce of the one live login challenge and its wrong-code count.
+    totp_challenge_nonce = db.Column(db.String(64), nullable=True)
+    totp_challenge_failures = db.Column(db.Integer, nullable=True, default=0)
+
     def set_password(self, password: str):
         self.password_hash = generate_password_hash(password)
 

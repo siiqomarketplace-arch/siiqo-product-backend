@@ -37,10 +37,9 @@ def _get_admin(admin_id) -> AdminUser | None:
 
 
 def _require_superadmin(admin_id) -> AdminUser | None:
-    admin = _get_admin(admin_id)
-    if not admin or admin.role != "SUPERADMIN":
-        return None
-    return admin
+    # The shared check also enforces superadmin two-factor sign-in.
+    from app.routes.admin import _require_superadmin as _shared_require_superadmin
+    return _shared_require_superadmin(admin_id)
 
 
 def _parse_admin_id(identity) -> int:

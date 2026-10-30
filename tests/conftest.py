@@ -48,6 +48,7 @@ os.environ.update({
     "DISABLE_SCHEDULER": "1",
     "SECRET_KEY": "test-secret-key-not-for-production",
     "JWT_SECRET_KEY": "test-jwt-secret-not-for-production",
+    "ADMIN_2FA_REQUIRED": "false",  # tests that need enforcement set it explicitly
 })
 
 # Make `import app` resolve to this repository's package.

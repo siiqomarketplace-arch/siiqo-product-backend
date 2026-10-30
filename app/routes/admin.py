@@ -12,10 +12,14 @@ Security Features:
 - Audit logging for all actions
 - Anomaly detection on sensitive routes
 """
+import os
+import secrets
 from datetime import datetime, timezone
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, abort, make_response, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from sqlalchemy import update, or_
 
 from app.extensions import db
 from app.models.admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription
@@ -28,6 +32,7 @@ from app.models.finance import Ledger
 from app.models.communication import Notification
 from app.models.audit import AdminAuditLog
 from app.utils.email import send_siiqo_email
+from app.services import totp as totp_service
 from app.middleware.security import (
     limiter, 
     brute_force, 
@@ -60,10 +65,22 @@ def _get_admin(admin_id) -> "AdminUser | None":
     return db.session.get(AdminUser, admin_id)
 
 
+def _admin_2fa_enforced() -> bool:
+    """ADMIN_2FA_REQUIRED (default "true"), read per request so it can be rolled out deliberately."""
+    return os.getenv('ADMIN_2FA_REQUIRED', 'true').strip().lower() not in ('false', '0', 'no', 'off')
+
+
 def _require_superadmin(admin_id) -> AdminUser | None:
     admin = _get_admin(admin_id)
     if not admin or admin.role != 'SUPERADMIN':
         return None
+    # A SUPERADMIN without 2FA may sign in and use the 2FA setup endpoints
+    # (which use _get_admin), but no superadmin-only action until enrolled.
+    if _admin_2fa_enforced() and not admin.totp_enabled:
+        abort(make_response(jsonify({
+            "message": "Two-factor authentication must be enabled for this action",
+            "code": "2FA_REQUIRED",
+        }), 403))
     return admin
 
 
@@ -148,23 +165,56 @@ def admin_login():
         logging.warning(f"[SECURITY] Suspended admin attempted login: {email} from {ip}")
         return jsonify({"message": "Account suspended"}), 403
 
-    # Success - clear failed attempts
+    # Password step passed - clear failed attempts
     brute_force.record_success(ip)
-    
+
+    if admin.totp_enabled:
+        # Second factor required: issue a short-lived, single-purpose challenge.
+        # Only the latest challenge per admin is live (nonce stored on the row).
+        nonce = secrets.token_urlsafe(24)
+        admin.totp_challenge_nonce = nonce
+        admin.totp_challenge_failures = 0
+        db.session.commit()
+        logging.info(f"[SECURITY] Admin password accepted, 2FA pending: {email} from {ip}")
+        challenge = _challenge_serializer().dumps({"aid": admin.id, "n": nonce, "p": _CHALLENGE_PURPOSE})
+        return _no_store(jsonify({"requires_2fa": True, "challenge_token": challenge})), 200
+
+    return _complete_admin_login(admin, ip, method='password')
+
+
+def _client_ip() -> str:
+    try:
+        from app.extensions import get_real_client_ip
+        return get_real_client_ip()
+    except Exception:
+        from flask_limiter.util import get_remote_address
+        return get_remote_address()
+
+
+def _no_store(response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Pragma'] = 'no-cache'
+    return response
+
+
+def _complete_admin_login(admin: AdminUser, ip: str, method: str):
+    """Shared tail of a successful sign-in; the response body is identical for every path."""
     admin.last_login = _utcnow()
     db.session.commit()
-    
-    # Audit log successful login
+
+    details = {'success': True}
+    if method != 'password':
+        details['second_factor'] = method
     AdminAuditLog.log_action(
         admin=admin,
         action='ADMIN_LOGIN',
         resource_type='AdminUser',
         resource_id=admin.id,
-        details={'success': True},
+        details=details,
         ip_address=ip,
     )
-    
-    logging.info(f"[SECURITY] Successful admin login: {email} from {ip}")
+
+    logging.info(f"[SECURITY] Successful admin login: {admin.email} from {ip}")
 
     # Use a prefixed identity to distinguish admin tokens from user tokens
     access_token = create_access_token(identity=f"admin:{admin.id}")
@@ -179,6 +229,274 @@ def admin_login():
             "role": admin.role,
         },
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Two-factor sign-in (TOTP)
+# ---------------------------------------------------------------------------
+
+_CHALLENGE_PURPOSE = 'admin_2fa_login'
+_CHALLENGE_MAX_AGE = 300  # seconds
+_CHALLENGE_MAX_FAILURES = 5
+
+
+def _challenge_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(current_app.config['SECRET_KEY'], salt='siiqo-admin-2fa-challenge-v1')
+
+
+def _claim_totp_step(admin: AdminUser, step: int) -> bool:
+    """Atomically record `step` as used; False if it (or a later step) was already used."""
+    result = db.session.execute(
+        update(AdminUser)
+        .where(AdminUser.id == admin.id)
+        .where(or_(AdminUser.totp_last_used_step.is_(None), AdminUser.totp_last_used_step < step))
+        .values(totp_last_used_step=step)
+    )
+    db.session.commit()
+    db.session.refresh(admin)
+    return result.rowcount == 1
+
+
+def _consume_recovery_code(admin: AdminUser, code: str) -> bool:
+    # Row lock (SELECT ... FOR UPDATE on Postgres) so two concurrent uses of
+    # the same code can't both succeed.
+    db.session.commit()
+    locked = (db.session.query(AdminUser).filter_by(id=admin.id)
+              .populate_existing().with_for_update().one())
+    hashes = list(locked.totp_recovery_hashes or [])
+    idx = totp_service.match_recovery_code(code, hashes)
+    if idx is None:
+        db.session.rollback()
+        return False
+    hashes.pop(idx)
+    locked.totp_recovery_hashes = hashes
+    db.session.commit()
+    return True
+
+
+def _verify_second_factor(admin: AdminUser, code: str, allow_recovery: bool = True):
+    """
+    Check a TOTP code (with replay protection) or a single-use recovery code
+    against the admin's confirmed secret. Returns 'totp', 'recovery_code' or None.
+    """
+    code = (code or '').strip()
+    compact = code.replace(' ', '')
+    if len(compact) == totp_service.DIGITS and compact.isdigit():
+        secret = totp_service.decrypt_secret(admin.totp_secret_enc)
+        if not secret:
+            logging.error(f"[SECURITY] Admin {admin.id} TOTP secret could not be decrypted (key rotated?)")
+            return None
+        step = totp_service.verify(secret, compact, last_used_step=admin.totp_last_used_step)
+        if step is not None and _claim_totp_step(admin, step):
+            return 'totp'
+        return None
+    if allow_recovery and _consume_recovery_code(admin, code):
+        return 'recovery_code'
+    return None
+
+
+def _audit_recovery_use(admin: AdminUser, ip: str, context: str):
+    AdminAuditLog.log_action(
+        admin=admin,
+        action='ADMIN_2FA_RECOVERY_CODE_USED',
+        resource_type='AdminUser',
+        resource_id=admin.id,
+        details={'context': context, 'remaining': len(admin.totp_recovery_hashes or [])},
+        ip_address=ip,
+    )
+
+
+@admin_bp.route('/login/2fa', methods=['POST'])
+@limiter.limit("10 per minute")
+@require_admin_whitelist
+# No @detect_anomalies: the challenge token is base64url and can legitimately
+# contain "--", which that filter treats as SQL injection. Both inputs are
+# strictly validated (signature check / digits-or-recovery-code match).
+def admin_login_2fa():
+    """Second sign-in step: {challenge_token, code} where code is a TOTP or a recovery code."""
+    ip = _client_ip()
+    is_blocked, block_reason = brute_force.is_blocked(ip)
+    if is_blocked:
+        return jsonify({"message": block_reason, "error": "RATE_LIMIT_EXCEEDED"}), 429
+
+    data = request.get_json(silent=True) or {}
+    token = data.get('challenge_token')
+    code = data.get('code')
+    if not isinstance(token, str) or not token or not isinstance(code, str) or not code.strip():
+        return jsonify({"message": "challenge_token and code required"}), 400
+
+    invalid = (jsonify({"message": "Sign-in challenge expired or invalid. Please sign in again.",
+                        "code": "CHALLENGE_INVALID"}), 401)
+    try:
+        payload = _challenge_serializer().loads(token, max_age=_CHALLENGE_MAX_AGE)
+    except (SignatureExpired, BadSignature):
+        return invalid
+    if not isinstance(payload, dict) or payload.get('p') != _CHALLENGE_PURPOSE:
+        return invalid
+
+    admin = _get_admin(payload.get('aid'))
+    nonce = payload.get('n')
+    if (not admin or not admin.totp_enabled or not isinstance(nonce, str)
+            or not admin.totp_challenge_nonce
+            or not secrets.compare_digest(admin.totp_challenge_nonce, nonce)):
+        return invalid
+    if not admin.is_active:
+        return jsonify({"message": "Account suspended"}), 403
+    if (admin.totp_challenge_failures or 0) >= _CHALLENGE_MAX_FAILURES:
+        return jsonify({"message": "Too many incorrect codes. Please sign in again.",
+                        "code": "2FA_LOCKED"}), 429
+
+    method = _verify_second_factor(admin, code)
+    if not method:
+        brute_force.record_failure(ip, admin.email)
+        db.session.execute(
+            update(AdminUser).where(AdminUser.id == admin.id)
+            .values(totp_challenge_failures=db.func.coalesce(AdminUser.totp_challenge_failures, 0) + 1)
+        )
+        db.session.commit()
+        db.session.refresh(admin)
+        failures = admin.totp_challenge_failures or 0
+        logging.warning(f"[SECURITY] Wrong admin 2FA code for admin {admin.id} from {ip} ({failures}/{_CHALLENGE_MAX_FAILURES})")
+        if failures >= _CHALLENGE_MAX_FAILURES:
+            admin.totp_challenge_nonce = None  # burn the challenge
+            db.session.commit()
+            AdminAuditLog.log_action(
+                admin=admin, action='ADMIN_2FA_CHALLENGE_LOCKED', resource_type='AdminUser',
+                resource_id=admin.id, details={'failures': failures}, ip_address=ip,
+            )
+            return jsonify({"message": "Too many incorrect codes. Please sign in again.",
+                            "code": "2FA_LOCKED"}), 429
+        return jsonify({"message": "Invalid authentication code", "code": "INVALID_2FA_CODE",
+                        "attempts_remaining": _CHALLENGE_MAX_FAILURES - failures}), 401
+
+    # Single use: consume the challenge atomically (a concurrent request loses).
+    consumed = db.session.execute(
+        update(AdminUser)
+        .where(AdminUser.id == admin.id)
+        .where(AdminUser.totp_challenge_nonce == nonce)
+        .values(totp_challenge_nonce=None, totp_challenge_failures=0)
+    )
+    db.session.commit()
+    if consumed.rowcount != 1:
+        return invalid
+    db.session.refresh(admin)
+
+    brute_force.record_success(ip)
+    if method == 'recovery_code':
+        _audit_recovery_use(admin, ip, 'login')
+    return _complete_admin_login(admin, ip, method=method)
+
+
+@admin_bp.route('/2fa/status', methods=['GET'])
+@jwt_required()
+def admin_2fa_status():
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 403
+    return jsonify({
+        "enabled": bool(admin.totp_enabled),
+        "pending_setup": bool(admin.totp_pending_secret_enc) and not admin.totp_enabled,
+        "enabled_at": admin.totp_enabled_at.isoformat() if admin.totp_enabled_at else None,
+        "recovery_codes_remaining": len(admin.totp_recovery_hashes or []) if admin.totp_enabled else 0,
+        "required": admin.role == 'SUPERADMIN' and _admin_2fa_enforced(),
+    }), 200
+
+
+@admin_bp.route('/2fa/setup', methods=['POST'])
+@jwt_required()
+@limiter.limit("10 per hour")
+def admin_2fa_setup():
+    """Start enrolment: returns a new secret that stays pending until /2fa/enable."""
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 403
+    if admin.totp_enabled:
+        return jsonify({"message": "Two-factor authentication is already enabled. Disable it first.",
+                        "code": "2FA_ALREADY_ENABLED"}), 409
+
+    secret = totp_service.generate_secret()
+    admin.totp_pending_secret_enc = totp_service.encrypt_secret(secret)
+    db.session.commit()
+    return _no_store(jsonify({
+        "secret": secret,
+        "otpauth_url": totp_service.provisioning_uri(secret, admin.email),
+    })), 200
+
+
+@admin_bp.route('/2fa/enable', methods=['POST'])
+@jwt_required()
+@limiter.limit("10 per minute")
+def admin_2fa_enable():
+    """Confirm enrolment with a code from the app; returns recovery codes once."""
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 403
+    if admin.totp_enabled:
+        return jsonify({"message": "Two-factor authentication is already enabled.",
+                        "code": "2FA_ALREADY_ENABLED"}), 409
+    pending = totp_service.decrypt_secret(admin.totp_pending_secret_enc)
+    if not pending:
+        return jsonify({"message": "Start setup first.", "code": "2FA_SETUP_REQUIRED"}), 400
+
+    code = (request.get_json(silent=True) or {}).get('code')
+    step = totp_service.verify(pending, code if isinstance(code, str) else '')
+    if step is None:
+        return jsonify({"message": "Invalid authentication code", "code": "INVALID_2FA_CODE"}), 400
+
+    recovery_codes = totp_service.generate_recovery_codes()
+    admin.totp_secret_enc = admin.totp_pending_secret_enc
+    admin.totp_pending_secret_enc = None
+    admin.totp_enabled = True
+    admin.totp_enabled_at = _utcnow()
+    admin.totp_last_used_step = step  # the confirming code can't be replayed at login
+    admin.totp_recovery_hashes = [totp_service.hash_recovery_code(c) for c in recovery_codes]
+    admin.totp_challenge_nonce = None
+    admin.totp_challenge_failures = 0
+    db.session.commit()
+
+    AdminAuditLog.log_action(
+        admin=admin, action='ADMIN_2FA_ENABLED', resource_type='AdminUser',
+        resource_id=admin.id, details={'recovery_codes_issued': len(recovery_codes)},
+        ip_address=_client_ip(),
+    )
+    return _no_store(jsonify({"recovery_codes": recovery_codes})), 200
+
+
+@admin_bp.route('/2fa/disable', methods=['POST'])
+@jwt_required()
+@limiter.limit("10 per minute")
+def admin_2fa_disable():
+    """Turn 2FA off; requires a current TOTP or an unused recovery code."""
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 403
+    if not admin.totp_enabled:
+        return jsonify({"message": "Two-factor authentication is not enabled.",
+                        "code": "2FA_NOT_ENABLED"}), 400
+
+    code = (request.get_json(silent=True) or {}).get('code')
+    ip = _client_ip()
+    method = _verify_second_factor(admin, code if isinstance(code, str) else '')
+    if not method:
+        return jsonify({"message": "Invalid authentication code", "code": "INVALID_2FA_CODE"}), 400
+    if method == 'recovery_code':
+        _audit_recovery_use(admin, ip, 'disable')
+
+    admin.totp_enabled = False
+    admin.totp_secret_enc = None
+    admin.totp_pending_secret_enc = None
+    admin.totp_enabled_at = None
+    admin.totp_last_used_step = None
+    admin.totp_recovery_hashes = None
+    admin.totp_challenge_nonce = None
+    admin.totp_challenge_failures = 0
+    db.session.commit()
+
+    AdminAuditLog.log_action(
+        admin=admin, action='ADMIN_2FA_DISABLED', resource_type='AdminUser',
+        resource_id=admin.id, details={'verified_with': method}, ip_address=ip,
+    )
+    return jsonify({"status": "success", "enabled": False}), 200
 
 
 # ---------------------------------------------------------------------------
