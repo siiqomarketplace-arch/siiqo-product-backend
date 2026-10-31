@@ -879,7 +879,7 @@ def escrow_status():
                 verification = PaystackProvider().verify_transaction(escrow.transaction_number)
                 if verification.get("success"):
                     escrow.status = EscrowStatus.IN_ESCROW
-                    escrow.paid_at = _utcnow()
+                    escrow.paid_at = escrow.paid_at or _utcnow()
                     escrow.payscrow_transaction_id = escrow.transaction_number
                     if escrow.order:
                         escrow.order.status = 'PAID'
@@ -1433,7 +1433,7 @@ def release_escrow():
             result = PaystackProvider().verify_transaction(escrow.transaction_number)
             if result.get("success"):
                 escrow.status = EscrowStatus.IN_ESCROW
-                escrow.paid_at = _utcnow()
+                escrow.paid_at = escrow.paid_at or _utcnow()
                 db.session.commit()
         except Exception as e:
             logging.warning(f"[RELEASE] Paystack verify fallback failed: {e}")

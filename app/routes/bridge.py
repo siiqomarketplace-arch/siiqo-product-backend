@@ -1113,7 +1113,7 @@ def paystack_webhook():
                     ).first()
                     if pl_escrow:
                         pl_escrow.status = EscrowStatus.IN_ESCROW
-                        pl_escrow.paid_at = _utcnow()
+                        pl_escrow.paid_at = pl_escrow.paid_at or _utcnow()
                         pl_escrow.payscrow_transaction_id = reference
                         pl_order.status = 'PAID'
                         db.session.flush()
@@ -1261,7 +1261,7 @@ def paystack_webhook():
 
                 if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
                     escrow.status = EscrowStatus.IN_ESCROW
-                    escrow.paid_at = _utcnow()
+                    escrow.paid_at = escrow.paid_at or _utcnow()
                     # Store Paystack reference in payscrow_transaction_id for
                     # backward-compat with the release route
                     escrow.payscrow_transaction_id = reference

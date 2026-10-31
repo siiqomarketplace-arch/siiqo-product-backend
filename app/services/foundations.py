@@ -95,6 +95,10 @@ def payout_account_hash(bank_code, account_number):
     return hmac.new(secret, f"payout-account-{raw}".encode(), hashlib.sha256).hexdigest()
 
 
+# Escrow states that mean the buyer's money has been received.
+_ESCROW_PAID_STATUSES = ("IN_ESCROW", "SHIPPED", "DELIVERED", "RELEASED")
+
+
 # ── hooks ──────────────────────────────────────────────────────────────────
 
 def _before_flush(session, flush_context, instances):
@@ -129,6 +133,14 @@ def _before_flush(session, flush_context, instances):
                     order.currency = obj.currency
                     order.fx_rate_to_ngn = 1 if obj.currency == "NGN" else None
                 change = _status_change(obj)
+                # Safety net for every payment path: the first time an escrow
+                # reaches a paid state, stamp paid_at on it and on its order.
+                # Earlier values are never overwritten.
+                if change and change[1] in _ESCROW_PAID_STATUSES:
+                    if obj.paid_at is None:
+                        obj.paid_at = now
+                    if order.paid_at is None:
+                        order.paid_at = obj.paid_at
                 if change and change[1] == EscrowStatus.RELEASED and order.released_at is None:
                     order.released_at = now
     except Exception as e:  # never block the write that triggered this

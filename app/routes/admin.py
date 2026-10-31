@@ -1651,8 +1651,10 @@ def admin_verify_payment(order_id):
         parsed_id = _parse_admin_id(admin_id)
     except (ValueError, TypeError):
         return jsonify({"message": "Unauthorized"}), 401
-    if not _get_admin(parsed_id):
-        return jsonify({"message": "Unauthorized"}), 403
+    # Marking money as received leads to a payout, so it is superadmin-only (2FA enforced).
+    admin = _require_superadmin(parsed_id)
+    if not admin:
+        return jsonify({"message": "Superadmin access required"}), 403
 
     order = db.session.get(Order, order_id)
     if not order:
@@ -1662,7 +1664,22 @@ def admin_verify_payment(order_id):
     if not escrow:
         return jsonify({"message": f"No escrow record for Order #{order_id}"}), 404
 
+    # Only an unpaid escrow can be marked paid; never move a shipped, released
+    # or refunded one back to IN_ESCROW.
+    if escrow.status != EscrowStatus.PENDING_PAYMENT:
+        return jsonify({"message": f"Order #{order_id} is already {escrow.status}; nothing to verify.",
+                        "code": "NOT_PENDING_PAYMENT", "status": escrow.status}), 409
+
     escrow.status = EscrowStatus.IN_ESCROW
+    # Payment time drives the monthly metrics; set it once, never overwrite.
+    escrow.paid_at = escrow.paid_at or _utcnow()
+    order.paid_at = order.paid_at or escrow.paid_at
+    AdminAuditLog.log_action(
+        admin=admin, action='ADMIN_ESCROW_MARKED_PAID', resource_type='Order',
+        resource_id=order_id, details={'escrow_id': escrow.id, 'amount': str(escrow.amount),
+                                       'currency': escrow.currency},
+        ip_address=_client_ip(),
+    )
     db.session.commit()
 
     logging.info(f"[ADMIN] Escrow verified for Order #{order_id} by admin {parsed_id}")

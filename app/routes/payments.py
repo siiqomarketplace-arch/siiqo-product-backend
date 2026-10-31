@@ -1711,8 +1711,11 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
         for idx, escrow in enumerate(escrows):
             logger.info("[FLW CONFIRM] Processing escrow %d/%d: escrow_id=%d order_id=%d status=%s", 
                        idx + 1, len(escrows), escrow.id, escrow.order_id or 0, escrow.status)
-            if escrow.status == EscrowStatus.RELEASED:
-                logger.info("[FLW CONFIRM] Skipping escrow_id=%d (already RELEASED)", escrow.id)
+            # Only an unpaid escrow is confirmed. A repeat confirmation (webhook
+            # retry, status poll) must not re-run delivery or payouts, or move a
+            # shipped/delivered order back to IN_ESCROW.
+            if escrow.status != EscrowStatus.PENDING_PAYMENT:
+                logger.info("[FLW CONFIRM] Skipping escrow_id=%d (already %s)", escrow.id, escrow.status)
                 continue
 
             order = escrow.order
@@ -1726,7 +1729,7 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
             order.status = "PAID"
             order.payment_method = "FLUTTERWAVE"
             escrow.status = EscrowStatus.IN_ESCROW
-            escrow.paid_at = _utcnow()
+            escrow.paid_at = escrow.paid_at or _utcnow()  # first payment time; never overwritten
             escrow.payscrow_transaction_id = str(tx_id)
             db.session.flush()
 
