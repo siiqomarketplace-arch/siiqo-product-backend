@@ -34,6 +34,8 @@ RESERVED_STORE_SLUGS = frozenset({
     'me',  # /api/passport/me is the seller's own Passport
     'start',  # Phase 1 seller onboarding page siiqo.com/start
     'fonts', 'images', 'assets',  # static folders served by the website
+    # Trust Platform API v1 test-mode fixtures (app/services/platform.py)
+    'test-trusted-store', 'test-new-seller', 'test-unverified',
 })
 
 
@@ -445,8 +447,11 @@ def onboard_vendor():
         return jsonify({"message": "Store name is required"}), 400
 
     # Auto-generate unique slug or use provided slug
-    base_slug = data.get('store_slug') or re.sub(r'[^a-z0-9]+', '-', store_name.lower()).strip('-')
+    base_slug = (data.get('store_slug') or re.sub(r'[^a-z0-9]+', '-', store_name.lower()).strip('-')).strip().lower()
     store_slug = base_slug
+    # Store URLs are letters, numbers and dashes only (a dot would clash with site files such as /trust.js)
+    if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?', store_slug):
+        return jsonify({"message": "Use only letters, numbers and dashes in your store URL."}), 400
     
     # RESERVED WORDS CHECK
     RESERVED_WORDS = RESERVED_STORE_SLUGS

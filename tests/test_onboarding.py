@@ -929,3 +929,13 @@ def test_onboarding_build_times_out_after_three_minutes():
 
 def test_start_is_reserved(client):
     assert client.get(f"{API}/name-check?name=start").get_json()["reason"] == "reserved"
+
+
+@pytest.mark.parametrize("slug", ["trust.js", "my.store", "Bad Slug", "-dash", "x/y"])
+def test_vendor_onboard_rejects_unsafe_store_urls(client, seller, auth_headers, paystack, monkeypatch, slug):
+    import app.routes.vendor as vendor_routes
+    monkeypatch.setattr(vendor_routes, "send_siiqo_email", lambda **kw: None)
+    res = client.post("/api/vendor/onboard", headers=auth_headers(seller),
+                      json={"business_name": "Tunde Gadgets", "store_slug": slug})
+    assert res.status_code == 400
+    assert Storefront.query.count() == 0
