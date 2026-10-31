@@ -11,6 +11,7 @@ from .admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscript
 from .billing import SubscriptionPayment
 from .foundations import OrderStatusHistory, FeeLedgerEntry, SellerIdentifier
 from .passport import PassportSettings, PassportApiClient
+from . import platform  # noqa: F401  (Phase 2B: Trust Platform API v1)
 from . import privacy  # noqa: F401  (data-protection models)
 from .communication import Notification, Message
 from .social import Post, PostLike, PostComment, Follow, PostView, UserActivity

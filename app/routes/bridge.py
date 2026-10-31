@@ -1471,6 +1471,16 @@ def paystack_webhook():
                 logging.error(f'[PAYSTACK] Pro Verified payment {reference} — could not find storefront')
             return jsonify({"status": "ok"}), 200
 
+        # ── PLATFORM GROWTH (Trust Platform API keys, not Verified Pro) ─────
+        from app.services import platform as platform_svc
+        if platform_svc.is_growth_event(data):
+            if status == 'success' or event_type == 'subscription.create':
+                if event_type == 'subscription.create':
+                    platform_svc.remember_growth_subscription(data)
+                else:
+                    platform_svc.apply_growth_payment(data)
+            return jsonify({"status": "ok"}), 200
+
         # ── SUBSCRIPTION ───────────────────────────────────────────────────
         plan_obj = data.get('plan') or {}
         plan_code = (
@@ -1509,6 +1519,12 @@ def paystack_webhook():
     # Handle subscription renewal invoice payment
     elif event_type in ('invoice.update', 'invoice.payment_success'):
         data = event.get('data', {})
+        from app.services import platform as platform_svc
+        if platform_svc.is_growth_event(data):
+            # A Growth renewal must never extend Verified Pro.
+            if data.get('status', '') in ('success', 'paid'):
+                platform_svc.apply_growth_payment(data)
+            return jsonify({"status": "ok"}), 200
         customer_email = data.get('customer', {}).get('email', '')
         invoice_status = data.get('status', '')
         if customer_email and invoice_status in ('success', 'paid'):
@@ -1527,6 +1543,11 @@ def paystack_webhook():
     # Handle subscription cancellation / disable
     elif event_type in ('subscription.not_renew', 'subscription.disable'):
         data = event.get('data', {})
+        from app.services import platform as platform_svc
+        if platform_svc.is_growth_event(data):
+            # Stopping Growth must never stop Verified Pro's auto-renew.
+            platform_svc.stop_growth_renewal(data)
+            return jsonify({"status": "ok"}), 200
         customer_email = data.get('customer', {}).get('email', '')
         if customer_email:
             user = User.query.filter_by(email=customer_email).first()

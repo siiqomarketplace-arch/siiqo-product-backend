@@ -261,6 +261,9 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
         # Fraud signals (FAILED_FRAUD) are never refunded.
         from app.services.billing import handle_identity_mismatch
         handle_identity_mismatch(case.user_id)
+    # Trust Platform webhooks (business.verified / verification_lapsed); never raises.
+    from app.services.platform_webhooks import notify_passport_change
+    notify_passport_change(case.user_id, hint="verification")
     return case
 
 

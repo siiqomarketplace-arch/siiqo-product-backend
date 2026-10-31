@@ -67,6 +67,10 @@ def my_passport():
             if field in data:
                 setattr(settings, field, bool(data[field]))
     db.session.commit()
+    if request.method == 'PUT' and 'is_public' in data:
+        # Trust Platform webhooks (business.passport_hidden); never blocks the seller.
+        from app.services import platform_webhooks
+        platform_webhooks.notify_passport_change(user_id, hint="passport")
     return jsonify({
         "passport": svc.build_passport(sf),
         "settings": {
@@ -83,8 +87,14 @@ def my_passport():
 @limiter.limit(_rate_limit, key_func=_rate_key)
 def get_passport(slug):
     raw_key = request.headers.get('X-Siiqo-Api-Key')
-    if raw_key and not svc.client_for_key(raw_key):
-        return jsonify({"message": "Invalid API key"}), 401
+    if raw_key:
+        api_client = svc.client_for_key(raw_key)
+        if not api_client:
+            return jsonify({"message": "Invalid API key"}), 401
+        if svc.key_mode(api_client) == "test":
+            # Test keys never read real sellers; they answer from fixtures on /v1.
+            return jsonify({"message": "Test keys work with the /v1 API only.",
+                            "code": "TEST_KEY_NOT_ALLOWED"}), 403
     claims = _public_passport(slug)
     if claims is None:
         return jsonify({"message": "No public Trust Passport for this seller."}), 404
@@ -118,7 +128,10 @@ def create_client():
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({"message": "name is required"}), 400
-    client, raw = svc.create_api_client(name, plan=data.get('plan', 'free'))
+    mode = str(data.get('mode') or 'live').strip().lower()
+    if mode not in svc.KEY_MODES:
+        return jsonify({"message": "mode must be 'live' or 'test'"}), 400
+    client, raw = svc.create_api_client(name, plan=data.get('plan', 'free'), mode=mode)
     return jsonify({"id": client.id, "name": client.name, "api_key": raw,
                     "message": "Store this key now; it won't be shown again."}), 201
 
@@ -155,13 +168,16 @@ def developer_keys():
         return jsonify({"message": "name is required"}), 400
     if len(name) > 120:
         return jsonify({"message": "name must be 120 characters or fewer"}), 400
+    mode = str(data.get('mode') or 'live').strip().lower()
+    if mode not in svc.KEY_MODES:
+        return jsonify({"message": "mode must be 'live' or 'test'"}), 400
     if len(svc.keys_for_user(user.id, active_only=True)) >= svc.MAX_KEYS_PER_USER:
         return jsonify({"message": f"You can have up to {svc.MAX_KEYS_PER_USER} active keys. "
                                    "Revoke one to create another."}), 409
-    client, raw = svc.create_api_client(name, plan="free", owner_user_id=user.id)
+    client, raw = svc.create_api_client(name, plan="free", owner_user_id=user.id, mode=mode)
     body = svc.key_public(client)
     return jsonify({"id": body["id"], "name": body["name"], "key_prefix": body["key_prefix"],
-                    "api_key": raw, "plan": body["plan"], "created_at": body["created_at"],
+                    "api_key": raw, "plan": body["plan"], "mode": body["mode"], "created_at": body["created_at"],
                     "message": "Store this key now; it won't be shown again."}), 201
 
 

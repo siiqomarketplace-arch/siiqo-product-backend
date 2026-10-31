@@ -630,6 +630,11 @@ def create_app(config_name: str | None = None) -> Flask:
     # Phase 2: Trust Score v1 shadow comparison (admin only)
     from app.routes.trust_admin import trust_admin_bp
     app.register_blueprint(trust_admin_bp, url_prefix='/api/admin/trust')
+    # Phase 2B: Trust Platform API v1 (docs/PLATFORM_API_V1.md) and its console
+    from app.routes.v1 import v1_bp
+    app.register_blueprint(v1_bp, url_prefix='/v1')
+    from app.routes.platform import platform_bp
+    app.register_blueprint(platform_bp, url_prefix='/api/platform')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
@@ -810,6 +815,35 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as trust_v1_err:
                 logger.warning(f"Trust v1 shadow task registration skipped: {trust_v1_err}")
+
+            # Trust Platform (2B): webhook retries every minute; Passport change
+            # sweep and domain/handle ownership re-checks hourly.
+            try:
+                from app.services.platform_webhooks import run_due_deliveries, run_passport_sweep
+                from app.services.ownership import run_ownership_rechecks
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_due_deliveries),
+                    trigger=IntervalTrigger(minutes=1),
+                    id='platform_webhook_retries',
+                    name='Retry Trust Platform webhook deliveries whose backoff has passed',
+                    replace_existing=True,
+                )
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_passport_sweep),
+                    trigger=IntervalTrigger(hours=1),
+                    id='platform_passport_sweep',
+                    name='Trust Platform webhooks: detect Passport changes over time',
+                    replace_existing=True,
+                )
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_ownership_rechecks),
+                    trigger=IntervalTrigger(hours=1),
+                    id='platform_ownership_rechecks',
+                    name='Re-check verified domains and handles',
+                    replace_existing=True,
+                )
+            except Exception as platform_err:
+                logger.warning(f"Trust Platform task registration skipped: {platform_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")

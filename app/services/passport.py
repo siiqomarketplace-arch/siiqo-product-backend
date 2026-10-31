@@ -179,11 +179,21 @@ def _key_hash(raw):
 
 
 MAX_KEYS_PER_USER = 3
+KEY_MODES = ("live", "test")
 
 
-def create_api_client(name, plan="free", owner_user_id=None):
+def key_mode(client_or_prefix):
+    """'test' for sqp_test_ keys; everything else (sqp_live_ and the older
+    plain sqp_ keys) is a live key. Read from the stored 12-character prefix."""
+    prefix = client_or_prefix if isinstance(client_or_prefix, str) else (client_or_prefix.key_prefix or "")
+    return "test" if prefix.startswith("sqp_test_") else "live"
+
+
+def create_api_client(name, plan="free", owner_user_id=None, mode="live"):
     from app.models.passport import PassportApiClient
-    raw = f"sqp_{secrets.token_urlsafe(32)}"
+    if mode not in KEY_MODES:
+        raise ValueError("mode must be 'live' or 'test'")
+    raw = f"sqp_{mode}_{secrets.token_urlsafe(32)}"
     client = PassportApiClient(name=name, key_prefix=raw[:12], key_hash=_key_hash(raw), plan=plan,
                                owner_user_id=owner_user_id)
     db.session.add(client)
@@ -204,6 +214,7 @@ def key_public(client):
     def iso(dt):
         return _aware(dt).isoformat() if dt else None
     return {"id": client.id, "name": client.name, "key_prefix": client.key_prefix, "plan": client.plan,
+            "mode": key_mode(client),
             "is_active": bool(client.is_active), "created_at": iso(client.created_at),
             "last_used_at": iso(client.last_used_at)}
 

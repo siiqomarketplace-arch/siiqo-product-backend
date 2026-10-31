@@ -54,7 +54,8 @@ _HANDLERS: dict[str, Handler] = {}
 
 # Modules that register handlers; imported lazily by run_job so a job can run
 # in a fresh process (an RQ worker) that never imported the routes.
-_HANDLER_MODULES = ("app.services.onboarding_build", "app.services.disputes")
+_HANDLER_MODULES = ("app.services.onboarding_build", "app.services.disputes",
+                    "app.services.ownership", "app.services.platform_webhooks")
 
 
 def utcnow() -> datetime:

@@ -278,6 +278,7 @@ def recalculate_vendor_trust(vendor_id, reason="Recalculation"):
             new_tier = 'UNRANKED'
 
         old_score = profile.total_trust_score
+        old_tier = profile.trust_tier
 
         # Save updates
         profile.completion_score = Decimal(str(s1))
@@ -299,6 +300,10 @@ def recalculate_vendor_trust(vendor_id, reason="Recalculation"):
             ))
 
         db.session.commit()
+        if old_tier != new_tier or (old_score or 0) // 100 != new_score // 100:
+            # Trust Platform webhooks (business.trust_changed); never raises.
+            from app.services.platform_webhooks import notify_passport_change
+            notify_passport_change(vendor_id, hint="trust")
         return profile
     except Exception as e:
         logging.error(f"[TRUST] Critical error recalculating trust for vendor {vendor_id}: {e}")
