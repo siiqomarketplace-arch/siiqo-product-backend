@@ -31,6 +31,7 @@ from app.models.communication import Notification
 from app.models.finance import Ledger
 from app.utils.upload import save_uploaded_file
 from app.services.fees import PLATFORM_FEE_PERCENT
+from app.services.seller_home import released_this_month, seller_home_facts
 
 bridge_bp = Blueprint('bridge', __name__)
 
@@ -382,8 +383,23 @@ def vendor_balance():
         "payout_threshold": payout_threshold,
         "can_withdraw": can_withdraw,
         "siiqo_fee_percent": float(PLATFORM_FEE_PERCENT),
+        # Dashboard money strip: net amount released since the 1st of this month (UTC)
+        "released_this_month": released_this_month(user.id),
         "currency": "NGN",
     }), 200
+
+
+@bridge_bp.route('/vendor/next-action', methods=['GET'])
+@jwt_required()
+def vendor_next_action():
+    """Read-only facts the dashboard home uses to pick one next best action."""
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({"message": "Unauthorized"}), 403
+    if user.role not in (UserRole.VENDOR, UserRole.ADMIN) and user.storefront is None:
+        return jsonify({"message": "Vendor access required"}), 403
+    return jsonify({"status": "success", **seller_home_facts(user)}), 200
 
 
 # ===========================================================================
