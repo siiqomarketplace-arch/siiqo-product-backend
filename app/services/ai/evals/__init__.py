@@ -25,6 +25,19 @@ A case file is JSON: ``evals/cases/<action>.v<N>.json``::
 offline against a fake in tests. A live run (real client, real tokens, real
 money, metered in ai_usage like any other call) is a deliberate manual step
 before changing a prompt or model - never part of CI.
+
+The onboarding prompts (store_spec, store_edit, listing_from_photo) use a
+richer case format with a reference ``fixture`` and the code critic; see
+``evals/onboarding.py``. Offline, ``tests/test_ai_evals.py`` checks every case
+file's structure and runs each fixture through the critic.
+
+Live run (paid; needs a database for the ai_usage rows, AI_ENABLED=true and
+ANTHROPIC_API_KEY in the environment; run it against local or staging, never
+from CI)::
+
+    .venv/Scripts/python.exe -m app.services.ai.evals store_spec.v1 store_edit.v1 listing_from_photo.v1
+
+With no names it runs every case file. It exits non-zero if any case fails.
 """
 from __future__ import annotations
 
@@ -34,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..errors import AIError
+from . import onboarding
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
 
@@ -45,6 +59,7 @@ class CaseResult:
     failures: list[str] = field(default_factory=list)
     output: Any = None
     error: str | None = None
+    skipped: bool = False
 
 
 @dataclass
@@ -58,16 +73,26 @@ class EvalReport:
 
     @property
     def total(self) -> int:
-        return len(self.results)
+        """Cases that ran (skipped cases are not counted)."""
+        return sum(not r.skipped for r in self.results)
+
+    @property
+    def skipped(self) -> int:
+        return sum(r.skipped for r in self.results)
 
     @property
     def pass_rate(self) -> float:
         return self.passed / self.total if self.total else 0.0
 
     def summary(self) -> str:
-        lines = [f"{self.action}: {self.passed}/{self.total} passed"]
+        head = f"{self.action}: {self.passed}/{self.total} passed"
+        if self.skipped:
+            head += f", {self.skipped} skipped"
+        lines = [head]
         for r in self.results:
-            if not r.passed:
+            if r.skipped:
+                lines.append(f"  SKIP {r.case_id}: {r.error}")
+            elif not r.passed:
                 lines.append(f"  FAIL {r.case_id}: {r.error or '; '.join(r.failures)}")
         return "\n".join(lines)
 
@@ -79,6 +104,13 @@ def load_cases(path: str | Path) -> dict:
     for case in data["cases"]:
         if "id" not in case or "inputs" not in case or "expect" not in case:
             raise ValueError(f"{path}: every case needs 'id', 'inputs' and 'expect'")
+    ids = [c["id"] for c in data["cases"]]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{path}: case ids must be unique")
+    if onboarding.is_onboarding(data["action"]):
+        problems = [p for c in data["cases"] for p in onboarding.validate_case(data["action"], c)]
+        if problems:
+            raise ValueError(f"{path}: " + "; ".join(problems[:10]))
     return data
 
 
@@ -111,6 +143,15 @@ def check(output: Any, expect: dict) -> list[str]:
     return failures
 
 
+def check_case(action: str, case: dict, output: Any) -> list[str]:
+    """All failed expectations of one case: the generic ones plus, for the
+    onboarding prompts, the critic, preset and edit checks."""
+    failures = check(output, case.get("expect") or {})
+    if onboarding.is_onboarding(action):
+        failures += onboarding.check_onboarding(action, case, output)
+    return failures
+
+
 def run_eval(
     eval_set: dict | str | Path,
     *,
@@ -128,14 +169,23 @@ def run_eval(
     if runner is None:
         from ..gateway import run as runner
 
+    action = eval_set["action"]
     results = []
     for case in eval_set["cases"]:
         try:
-            result = runner(eval_set["action"], seller_id, case["inputs"], client=client)
+            inputs, images = onboarding.prepare(action, case)
+        except onboarding.MissingImage as exc:
+            results.append(CaseResult(case["id"], False, error=str(exc), skipped=True))
+            continue
+        kwargs = {"client": client}
+        if images:
+            kwargs["images"] = images
+        try:
+            result = runner(action, seller_id, inputs, **kwargs)
         except AIError as exc:
             results.append(CaseResult(case["id"], False, error=f"{type(exc).__name__}: {exc}"))
             continue
         output = result.data if result.data is not None else result.text
-        failures = check(output, case["expect"])
+        failures = check_case(action, case, output)
         results.append(CaseResult(case["id"], not failures, failures, output))
     return EvalReport(eval_set["action"], results)
