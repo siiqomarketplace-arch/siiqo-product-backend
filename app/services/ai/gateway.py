@@ -419,13 +419,18 @@ def run(
     *,
     schema: dict | None = None,
     client=None,
+    images: list[dict] | None = None,
 ) -> AIResult:
     """
     Run one AI action. ``action`` is "name" (latest prompt version) or
     "name@vN". ``schema`` overrides the prompt's output_schema; when either
     is set the result's ``data`` holds the validated JSON. ``client`` injects
     an Anthropic-compatible client (tests, evals); by default one is built
-    from ANTHROPIC_API_KEY.
+    from ANTHROPIC_API_KEY. ``images`` (vision prompts) is a list of
+    Messages API image sources - ``{"type": "base64", "media_type": ...,
+    "data": ...}`` or ``{"type": "url", "url": ...}`` - sent before the text
+    in the user turn. Only product photos and logos may be passed here,
+    never ID documents (the PII stripper cannot see inside images).
 
     Raises AIDisabled, AICapExceeded, AIRefused, AIUnavailable,
     AIInvalidOutput or AIRequestError (all subclasses of AIError).
@@ -509,11 +514,19 @@ def run(
     output_config: dict = {"effort": spec.effort}
     if output_schema:
         output_config["format"] = {"type": "json_schema", "schema": output_schema}
+    user_content: Any = spec.render_user(inputs_json)
+    if images:
+        blocks = []
+        for source in images:
+            if not isinstance(source, dict) or source.get("type") not in ("base64", "url"):
+                raise AIRequestError("images must be base64 or url image sources", reason="bad_inputs")
+            blocks.append({"type": "image", "source": source})
+        user_content = [*blocks, {"type": "text", "text": user_content}]
     request = {
         "model": model,
         "max_tokens": spec.max_tokens,
         "system": [{"type": "text", "text": spec.system, "cache_control": {"type": "ephemeral"}}],
-        "messages": [{"role": "user", "content": spec.render_user(inputs_json)}],
+        "messages": [{"role": "user", "content": user_content}],
         "output_config": output_config,
     }
 

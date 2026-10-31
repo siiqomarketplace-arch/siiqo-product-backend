@@ -624,6 +624,9 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(check_bp, url_prefix='/api/check')
     from app.routes.privacy import privacy_bp
     app.register_blueprint(privacy_bp, url_prefix='/api/privacy')
+    # Phase 1: AI seller onboarding (/start on the website)
+    from app.routes.onboarding import onboarding_bp
+    app.register_blueprint(onboarding_bp, url_prefix='/api/onboarding')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.

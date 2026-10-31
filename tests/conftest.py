@@ -49,6 +49,7 @@ os.environ.update({
     "SECRET_KEY": "test-secret-key-not-for-production",
     "JWT_SECRET_KEY": "test-jwt-secret-not-for-production",
     "ADMIN_2FA_REQUIRED": "false",  # tests that need enforcement set it explicitly
+    "JOBS_MODE": "sync",  # background jobs run inline (app/services/jobs.py)
 })
 
 # Make `import app` resolve to this repository's package.

@@ -24,6 +24,8 @@ from .fee_sweep import SiiqoFeeSweep
 from .telemetry import PlatformEvent, TrustEvidence
 from .verification import VerificationCase, VerificationCheck, VerificationStatus
 from .ai import AIUsage
+from .jobs import Job
+from .onboarding import OnboardingSession, OnboardingPhoto
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',
@@ -48,5 +50,5 @@ __all__ = [
     'SiiqoFeeSweep',
     'PlatformEvent', 'TrustEvidence',
     'VerificationCase', 'VerificationCheck', 'VerificationStatus',
-    'AIUsage', 'OrderStatusHistory', 'FeeLedgerEntry', 'SellerIdentifier', 'PassportSettings', 'PassportApiClient',
+    'AIUsage', 'Job', 'OnboardingSession', 'OnboardingPhoto', 'OrderStatusHistory', 'FeeLedgerEntry', 'SellerIdentifier', 'PassportSettings', 'PassportApiClient',
 ]
