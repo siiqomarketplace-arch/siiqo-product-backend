@@ -645,6 +645,9 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.search import market_bp, search_bp
     app.register_blueprint(search_bp, url_prefix='/api/search')
     app.register_blueprint(market_bp, url_prefix='/api/market')
+    # Phase T/W: signed internal API for SiiqoBot (sessions, intent router, voice notes)
+    from app.routes.bot_internal import bot_internal_bp
+    app.register_blueprint(bot_internal_bp, url_prefix='/api/internal/bot')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.

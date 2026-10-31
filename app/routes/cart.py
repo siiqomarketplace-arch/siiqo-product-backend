@@ -67,6 +67,19 @@ def _vendor_crypto_fields(vendor_id) -> dict:
         }
 
 
+def _vendor_allows_pod(vendor_id, cache: dict) -> bool:
+    """Pay on Delivery entitlement (the same check /cart/checkout enforces); cached per vendor."""
+    if not vendor_id:
+        return False
+    if vendor_id not in cache:
+        try:
+            from app.services.entitlements import has_feature
+            cache[vendor_id] = bool(has_feature(vendor_id, 'pod'))
+        except Exception:
+            cache[vendor_id] = False
+    return cache[vendor_id]
+
+
 # ---------------------------------------------------------------------------
 # GET /cart/
 # ---------------------------------------------------------------------------
@@ -82,6 +95,7 @@ def get_cart():
 
     items = []
     total = 0
+    pod_cache: dict = {}
     for item in cart.items:
         if item.product and item.product.is_active:
             subtotal = float(item.product.price) * item.quantity
@@ -106,6 +120,8 @@ def get_cart():
                 ) if sf else False,
                 # Daya crypto payment fields
                 **_vendor_crypto_fields(sf.vendor_id if sf else None),
+                # Pay on Delivery is allowed for this seller (plan entitlement)
+                "vendor_allows_pod": _vendor_allows_pod(sf.vendor_id if sf else None, pod_cache),
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
                 "product_type": (item.product.product_type if item.product else 'physical') or 'physical',

@@ -20,12 +20,84 @@ from app.models.user import User, UserRole
 from app.utils.upload import save_uploaded_file
 from app.utils.email import send_siiqo_email
 from app.middleware.bot_protection import bot_protection, ip_throttle
+from app.services import bot_auth
 
 auth_bp = Blueprint('auth', __name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Telegram Login Widget link token: /telegram-login hands one out when the
+# widget hash is valid but no account is linked yet. It names the verified
+# Telegram id, lasts 10 minutes and grants no access by itself (same pattern
+# as the Mini App link token in app/services/telegram_webapp.py, own salt so
+# the two tokens cannot be swapped).
+_WIDGET_LINK_SALT = 'siiqo.telegram-widget.link.v1'
+WIDGET_LINK_TOKEN_MAX_AGE_SECONDS = 600
+
+
+def _widget_link_serializer():
+    from flask import current_app
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(current_app.config['SECRET_KEY'], salt=_WIDGET_LINK_SALT)
+
+
+def make_widget_link_token(telegram_id) -> str:
+    return _widget_link_serializer().dumps({'tid': str(telegram_id)})
+
+
+def read_widget_link_token(token):
+    """The Telegram id inside a valid token, else None (missing, forged or expired)."""
+    from itsdangerous import BadSignature
+    if not isinstance(token, str) or not token:
+        return None
+    try:
+        data = _widget_link_serializer().loads(token, max_age=WIDGET_LINK_TOKEN_MAX_AGE_SECONDS)
+    except BadSignature:  # SignatureExpired is a subclass
+        return None
+    tid = str(data.get('tid') or '') if isinstance(data, dict) else ''
+    return tid if tid.isdigit() else None
+
+
+def _trusted_telegram_id(data, *, strict=False):
+    """
+    (telegram_id, error_response). A Telegram id from the request body is
+    trusted only when EITHER
+      * SiiqoBot signed the request with BOT_INTERNAL_SECRET
+        (X-Siiqo-Bot-Signature, timestamp + replay window; app/services/bot_auth.py), OR
+      * it comes with a valid ``link_token`` from /telegram-login (Telegram
+        Login Widget hash verified there) naming the same id; the id may then
+        be omitted from the body.
+    Otherwise it is ignored, so normal web sign-up and login are unchanged.
+    A bot signature that is present but invalid, stale or replayed refuses the
+    request. With ``strict`` (the link-OTP routes), a link_token that is
+    forged, expired or for another id also refuses the request.
+    Telegram Mini App linking has its own verified flow (/telegram-webapp/*).
+    """
+    raw = data.get('telegram_id')
+    tid = str(raw).strip() if raw not in (None, '') else ''
+    signed, error = bot_auth.signed_by_bot()
+    if error is not None:
+        return None, error
+    if signed:
+        return (tid, None) if tid.isdigit() and len(tid) <= 20 else (None, None)
+
+    link_token = data.get('link_token')
+    if link_token:
+        token_tid = read_widget_link_token(link_token)
+        if token_tid and (not tid or tid == token_tid):
+            return token_tid, None
+        logging.info("[AUTH] rejected Telegram link_token on %s", request.path)
+        if strict:
+            return None, (jsonify({"message": "This Telegram link has expired or is invalid. "
+                                              "Please sign in with Telegram again.",
+                                   "code": "BAD_LINK_TOKEN"}), 401)
+        return None, None
+    if tid:
+        logging.info("[AUTH] ignored unverified telegram_id on %s", request.path)
+    return None, None
+
 
 def _get_user_id():
     """Helper to get user_id as integer from JWT (returns None if not authenticated)"""
@@ -73,7 +145,9 @@ def register():
     first_name = (data.get('first_name') or '').strip()
     last_name = (data.get('last_name') or '').strip()
     referral_code_used = (data.get('referral_code') or '').strip().upper()
-    telegram_id = data.get('telegram_id')
+    telegram_id, _sig_error = _trusted_telegram_id(data)
+    if _sig_error is not None:
+        return _sig_error
 
     if not email or not password:
         return jsonify({"message": "Email and password are required"}), 400
@@ -193,7 +267,9 @@ def verify_email():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     otp = str(data.get('otp') or '').strip()
-    telegram_id = data.get('telegram_id')
+    telegram_id, _sig_error = _trusted_telegram_id(data)
+    if _sig_error is not None:
+        return _sig_error
 
     if not email or not otp:
         return jsonify({"message": "Email and OTP are required"}), 400
@@ -310,7 +386,9 @@ def login():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     password = data.get('password', '')
-    telegram_id = data.get('telegram_id')
+    telegram_id, _sig_error = _trusted_telegram_id(data)
+    if _sig_error is not None:
+        return _sig_error
 
     user = User.query.filter_by(email=email).first()
 
@@ -763,7 +841,11 @@ def telegram_login():
             return jsonify({
                 "status": "new_user",
                 "message": "No account is currently linked to this Telegram profile.",
-                "telegram_data": data
+                "telegram_data": data,
+                # Proof that this Telegram id passed the widget check; required
+                # (with the id) to link it on send/verify-link-otp, register and verify-email.
+                "link_token": make_widget_link_token(tg_id),
+                "link_token_expires_in": WIDGET_LINK_TOKEN_MAX_AGE_SECONDS,
             }), 200
             
     # User exists, ensure they are verified and active
@@ -858,7 +940,9 @@ def link_telegram():
 def send_link_otp():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
-    telegram_id = data.get('telegram_id')
+    telegram_id, _sig_error = _trusted_telegram_id(data, strict=True)
+    if _sig_error is not None:
+        return _sig_error
 
     if not email or not telegram_id:
         return jsonify({"message": "Email and Telegram ID are required"}), 400
@@ -897,7 +981,9 @@ def verify_link_otp():
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     otp = str(data.get('otp') or '').strip()
-    telegram_id = data.get('telegram_id')
+    telegram_id, _sig_error = _trusted_telegram_id(data, strict=True)
+    if _sig_error is not None:
+        return _sig_error
 
     if not email or not otp or not telegram_id:
         return jsonify({"message": "Email, OTP, and Telegram ID are required"}), 400
@@ -984,3 +1070,180 @@ def telegram_prefs():
         "message": "Telegram notification preferences updated.",
         "user": _user_payload(user),
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Telegram Mini App sign-in (Phase T, T-3)
+#   POST /api/auth/telegram-webapp                  { init_data }
+#   POST /api/auth/telegram-webapp/create           { link_token }
+#   POST /api/auth/telegram-webapp/link/send-otp    { link_token, email }
+#   POST /api/auth/telegram-webapp/link/verify      { link_token, email, otp }
+# Verification and account rules: app/services/telegram_webapp.py
+# ---------------------------------------------------------------------------
+
+def _tg_error(err):
+    return jsonify({"message": err.message, "code": err.code}), err.status
+
+
+def _tg_login_response(user):
+    if not user.is_active:
+        return jsonify({"message": "Your account has been suspended. Please contact support.",
+                        "code": "suspended"}), 403
+    tokens = _make_tokens(user)
+    return jsonify({
+        "message": "Login successful",
+        "status": "logged_in",
+        "user": _user_payload(user),
+        **tokens,
+        "token": tokens["access_token"],
+        "access_token": tokens["access_token"],
+    }), 200
+
+
+@auth_bp.route('/telegram-webapp', methods=['POST'])
+@limiter.limit("20 per minute")
+def telegram_webapp_login():
+    from app.services import telegram_webapp as tgw
+
+    data = request.get_json(silent=True) or {}
+    try:
+        tg = tgw.verify_init_data(data.get('init_data') or data.get('initData') or '')
+        tgw.consume(tg)
+    except tgw.InitDataError as err:
+        return _tg_error(err)
+
+    user = tgw.find_account(tg.telegram_id)
+    if user:
+        # Fill blanks only; never overwrite what the user set on Siiqo.
+        changed = False
+        if tg.first_name and not user.first_name:
+            user.first_name, changed = tg.first_name, True
+        if tg.last_name and not user.last_name:
+            user.last_name, changed = tg.last_name, True
+        if tg.photo_url and not user.profile_pic:
+            user.profile_pic, changed = tg.photo_url, True
+        if changed:
+            db.session.commit()
+        return _tg_login_response(user)
+
+    return jsonify({
+        "status": "new_user",
+        "message": "No Siiqo account is linked to this Telegram profile yet.",
+        "link_token": tgw.make_link_token(tg),
+        "telegram_user": {"first_name": tg.first_name, "username": tg.username},
+    }), 200
+
+
+@auth_bp.route('/telegram-webapp/create', methods=['POST'])
+@limiter.limit("10 per minute")
+def telegram_webapp_create():
+    from app.services import telegram_webapp as tgw
+
+    data = request.get_json(silent=True) or {}
+    try:
+        link = tgw.read_link_token(data.get('link_token'))
+        user = tgw.create_virtual_account(link['tid'], link.get('fn') or '', link.get('ln') or '',
+                                          link.get('ph') or '')
+    except tgw.InitDataError as err:
+        return _tg_error(err)
+    return _tg_login_response(user)
+
+
+@auth_bp.route('/telegram-webapp/link/send-otp', methods=['POST'])
+@limiter.limit("3 per minute")
+def telegram_webapp_link_send_otp():
+    import secrets
+    from app.services import telegram_webapp as tgw
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    try:
+        link = tgw.read_link_token(data.get('link_token'))
+    except tgw.InitDataError as err:
+        return _tg_error(err)
+    if not email or tgw.is_virtual_email(email):
+        return jsonify({"message": "Enter the email you use on Siiqo.", "code": "invalid_email"}), 400
+
+    linked = User.query.filter_by(telegram_id=link['tid']).first()
+    if linked:
+        return jsonify({"message": "This Telegram profile is already linked. Reopen the app from Telegram.",
+                        "code": "already_linked"}), 409
+
+    generic = {"message": "If that email has a Siiqo account, we sent it a code."}
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.is_active:
+        return jsonify(generic), 200
+    if user.telegram_id and user.telegram_id != link['tid']:
+        # Same answer as "no account": never reveal which emails exist.
+        return jsonify(generic), 200
+
+    otp = f"{secrets.randbelow(900000) + 100000}"
+    user.reset_otp = otp
+    user.otp_expiry = _utcnow() + timedelta(minutes=15)
+    db.session.commit()
+    try:
+        send_siiqo_email(
+            to_email=user.email,
+            subject="Siiqo Account Link Verification Code",
+            template_name="verify_email_otp",
+            first_name=user.first_name or "there",
+            otp=otp,
+        )
+    except Exception as e:
+        logging.warning(f"[WARN] Telegram Mini App link email failed: {type(e).__name__}")
+        return jsonify({"message": "Failed to send the code. Please try again."}), 500
+    return jsonify(generic), 200
+
+
+@auth_bp.route('/telegram-webapp/link/verify', methods=['POST'])
+@limiter.limit("5 per minute; 20 per hour")
+def telegram_webapp_link_verify():
+    from app.services import telegram_webapp as tgw
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    otp = str(data.get('otp') or '').strip()
+    try:
+        link = tgw.read_link_token(data.get('link_token'))
+    except tgw.InitDataError as err:
+        return _tg_error(err)
+    if not email or not otp:
+        return jsonify({"message": "Email and code are required.", "code": "missing_field"}), 400
+
+    invalid = (jsonify({"message": "Invalid or expired code.", "code": "invalid_otp"}), 400)
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.reset_otp or tgw.is_virtual_email(email):
+        return invalid
+    if user.otp_expiry and _utcnow() > user.otp_expiry.replace(tzinfo=timezone.utc):
+        return invalid
+
+    attempts = _reset_attempts(user)
+    if attempts.failed_count >= MAX_RESET_ATTEMPTS:
+        db.session.commit()
+        return invalid
+    if user.reset_otp.strip() != otp:
+        attempts.failed_count += 1
+        if attempts.failed_count >= MAX_RESET_ATTEMPTS:
+            user.reset_otp = None
+            user.otp_expiry = None
+        db.session.commit()
+        return invalid
+
+    linked = User.query.filter_by(telegram_id=link['tid']).first()
+    if (linked and linked.id != user.id) or (user.telegram_id and user.telegram_id != link['tid']):
+        db.session.rollback()
+        return jsonify({"message": "This Telegram profile or email is already linked to another account.",
+                        "code": "already_linked"}), 409
+
+    db.session.flush()
+    db.session.delete(attempts)
+    user.telegram_id = link['tid']
+    user.reset_otp = None
+    user.otp_expiry = None
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"message": "This Telegram profile is already linked to another account.",
+                        "code": "already_linked"}), 409
+    return _tg_login_response(user)
