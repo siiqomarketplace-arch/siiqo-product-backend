@@ -402,3 +402,93 @@ def test_daya_admin_routes_require_2fa(client, make_admin, monkeypatch):
     res = client.get("/api/admin/daya/sweeps", headers=_bearer(admin))
     assert res.status_code == 403
     assert res.get_json()["code"] == "2FA_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# Recovery-code regeneration (POST /api/admin/2fa/recovery-codes)
+# ---------------------------------------------------------------------------
+
+_REGEN = "/api/admin/2fa/recovery-codes"
+
+
+def test_regenerate_recovery_codes_replaces_old_ones(client, make_admin, clock):
+    admin = make_admin()
+    secret, old_codes = _enroll(client, admin, clock)
+    clock.tick(30)
+    res = client.post(_REGEN, headers=_bearer(admin), json={"code": totp_service.totp(secret, clock.now())})
+    assert res.status_code == 200, res.get_json()
+    assert res.headers["Cache-Control"] == "no-store"
+    new_codes = res.get_json()["recovery_codes"]
+    assert len(new_codes) == 10 and len(set(new_codes)) == 10
+    assert not set(new_codes) & set(old_codes)
+
+    db.session.refresh(admin)
+    hashes = admin.totp_recovery_hashes
+    assert len(hashes) == 10
+    assert all(c not in str(hashes) for c in new_codes)          # stored hashed only
+    assert all(totp_service.match_recovery_code(c, hashes) is None for c in old_codes)
+    assert totp_service.match_recovery_code(new_codes[0], hashes) == 0
+    assert admin.totp_enabled is True
+
+    log = AdminAuditLog.query.filter_by(action="ADMIN_2FA_RECOVERY_CODES_REGENERATED").one()
+    assert str(log.resource_id) == str(admin.id)
+    assert all(c not in str(log.details) for c in new_codes)
+
+    # An old code no longer signs in; a new one does.
+    challenge = _password_step(client).get_json()["challenge_token"]
+    assert client.post("/api/admin/login/2fa", json={"challenge_token": challenge,
+                                                     "code": old_codes[1]}).status_code == 401
+    res = client.post("/api/admin/login/2fa", json={"challenge_token": challenge, "code": new_codes[1]})
+    assert res.status_code == 200
+
+
+def test_regenerate_refuses_recovery_code(client, make_admin, clock):
+    admin = make_admin()
+    _, codes = _enroll(client, admin, clock)
+    res = client.post(_REGEN, headers=_bearer(admin), json={"code": codes[0]})
+    assert res.status_code == 400
+    assert res.get_json()["code"] == "INVALID_2FA_CODE"
+    db.session.refresh(admin)
+    assert len(admin.totp_recovery_hashes) == 10                 # nothing consumed or replaced
+    assert totp_service.match_recovery_code(codes[0], admin.totp_recovery_hashes) == 0
+    assert AdminAuditLog.query.filter_by(action="ADMIN_2FA_RECOVERY_CODES_REGENERATED").count() == 0
+
+
+def test_regenerate_refuses_wrong_or_replayed_totp(client, make_admin, clock):
+    admin = make_admin()
+    secret, _ = _enroll(client, admin, clock)
+    before = list(admin.totp_recovery_hashes)
+    assert client.post(_REGEN, headers=_bearer(admin), json={"code": "123456"}).status_code == 400
+    # The enrolment code was already used, so it cannot be replayed here.
+    res = client.post(_REGEN, headers=_bearer(admin), json={"code": totp_service.totp(secret, clock.now())})
+    assert res.status_code == 400
+    assert client.post(_REGEN, headers=_bearer(admin), json={}).status_code == 400
+    db.session.refresh(admin)
+    assert admin.totp_recovery_hashes == before
+
+
+def test_regenerate_requires_2fa_enabled(client, make_admin):
+    admin = make_admin()
+    res = client.post(_REGEN, headers=_bearer(admin), json={"code": "123456"})
+    assert res.status_code == 400
+    assert res.get_json()["code"] == "2FA_NOT_ENABLED"
+
+
+def test_regenerate_rejects_user_tokens(client, make_user):
+    user = make_user()
+    headers = {"Authorization": f"Bearer {create_access_token(identity=str(user.id))}"}
+    assert client.post(_REGEN, headers=headers, json={"code": "123456"}).status_code == 403
+
+
+def test_regenerate_is_rate_limited_like_other_2fa_endpoints():
+    from flask_limiter.util import get_qualified_name
+
+    from app.routes import admin as admin_routes
+    limiter = admin_routes.limiter  # the instance admin.py decorates with
+
+    def limits(view):
+        return sorted(str(lim.limit) for lim in
+                      limiter.limit_manager.decorated_limits(get_qualified_name(view)))
+
+    regen = limits(admin_routes.admin_2fa_regenerate_recovery_codes)
+    assert regen and regen == limits(admin_routes.admin_2fa_disable) == limits(admin_routes.admin_2fa_enable)

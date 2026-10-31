@@ -499,6 +499,43 @@ def admin_2fa_disable():
     return jsonify({"status": "success", "enabled": False}), 200
 
 
+@admin_bp.route('/2fa/recovery-codes', methods=['POST'])
+@jwt_required()
+@limiter.limit("10 per minute")
+def admin_2fa_regenerate_recovery_codes():
+    """
+    Issue a fresh set of recovery codes; every old code stops working.
+    Requires a current TOTP code (a recovery code is not accepted, so a leaked
+    code cannot be used to mint new ones). The new codes are returned once.
+    """
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Unauthorized"}), 403
+    if not admin.totp_enabled:
+        return jsonify({"message": "Two-factor authentication is not enabled.",
+                        "code": "2FA_NOT_ENABLED"}), 400
+
+    code = (request.get_json(silent=True) or {}).get('code')
+    ip = _client_ip()
+    method = _verify_second_factor(admin, code if isinstance(code, str) else '', allow_recovery=False)
+    if method != 'totp':
+        logging.warning(f"[SECURITY] Wrong 2FA code for recovery-code regeneration, admin {admin.id} from {ip}")
+        return jsonify({"message": "Invalid authentication code", "code": "INVALID_2FA_CODE"}), 400
+
+    previous = len(admin.totp_recovery_hashes or [])
+    recovery_codes = totp_service.generate_recovery_codes()
+    admin.totp_recovery_hashes = [totp_service.hash_recovery_code(c) for c in recovery_codes]
+    db.session.commit()
+
+    AdminAuditLog.log_action(
+        admin=admin, action='ADMIN_2FA_RECOVERY_CODES_REGENERATED', resource_type='AdminUser',
+        resource_id=admin.id,
+        details={'recovery_codes_issued': len(recovery_codes), 'previous_codes_invalidated': previous},
+        ip_address=ip,
+    )
+    return _no_store(jsonify({"recovery_codes": recovery_codes})), 200
+
+
 # ---------------------------------------------------------------------------
 # GET /admin/stats
 # ---------------------------------------------------------------------------
