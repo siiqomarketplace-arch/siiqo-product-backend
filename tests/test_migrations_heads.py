@@ -19,6 +19,8 @@ _MIGRATIONS = os.path.join(
 
 MERGE_REV = "fdf2ba4ce121"
 CONSOLIDATE_REV = "a1f19c7ec765"
+SEARCH_REV = "5e7a9c3b1d42"   # Phase 3 search index, on top of the consolidation
+HEAD_REV = SEARCH_REV
 
 
 def _scripts():
@@ -41,7 +43,7 @@ def _offline_sql(revision_id, dialect="postgresql"):
 
 def test_single_head():
     heads = _scripts().get_heads()
-    assert heads == [CONSOLIDATE_REV], heads
+    assert heads == [HEAD_REV], heads
 
 
 def test_merge_revision_joins_previous_heads():
@@ -54,7 +56,7 @@ def test_every_revision_reaches_the_head():
     """Walking down from the single head visits every revision on disk."""
     sd = _scripts()
     all_revs = {s.revision for s in sd.walk_revisions()}
-    reachable = {s.revision for s in sd.iterate_revisions(CONSOLIDATE_REV, "base")}
+    reachable = {s.revision for s in sd.iterate_revisions(HEAD_REV, "base")}
     assert reachable == all_revs
 
 
@@ -98,3 +100,29 @@ def test_consolidation_is_noop_on_sqlite():
 
 def test_merge_revision_emits_no_sql():
     assert _offline_sql(MERGE_REV).strip() == ""
+
+
+def test_search_index_revision_sits_on_the_consolidation():
+    assert _scripts().get_revision(SEARCH_REV).down_revision == CONSOLIDATE_REV
+
+
+def test_search_index_sql_is_postgres_only_and_idempotent():
+    sql = _offline_sql(SEARCH_REV)
+    for needle in [
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+        "ADD COLUMN search_tsv tsvector",
+        "GENERATED ALWAYS AS",
+        "CREATE INDEX IF NOT EXISTS ix_products_search_tsv ON products USING GIN (search_tsv)",
+        "CREATE INDEX IF NOT EXISTS ix_storefronts_search_tsv ON storefronts USING GIN (search_tsv)",
+        "CREATE INDEX IF NOT EXISTS ix_products_name_trgm ON products USING GIN (name gin_trgm_ops)",
+        "CREATE INDEX IF NOT EXISTS ix_storefronts_name_trgm",
+        "server_version_num",
+    ]:
+        assert needle in sql, needle
+    for line in sql.splitlines():
+        stripped = line.strip().upper()
+        if stripped.startswith("CREATE INDEX") or stripped.startswith("CREATE EXTENSION"):
+            assert "IF NOT EXISTS" in stripped, line
+        if stripped.startswith("ALTER TABLE") and "ADD COLUMN" in stripped:
+            assert line.startswith("        "), line   # only inside a guarded DO block
+    assert _offline_sql(SEARCH_REV, dialect="sqlite").strip() == ""

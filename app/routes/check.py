@@ -182,7 +182,9 @@ def _results(matches):
 def _respond(query_type, results):
     found = bool(results)
     foundations.record_event("check", props={"query_type": query_type, "found": found})
-    body = {"query_type": query_type, "found": found, "results": results}
+    from app.services import who_checked
+    who_checked.record_results(results, "check")   # "Who checked you": seller + identifier type only
+    body ={"query_type": query_type, "found": found, "results": results}
     if not found:
         body["message"] = NOT_FOUND_MESSAGE
     return jsonify(body), 200
@@ -201,7 +203,23 @@ def check_seller():
                         "message": "That's too long to check. Paste just the link, number or handle."}), 400
     query_type, lookups, extras = classify(q)
     results = _results(_matches(lookups, extras)) if lookups else []
+    if not results:
+        unclaimed = _directory_result(query_type, lookups, q)
+        if unclaimed is not None:
+            return unclaimed
     return _respond(query_type, results)
+
+
+def _directory_result(query_type, lookups, q):
+    """Phase 3 (3-5): no Siiqo seller matched, but an unclaimed directory listing
+    did. Public listing fields only, neutral wording, no trust signals."""
+    from app.services import directory
+    listing = directory.listing_for_lookups(lookups, query_type=query_type, raw=q)
+    if listing is None:
+        return None
+    foundations.record_event("check", props={"query_type": query_type, "found": False, "directory": True})
+    return jsonify({"query_type": query_type, "found": False, "results": [], "status": "unclaimed",
+                    "listing": directory.public_listing(listing), "message": directory.UNCLAIMED_MESSAGE}), 200
 
 
 @check_bp.route('/account', methods=['GET'])

@@ -29,6 +29,8 @@ from .jobs import Job
 from .onboarding import OnboardingSession, OnboardingPhoto
 from .store_revision import StoreRevision
 from .dispute import DisputeCase, DisputeEvidence  # noqa: F401  (Phase 2: disputes)
+from . import directory  # noqa: F401  (Phase 3: business directory and claims)
+from . import trust_report  # noqa: F401  (Phase 3: AI Trust Report cache)
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',

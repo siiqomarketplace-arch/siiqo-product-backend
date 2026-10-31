@@ -420,6 +420,7 @@ def run(
     schema: dict | None = None,
     client=None,
     images: list[dict] | None = None,
+    timeout: float | None = None,
 ) -> AIResult:
     """
     Run one AI action. ``action`` is "name" (latest prompt version) or
@@ -431,6 +432,9 @@ def run(
     "data": ...}`` or ``{"type": "url", "url": ...}`` - sent before the text
     in the user turn. Only product photos and logos may be passed here,
     never ID documents (the PII stripper cannot see inside images).
+    ``timeout`` (seconds) caps this one call and turns SDK retries off, for
+    callers inside a buyer's web request (search); None keeps the configured
+    AI_TIMEOUT_SECONDS / AI_MAX_RETRIES.
 
     Raises AIDisabled, AICapExceeded, AIRefused, AIUnavailable,
     AIInvalidOutput or AIRequestError (all subclasses of AIError).
@@ -507,6 +511,9 @@ def run(
         except AIUnavailable as exc:
             _record(**row, outcome="unavailable", error_type=exc.reason)
             raise
+
+    if timeout is not None and hasattr(client, "with_options"):
+        client = client.with_options(timeout=timeout, max_retries=0)
 
     # 6. Request. The system prompt is stable and carries the cache marker;
     #    volatile inputs live only in the user turn. Thinking is always on for

@@ -110,7 +110,19 @@ def check_name(name: str) -> dict:
         "reason": reason,
         "store_url": store_url(slug) if slug else None,
         "suggestions": [] if reason is None or not slug else suggest_slugs(slug),
+        "listing_match": _listing_match(name),
     }
+
+
+def _listing_match(name: str):
+    """Phase 3 (3-5): an unclaimed directory listing with exactly this name, so
+    /start can offer "Is this you? Claim it". Never blocks the name check."""
+    try:
+        from app.services.directory import name_match
+        return name_match(name)
+    except Exception as e:  # noqa: BLE001
+        log.warning("name check: directory lookup skipped (%s)", type(e).__name__)
+        return None
 
 
 # ── Publish ─────────────────────────────────────────────────────────────────

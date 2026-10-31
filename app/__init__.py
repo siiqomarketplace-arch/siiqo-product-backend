@@ -622,6 +622,8 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(passport_bp, url_prefix='/api/passport')
     from app.routes.check import check_bp
     app.register_blueprint(check_bp, url_prefix='/api/check')
+    from app.routes.trust_report import trust_report_bp
+    app.register_blueprint(trust_report_bp, url_prefix='/api/check')
     from app.routes.privacy import privacy_bp
     app.register_blueprint(privacy_bp, url_prefix='/api/privacy')
     # Phase 1: AI seller onboarding (/start on the website)
@@ -635,6 +637,14 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(v1_bp, url_prefix='/v1')
     from app.routes.platform import platform_bp
     app.register_blueprint(platform_bp, url_prefix='/api/platform')
+    # Phase 3: business directory and claim flow
+    from app.routes.directory import directory_admin_bp, directory_bp
+    app.register_blueprint(directory_bp, url_prefix='/api/directory')
+    app.register_blueprint(directory_admin_bp, url_prefix='/api/admin/directory')
+    # Phase 3: Ask (AI search) and Market (server-paginated browsing)
+    from app.routes.search import market_bp, search_bp
+    app.register_blueprint(search_bp, url_prefix='/api/search')
+    app.register_blueprint(market_bp, url_prefix='/api/market')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.

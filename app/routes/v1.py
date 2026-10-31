@@ -16,6 +16,7 @@ from app.services import foundations
 from app.services import passport as passport_svc
 from app.services import platform as platform_svc
 from app.services import platform_webhooks as webhooks
+from app.services import who_checked
 
 v1_bp = Blueprint('v1', __name__)
 
@@ -77,6 +78,8 @@ def business_trust(slug):
     else:
         sf = passport_svc.find_storefront(slug)
         claims = passport_svc.build_passport(sf) if passport_svc.is_visible(sf) else None
+        if claims is not None:
+            who_checked.record(sf.vendor_id, "api", "store_slug", sf.id)
     if claims is None:
         return _error("NOT_FOUND", "No public Trust Passport for this business.", 404)
     statement, alg = _signed(claims, client)
@@ -98,6 +101,7 @@ def _live_lookup(identifier, bank_code, account_number):
         query_type, lookups, extras = check.classify(identifier)
     results = check._results(check._matches(lookups, extras)) if lookups else []
     foundations.record_event("check", props={"query_type": query_type, "found": bool(results), "source": "api_v1"})
+    who_checked.record_results(results[:1], "api")   # only the first match is returned
     return results[0]["passport"] if results else None
 
 
@@ -186,6 +190,7 @@ def widget(slug):
                 claims = passport_svc.build_passport(sf)
                 statement, alg = passport_svc.sign(claims)
                 body = {"allowed": True, "business": claims, "statement": statement, "alg": alg}
+                who_checked.record(sf.vendor_id, "widget", None, sf.id)
     res = jsonify(body)
     res.headers.update(_WIDGET_CORS)
     res.headers["Cache-Control"] = "public, max-age=300"

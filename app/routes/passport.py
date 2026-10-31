@@ -98,6 +98,16 @@ def get_passport(slug):
     claims = _public_passport(slug)
     if claims is None:
         return jsonify({"message": "No public Trust Passport for this seller."}), 404
+    # "Who checked you": a platform with a key is an API check. A Passport view
+    # counts only when the website marks a real page view (never metadata,
+    # share-image or link-preview fetches) and the caller is not a known bot.
+    # The user agent is only matched here, never stored.
+    from app.services import who_checked
+    if raw_key:
+        who_checked.record_slug(claims["store_slug"], "api", "store_slug")
+    elif request.headers.get('X-Siiqo-Passport-View') == '1' \
+            and not who_checked.is_preview_bot(request.headers.get('User-Agent')):
+        who_checked.record_slug(claims["store_slug"], "passport")
     statement, alg = svc.sign(claims)
     return jsonify({"passport": claims, "statement": statement, "alg": alg}), 200
 
