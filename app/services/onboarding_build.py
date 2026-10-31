@@ -33,7 +33,7 @@ from app.models.onboarding import OnboardingSession, STAGE_KEYS, empty_stages
 from app.services import jobs
 from app.services.ai import AICapExceeded, AIDisabled, AIError, AIInvalidOutput, run as ai_run
 from app.services.onboarding_critic import HARD_BANNED, check_listing, check_spec
-from app.services.store_spec import PRESET_IDS, SECTION_IDS, parse_store_spec, text_fields
+from app.services.store_spec import AI_SECTION_IDS, PRESET_IDS, parse_store_spec, text_fields
 
 log = logging.getLogger(__name__)
 
@@ -197,9 +197,19 @@ def image_source(url: str) -> dict | None:
     path = _local_path(url)
     if not path:
         return None
+    source = image_source_from(path)
+    if source is None:
+        log.info("onboarding: could not prepare image %s", url)
+    return source
+
+
+def image_source_from(fp) -> dict | None:
+    """A base64 Messages API image source from a path or file-like object
+    (resized to at most _MAX_SIDE px, re-encoded as JPEG), or None when it
+    cannot be read as an image."""
     try:
         from PIL import Image
-        with Image.open(path) as img:
+        with Image.open(fp) as img:
             img = img.convert("RGB")
             img.thumbnail((_MAX_SIDE, _MAX_SIDE))
             buf = io.BytesIO()
@@ -207,7 +217,6 @@ def image_source(url: str) -> dict | None:
         return {"type": "base64", "media_type": "image/jpeg",
                 "data": base64.b64encode(buf.getvalue()).decode("ascii")}
     except Exception:  # noqa: BLE001
-        log.info("onboarding: could not prepare image %s", url)
         return None
 
 
@@ -302,12 +311,13 @@ class _Outcome:
         self.value: Any = None
 
 
-def _ai_with_critic(action: str, seller_id: int, inputs: dict, critic, *, images=None) -> _Outcome:
-    """Call the gateway, run the critic, retry at most MAX_RETRIES times with
+def _ai_with_critic(action: str, seller_id: int, inputs: dict, critic, *, images=None,
+                    retries: int = MAX_RETRIES) -> _Outcome:
+    """Call the gateway, run the critic, retry at most ``retries`` times with
     the critic's notes. Returns an outcome whose value is None on fallback."""
     out = _Outcome()
     feedback: list[str] = []
-    for attempt in range(1 + MAX_RETRIES):
+    for attempt in range(1 + retries):
         call_inputs = dict(inputs)
         if feedback:
             call_inputs["critic_feedback"] = feedback
@@ -343,7 +353,7 @@ def _copy_part(app, seller_id: int, answers: dict, theme_hint: dict, suggested: 
                 "answers": business_inputs(answers),
                 "presets": [{"id": p, "suits": PRESET_THEMES[p]["suits"]} for p in PRESET_IDS],
                 "suggested_preset": suggested,
-                "allowed_sections": list(SECTION_IDS),
+                "allowed_sections": list(AI_SECTION_IDS),
             }
 
             def critic(data):
@@ -357,6 +367,40 @@ def _copy_part(app, seller_id: int, answers: dict, theme_hint: dict, suggested: 
             db.session.remove()
 
 
+def listing_from_image(seller_id: int, source: dict, answers: dict, *, seller_note: str = "",
+                       categories: list[str], retries: int = MAX_RETRIES) -> _Outcome:
+    """One listing draft from one product photo: the listing_from_photo prompt
+    (vision) checked by the code critic. Shared by the onboarding build and
+    the product form's "Fill from photo" (POST /api/vendor/products/draft-from-photo)."""
+    inputs = {
+        "business_name": answers.get("business_name"),
+        "what_you_sell": answers.get("what_you_sell"),
+        "seller_note": seller_note or "",
+        "categories": categories,
+    }
+
+    def critic(data):
+        problems = check_listing(data, answers, seller_note=seller_note or "",
+                                 categories=categories if categories else None)
+        return data, problems
+
+    return _ai_with_critic("listing_from_photo", seller_id, inputs, critic, images=[source],
+                           retries=retries)
+
+
+def listing_fields(ai: dict, categories: list[str]) -> dict:
+    """The editable fields of an AI listing draft, trimmed to the form's limits.
+    Never a price: the seller sets it."""
+    attrs = [{"name": str(a.get("name", ""))[:40], "value": str(a.get("value", ""))[:60]}
+             for a in (ai.get("attributes") or [])[:8] if isinstance(a, dict)]
+    return {
+        "title": (ai.get("title") or "").strip()[:80],
+        "description": (ai.get("description") or "").strip()[:600],
+        "category": ai.get("category") if ai.get("category") in categories else None,
+        "attributes": attrs,
+    }
+
+
 def _listing_part(app, seller_id: int, answers: dict, photo: dict, categories: list[str]) -> _Outcome:
     with app.app_context():
         try:
@@ -365,19 +409,8 @@ def _listing_part(app, seller_id: int, answers: dict, photo: dict, categories: l
                 out = _Outcome()
                 out.reason = "photo could not be read"
                 return out
-            inputs = {
-                "business_name": answers.get("business_name"),
-                "what_you_sell": answers.get("what_you_sell"),
-                "seller_note": photo.get("caption") or "",
-                "categories": categories,
-            }
-
-            def critic(data):
-                problems = check_listing(data, answers, seller_note=photo.get("caption") or "",
-                                         categories=categories if categories else None)
-                return data, problems
-
-            return _ai_with_critic("listing_from_photo", seller_id, inputs, critic, images=[source])
+            return listing_from_image(seller_id, source, answers, seller_note=photo.get("caption") or "",
+                                      categories=categories)
         finally:
             db.session.remove()
 
@@ -396,15 +429,9 @@ def _listing_draft(photo: dict, ai: dict | None, categories: list[str]) -> dict:
         "source": "fallback",
     }
     if ai:
-        attrs = [{"name": str(a.get("name", ""))[:40], "value": str(a.get("value", ""))[:60]}
-                 for a in (ai.get("attributes") or [])[:8] if isinstance(a, dict)]
-        draft.update({
-            "title": (ai.get("title") or "").strip()[:80] or draft["title"],
-            "description": (ai.get("description") or "").strip()[:600],
-            "category": ai.get("category") if ai.get("category") in categories else None,
-            "attributes": attrs,
-            "source": "ai",
-        })
+        fields = listing_fields(ai, categories)
+        fields["title"] = fields["title"] or draft["title"]
+        draft.update(fields, source="ai")
     return draft
 
 
@@ -447,7 +474,7 @@ def recover_session(session: OnboardingSession, job: Job | None, *, reason: str 
 
 
 # ── The job ─────────────────────────────────────────────────────────────────
-def _categories() -> list[str]:
+def category_names() -> list[str]:
     try:
         from app.models.product import Category
         return [c.name for c in Category.query.order_by(Category.name).limit(60).all() if c.name]
@@ -485,7 +512,7 @@ def _run(session_id: int, job: Job, part: str | None) -> dict:
     session.stages = stages
     db.session.commit()
 
-    categories = _categories()
+    categories = category_names()
     photos = _photo_dicts(session)
     logo = session.logo()
     suggested = nearest_preset(answers)

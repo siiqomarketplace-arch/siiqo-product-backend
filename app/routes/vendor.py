@@ -616,6 +616,17 @@ def update_settings():
     if 'is_published' in data:
         sf.is_published = str(data['is_published']).lower() in ('true', '1', 'yes')
 
+    # Store editor / AI refresh saves keep a revision of the current design
+    # first, so the seller can undo (app/services/store_editor.py).
+    revision_source = data.get('revision_source')
+    if revision_source is not None:
+        if revision_source not in ('editor', 'ai_refresh'):
+            return jsonify({"message": "revision_source must be editor or ai_refresh"}), 400
+        if 'template_options' not in data:
+            return jsonify({"message": "template_options is required with revision_source"}), 400
+        from app.services.store_editor import record_revision
+        record_revision(sf, revision_source, user.id)
+
     # JSON fields
     for json_field in ('template_options', 'social_links', 'working_hours'):
         if json_field in data:
@@ -710,6 +721,73 @@ def scrape_product():
         
     return jsonify(result), 200
 
+
+@vendor_bp.route('/products/draft-from-photo', methods=['POST'])
+@jwt_required()
+def draft_product_from_photo():
+    """
+    "Fill from photo" (Phase 1, 1-3). Multipart: ``photo`` (or ``file``/``image``),
+    optional ``note`` (the seller's words, max 200 chars).
+
+    200 ``{"draft": {title, description, category, attributes: [{name, value}], source},
+           "reason": null, "cached": bool}`` - nothing is saved; the form pre-fills.
+    200 ``{"draft": null, "reason": "ai_off"|"capped"|"rejected"|"unavailable"|"unreadable"}``
+        - the form stays manual. Never a price.
+    400 bad file (same checks as the onboarding photo upload); 403 not a vendor.
+    """
+    from app.services import listing_draft
+    from app.utils.upload import PHOTO_MAX_BYTES, allowed_file, looks_like_image
+
+    user, sf = _require_vendor_storefront(_get_user_id())
+    if not user:
+        return jsonify({"message": "Vendor access required"}), 403
+    if not sf:
+        return jsonify({"message": "Complete vendor onboarding first"}), 403
+
+    file = request.files.get('photo') or request.files.get('file') or request.files.get('image')
+    if not file or not file.filename:
+        return jsonify({"message": "Attach a photo (multipart field 'photo').", "code": "PHOTO_REQUIRED"}), 400
+    note = (request.form.get('note') or '').strip()
+    if len(note) > listing_draft.MAX_NOTE_CHARS:
+        return jsonify({"message": f"note: at most {listing_draft.MAX_NOTE_CHARS} characters",
+                        "code": "INVALID_NOTE"}), 400
+
+    file.stream.seek(0, 2)
+    size = file.stream.tell()
+    file.stream.seek(0)
+    if size > PHOTO_MAX_BYTES:
+        return jsonify({"message": f"Photos can be up to {PHOTO_MAX_BYTES // (1024 * 1024)}MB.",
+                        "code": "PHOTO_TOO_LARGE"}), 400
+    data = file.stream.read()
+    if not allowed_file(file.filename) or not looks_like_image(data[:16]):
+        return jsonify({"message": "Only JPG, PNG, WEBP or AVIF images are allowed.",
+                        "code": "NOT_AN_IMAGE"}), 400
+
+    result = listing_draft.draft_from_photo(user.id, data, business_name=sf.store_name or "", note=note)
+    return jsonify(result), 200
+
+
+def _has_payout_account(user, sf) -> bool:
+    from app.models.withdrawal import VendorBankAccount
+    if VendorBankAccount.query.filter_by(vendor_id=user.id).first() is not None:
+        return True
+    return bool(sf and sf.account_number and sf.bank_code)
+
+
+_BANK_REQUIRED = {
+    "message": "Please add your bank account details before listing a product so you can receive payouts.",
+    "code": "BANK_ACCOUNT_REQUIRED",
+    "redirect_url": "/vendor/escrow",
+}
+
+
+def _is_draft_request(data) -> bool:
+    """Save draft from the product form: status=draft or is_published=false."""
+    if str(data.get('status') or '').strip().lower() == 'draft':
+        return True
+    return str(data.get('is_published') or '').strip().lower() in ('false', '0', 'no')
+
+
 @vendor_bp.route('/products/add', methods=['POST'])
 @jwt_required()
 def add_product():
@@ -735,20 +813,17 @@ def add_product():
             }), 403
     # ─────────────────────────────────────────────────────────────────────────
 
-    # ── PAYOUT ACCOUNT GUARD ──────────────────────────────────────────────────
-    from app.models.withdrawal import VendorBankAccount
-    _has_bank = VendorBankAccount.query.filter_by(vendor_id=user.id).first() is not None
-    if not _has_bank and sf and sf.account_number and sf.bank_code:
-        _has_bank = True
-    if not _has_bank:
-        return jsonify({
-            "message": "Please add your bank account details before listing a product so you can receive payouts.",
-            "code": "BANK_ACCOUNT_REQUIRED",
-            "redirect_url": "/vendor/escrow",
-        }), 400
-    # ─────────────────────────────────────────────────────────────────────────
-
     data = request.form if request.form else (request.get_json() or {})
+
+    # A draft is saved hidden (is_active=False) and is not for sale, so it
+    # needs no payout account yet; the check runs when it is published
+    # (edit_product, inactive -> active).
+    is_draft = _is_draft_request(data)
+
+    # ── PAYOUT ACCOUNT GUARD ──────────────────────────────────────────────────
+    if not is_draft and not _has_payout_account(user, sf):
+        return jsonify(_BANK_REQUIRED), 400
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Accept both 'name' (AddProductModal) and 'product_name' (page.tsx handleSaveProduct)
     name = (data.get('name') or data.get('product_name') or '').strip()
@@ -819,9 +894,10 @@ def add_product():
                     file_url_val = uploaded_url
         except ValueError as e:
             return jsonify({"message": str(e)}), 400
-    if p_type == 'digital' and not (file_url_val or '').strip():
+    # A draft may be saved before the file or booking link is ready.
+    if not is_draft and p_type == 'digital' and not (file_url_val or '').strip():
         return jsonify({"message": "A Digital File upload or Download Link (file_url) is required for digital products."}), 400
-    if p_type == 'service' and not (booking_link_val or '').strip():
+    if not is_draft and p_type == 'service' and not (booking_link_val or '').strip():
         return jsonify({"message": "A Booking Link or Intake Document (booking_link) is required for service products."}), 400
 
     new_product = Product(
@@ -831,6 +907,7 @@ def add_product():
         price=price,
         currency=(data.get('currency') or 'NGN').strip().upper() or 'NGN',
         stock_quantity=stock_qty,
+        is_active=not is_draft,
         category_id=category_id,
         condition=data.get('condition') or None,
         location=data.get('location'),
@@ -839,7 +916,9 @@ def add_product():
         is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
         floor_price=float(data['floor_price']) if data.get('floor_price') else None,
         product_type=data.get('product_type', 'physical'),
-        is_free=(price == 0 or str(data.get('is_free', 'false')).lower() in ('true', '1', 'yes')),
+        # A draft saved before the price is typed is not "free".
+        is_free=((price == 0 and not is_draft)
+                 or str(data.get('is_free', 'false')).lower() in ('true', '1', 'yes')),
         file_url=file_url_val,
         booking_link=booking_link_val,
         sku=data.get('sku'),
@@ -891,7 +970,7 @@ def add_product():
     # Auto-post to community feed as PRODUCT_LAUNCH
     # Only if vendor opted in (announce_to_community param) or always for new products
     announce = str(data.get('announce_to_community', 'true')).lower() not in ('false', '0', 'no')
-    if announce:
+    if announce and not is_draft:
         try:
             from app.models.social import Post as CommunityPost
             from datetime import datetime, timedelta, timezone
@@ -947,9 +1026,11 @@ def add_product():
         logging.warning(f"Failed to sync to Algolia: {e}")
 
     return jsonify({
-        "message": "Product added successfully",
+        "message": "Draft saved" if is_draft else "Product added successfully",
         "id": new_product.id,
         "status": "success",
+        "is_draft": is_draft,
+        "is_active": new_product.is_active,
     }), 201
 
 
@@ -968,6 +1049,7 @@ def edit_product(product_id):
         return jsonify({"message": "Unauthorized"}), 403
 
     data = request.form if request.form else (request.get_json() or {})
+    was_active = bool(product.is_active)
 
     # Accept both 'name' and 'product_name'
     if 'name' in data:
@@ -1031,6 +1113,11 @@ def edit_product(product_id):
     elif 'status' in data:
         product.is_active = str(data['status']).lower() in ('active', 'true', '1')
 
+    # Publishing a draft (hidden -> live) needs a payout account, as add_product does.
+    if product.is_active and not was_active and not _has_payout_account(user, sf):
+        db.session.rollback()
+        return jsonify(_BANK_REQUIRED), 400
+
     # Resolve category: accept category_id (int) or category (name string)
     if 'category_id' in data:
         try:
@@ -1042,6 +1129,8 @@ def edit_product(product_id):
             Category.name.ilike(data['category'].strip()) |
             Category.slug.ilike(data['category'].strip())
         ).first()
+        if cat:
+            product.category_id = cat.id
     if 'file_url' in data:
         product.file_url = data['file_url']
     if 'booking_link' in data:
@@ -1102,10 +1191,11 @@ def edit_product(product_id):
         product.booking_link = data['booking_link'] or None
 
     # Validate type-specific required fields after applying updates
+    # (a hidden draft may still be missing them; they are required to go live)
     effective_type = product.product_type or 'physical'
-    if effective_type == 'digital' and not product.file_url:
+    if product.is_active and effective_type == 'digital' and not product.file_url:
         return jsonify({"message": "A Download Link (file_url) is required for digital products."}), 400
-    if effective_type == 'service' and not product.booking_link:
+    if product.is_active and effective_type == 'service' and not product.booking_link:
         return jsonify({"message": "A Booking Link (booking_link) is required for service products."}), 400
 
     if 'sku' in data:
@@ -2057,4 +2147,5 @@ def get_presigned_upload_url():
         return jsonify({"message": "Failed to generate upload authorization", "is_direct_s3": False}), 500
 
 
-
+# Store editor endpoints (revisions, revert, AI edit, AI refresh) on this blueprint.
+from app.routes import storefront_editor  # noqa: E402,F401

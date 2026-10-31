@@ -10,6 +10,20 @@ from flask import current_app
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'avif'}
 ALLOWED_DIGITAL_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'avif', 'pdf', 'zip', 'rar', '7z', 'mp3', 'mp4', 'mov', 'epub', 'docx', 'xlsx', 'txt', 'svg'}
 
+# Product photos and logos sent by sellers (onboarding, "Fill from photo").
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
+
+
+def looks_like_image(head: bytes) -> bool:
+    """True when the first 16 bytes are a JPEG, PNG, WEBP or AVIF signature."""
+    return (
+        head.startswith(b'\xff\xd8\xff')                          # JPEG
+        or head.startswith(b'\x89PNG\r\n\x1a\n')                  # PNG
+        or (head[:4] == b'RIFF' and head[8:12] == b'WEBP')        # WEBP
+        or (head[4:8] == b'ftyp' and head[8:12] in (b'avif', b'avis'))  # AVIF
+    )
+
+
 def allowed_file(filename, is_digital=False):
     exts = ALLOWED_DIGITAL_EXTENSIONS if is_digital else ALLOWED_IMAGE_EXTENSIONS
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in exts

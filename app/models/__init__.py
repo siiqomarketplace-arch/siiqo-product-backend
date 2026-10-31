@@ -26,6 +26,7 @@ from .verification import VerificationCase, VerificationCheck, VerificationStatu
 from .ai import AIUsage
 from .jobs import Job
 from .onboarding import OnboardingSession, OnboardingPhoto
+from .store_revision import StoreRevision
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',
@@ -51,4 +52,5 @@ __all__ = [
     'PlatformEvent', 'TrustEvidence',
     'VerificationCase', 'VerificationCheck', 'VerificationStatus',
     'AIUsage', 'Job', 'OnboardingSession', 'OnboardingPhoto', 'OrderStatusHistory', 'FeeLedgerEntry', 'SellerIdentifier', 'PassportSettings', 'PassportApiClient',
+    'StoreRevision',
 ]

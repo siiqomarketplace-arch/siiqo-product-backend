@@ -26,12 +26,12 @@ from app.services import onboarding_build as build
 from app.services import onboarding_publish as publishing
 from app.services.ai import AIError
 from app.services.store_spec import parse_store_spec
-from app.utils.upload import save_uploaded_file
+from app.utils.upload import PHOTO_MAX_BYTES, looks_like_image, save_uploaded_file
 
 onboarding_bp = Blueprint('onboarding', __name__)
 log = logging.getLogger(__name__)
 
-MAX_PHOTO_BYTES = 5 * 1024 * 1024
+MAX_PHOTO_BYTES = PHOTO_MAX_BYTES
 MAX_LISTINGS = 5
 MAX_STEP = 7
 
@@ -286,13 +286,7 @@ def update_session(session_id):
 # Photos
 # ---------------------------------------------------------------------------
 
-def _looks_like_image(head: bytes) -> bool:
-    return (
-        head.startswith(b'\xff\xd8\xff')                          # JPEG
-        or head.startswith(b'\x89PNG\r\n\x1a\n')                  # PNG
-        or (head[:4] == b'RIFF' and head[8:12] == b'WEBP')        # WEBP
-        or (head[4:8] == b'ftyp' and head[8:12] in (b'avif', b'avis'))  # AVIF
-    )
+_looks_like_image = looks_like_image   # shared with POST /api/vendor/products/draft-from-photo
 
 
 @onboarding_bp.route('/sessions/<int:session_id>/photos', methods=['POST'])

@@ -80,7 +80,15 @@ PRESET_LAYOUT_STYLE: dict[str, str] = {
 }
 
 # ── spec.ts ─────────────────────────────────────────────────────────────────
-SECTION_IDS: tuple[str, ...] = ("hero", "products", "about", "reviews", "contact", "hours", "atmosphere", "faq")
+SECTION_IDS: tuple[str, ...] = (
+    "hero", "products", "about", "reviews", "contact", "hours", "atmosphere", "faq", "passport",
+)
+# Sections no design shows by default: they appear only when a spec-mode
+# store lists them (spec.ts OPTIONAL_SECTION_IDS). "passport" is the Trust
+# Passport card, filled from GET /api/passport/<slug> on the website.
+OPTIONAL_SECTION_IDS: tuple[str, ...] = ("passport",)
+# The sections the store_spec prompt may choose (its schema predates passport).
+AI_SECTION_IDS: tuple[str, ...] = tuple(s for s in SECTION_IDS if s not in OPTIONAL_SECTION_IDS)
 
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
