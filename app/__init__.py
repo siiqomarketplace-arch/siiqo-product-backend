@@ -67,6 +67,12 @@ def create_app(config_name: str | None = None) -> Flask:
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] escrow_code backfill skipped: {_e}")
 
+        # NOTE (0A-2): every schema statement below (this list, the grants
+        # table bootstrap and the blog/article_slug_redirects block) is now
+        # also applied, idempotently, by Alembic revision a1f19c7ec765
+        # (migrations/versions/a1f19c7ec765_consolidate_boot_time_schema.py).
+        # Keep this list until staging proves that revision; then remove it.
+        # See docs/MIGRATIONS_RUNBOOK.md.
         # ── Database Schema Auto-Creation & alters for telemetry/partners ─────
         try:
             # db.create_all() only creates tables that don't exist yet — it never
