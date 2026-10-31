@@ -223,7 +223,9 @@ def _collect(session):
                                          "currency": currency, "created_at": now})
                     evidence(order.vendor_id, "ORDER_REFUNDED", order_id=order.id, value=obj.amount,
                              currency=currency, source="escrow")
-                    if obj.dispute_id:
+                    # A dispute case marks a refund where the seller was not at
+                    # fault (app/services/disputes.py); that is not a lost dispute.
+                    if obj.dispute_id and getattr(obj, "_dispute_seller_fault", True) is not False:
                         evidence(order.vendor_id, "DISPUTE_LOST", order_id=order.id, source="escrow")
                 elif new == EscrowStatus.DISPUTED:
                     evidence(order.vendor_id, "DISPUTE_OPENED", order_id=order.id, source="escrow")

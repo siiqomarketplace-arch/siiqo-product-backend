@@ -1915,8 +1915,11 @@ def rider_mark_delivered(order_id):
     assignment.status = 'DELIVERED'
     assignment.delivered_at = datetime.now(timezone.utc)
     if assignment.order and assignment.order.escrow:
-        assignment.order.escrow.status = 'DELIVERED'
-        
+        # Only a held payment moves to DELIVERED; never a disputed, released
+        # or refunded one (auto-release pays out DELIVERED escrows).
+        if assignment.order.escrow.status in ('IN_ESCROW', 'SHIPPED'):
+            assignment.order.escrow.status = 'DELIVERED'
+
         # Notify buyer
         from app.models.communication import Notification
         db.session.add(Notification(

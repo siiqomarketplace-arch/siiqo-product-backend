@@ -96,6 +96,12 @@ def run():
                 skipped_count += 1
                 continue
 
+            from app.services.disputes import payout_blocked
+            if payout_blocked(order, escrow):
+                logger.warning("  Order #%d - Dispute open; payout frozen. Skipping.", order_id)
+                skipped_count += 1
+                continue
+
             net_amount = float(escrow.amount) - float(escrow.fee_amount or 0)
             vendor_bank = VendorBankAccount.query.filter_by(
                 vendor_id=order.vendor_id, is_default=True

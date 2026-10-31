@@ -733,8 +733,14 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
         if not order:
             logger.error("[DAYA CONFIRM] Order %s not found", order_id)
             return
-        if order.status in ("PAID", "COMPLETED", "RELEASED"):
+        if order.status in ("PAID", "COMPLETED", "RELEASED", "DISPUTED"):
             logger.info("[DAYA CONFIRM] Order %s already confirmed -- skipping", order_id)
+            return
+        # A repeat confirmation must never un-freeze a disputed payment.
+        _existing_escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
+        if _existing_escrow is not None and _existing_escrow.status in (
+                EscrowStatus.DISPUTED, EscrowStatus.RELEASED, EscrowStatus.REFUNDED):
+            logger.info("[DAYA CONFIRM] Order %s escrow is %s -- skipping", order_id, _existing_escrow.status)
             return
 
         order.status = "PAID"
@@ -1072,7 +1078,11 @@ def _payout_vendor_via_daya(order, escrow):
     """
     from app.models.withdrawal import VendorBankAccount, VendorCryptoWallet, DayaPayment
     from app.models.communication import Notification
-    from app.routes.escrow import _payout_amount_or_hold
+    from app.routes.escrow import _payout_amount_or_hold, _dispute_blocks_payout
+
+    if _dispute_blocks_payout(order, escrow):
+        logger.warning("[DAYA PAYOUT] Refused for Order %s: dispute open", order.id)
+        return False
 
     # Convert or hold: naira at the payment-time rate, or held for support.
     net_amount_ngn = _payout_amount_or_hold(order, escrow)

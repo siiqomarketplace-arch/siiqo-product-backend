@@ -36,6 +36,12 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _dispute_blocks_payout(order, escrow) -> bool:
+    """True while the order's money is frozen by a dispute (app/services/disputes.py)."""
+    from app.services.disputes import payout_blocked
+    return payout_blocked(order, escrow)
+
+
 def _active_provider() -> str:
     """Return the currently-configured payment provider name."""
     return os.environ.get("ACTIVE_ESCROW_PROVIDER", "paystack").lower()
@@ -206,6 +212,11 @@ def _deliver_digital_products(order, escrow):
 
     if not digital_items:
         return False
+
+    if _dispute_blocks_payout(order, escrow):
+        # Handled = nothing to do: the payment stays frozen while disputed.
+        logging.warning(f"[DIGITAL] Order #{order.id} is disputed — delivery release skipped")
+        return True
 
     # Build download list for email — HTML links so they are clickable in inbox
     download_links_html = "".join(
@@ -401,6 +412,10 @@ def _deliver_service_products(order, escrow):
     if not service_items:
         return False
 
+    if _dispute_blocks_payout(order, escrow):
+        logging.warning(f"[SERVICE] Order #{order.id} is disputed — delivery release skipped")
+        return True
+
     # Build booking list for email — HTML links so they are clickable in inbox
     booking_links_html = "".join(
         f'<p style="margin:8px 0;"><strong>{p.name}</strong><br>'
@@ -571,6 +586,10 @@ def _deliver_event_tickets(order, escrow):
     tickets = TicketPurchase.query.filter_by(order_id=order.id).all()
     if not tickets:
         return False
+
+    if _dispute_blocks_payout(order, escrow):
+        logging.warning(f"[EVENT] Order #{order.id} is disputed — ticket release skipped")
+        return True
 
     # Activate tickets (switches status PENDING -> ACTIVE, updates sold counts, emails buyer QR code)
     activate_tickets_for_order(order.id)
@@ -985,6 +1004,9 @@ def _paystack_payout_vendor(order, escrow):
     Push vendor's net share via Paystack Transfers API.
     Used for instant payouts of digital/service orders or upon buyer delivery confirmation.
     """
+    if _dispute_blocks_payout(order, escrow):
+        logging.warning(f"[PAYSTACK TRANSFER] Refused for Order #{order.id}: dispute open")
+        return False
     net_amount = _payout_amount_or_hold(order, escrow)
     if net_amount is None:
         return False
@@ -1111,6 +1133,9 @@ def _flutterwave_payout_vendor(order, escrow):
     Used for instant payouts of digital/service/event orders or upon delivery confirmation
     when subaccount split was not applied at checkout (e.g. multi-vendor cart).
     """
+    if _dispute_blocks_payout(order, escrow):
+        logging.warning(f"[FLW PAYOUT] Refused for Order #{order.id}: dispute open")
+        return False
     net_amount = _payout_amount_or_hold(order, escrow)
     if net_amount is None:
         return False
@@ -1226,6 +1251,17 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         order.status = 'COMPLETED'
         db.session.commit()
         return True
+
+    # Dispute guard: a disputed escrow, an active dispute case, or money
+    # already refunded/cancelled is never released here. A dispute decided
+    # for the seller calls this function after the case is resolved.
+    if escrow.status in (EscrowStatus.DISPUTED, EscrowStatus.REFUNDED, EscrowStatus.CANCELLED) \
+            or _dispute_blocks_payout(order, escrow):
+        logging.warning(
+            f"[ESCROW RELEASE REFUSED] Order #{order.id} is disputed or closed "
+            f"(escrow_status={escrow.status}, source={source})"
+        )
+        return False
 
     # Critical Guard: Never release funds or dispatch payouts on unpaid orders
     if escrow.status == EscrowStatus.PENDING_PAYMENT or order.status in ('PENDING', 'CANCELLED'):
@@ -1515,49 +1551,20 @@ def raise_dispute():
     if order.buyer_id != int(user_id) and order.vendor_id != int(user_id):
         return jsonify({"message": "Unauthorized"}), 403
 
-    if escrow.status == EscrowStatus.DISPUTED:
-        return jsonify({"message": "A dispute is already open on this transaction."}), 400
-
-    if escrow.status not in [EscrowStatus.IN_ESCROW, EscrowStatus.DELIVERED, EscrowStatus.SHIPPED]:
-        return jsonify({"message": f"Cannot raise a dispute at status: {escrow.status}"}), 400
-
-    # Determine who is disputing: buyer = 'customer', vendor = 'merchant'
-    requested_by = "customer" if order.buyer_id == int(user_id) else "merchant"
-
-    # Mark dispute locally — no external API call needed (Payscrow removed)
-    logging.info(f"[DISPUTE] Order #{order.id} disputed by {requested_by}: {reason}")
-
-    dispute_id = f"DISP-{uuid.uuid4().hex[:8].upper()}"
-    escrow.status = EscrowStatus.DISPUTED
-    escrow.dispute_id = dispute_id
-    escrow.dispute_reason = reason
-
-    # Also update order status so vendor sees DISPUTED in their dashboard
-    order.status = 'DISPUTED'
-
-    # Notify both parties
-    for uid in [order.buyer_id, order.vendor_id]:
-        db.session.add(Notification(
-            user_id=uid,
-            title="Dispute Raised",
-            message=f"A dispute has been raised on Order #{order.id}. Funds are frozen pending resolution.",
-            type="ESCROW",
-            order_id=order.id,
-        ))
-
-    db.session.commit()
-
-    # Trigger trust score recalculation instantly
+    # Opens a dispute case (evidence, deadlines, review): app/services/disputes.py.
+    # This older endpoint still lets the seller raise one; the case then waits
+    # for the buyer first.
+    from app.services.disputes import DisputeError, open_case
     try:
-        from app.services.trust import recalculate_vendor_trust
-        recalculate_vendor_trust(order.vendor_id, reason="Dispute Raised")
-    except Exception as e:
-        logging.error(f"[TRUST ERROR] Failed to recalculate trust on dispute raise: {e}")
+        case = open_case(order, user_id, reason or "Other", data.get('details'), allow_seller=True)
+    except DisputeError as e:
+        return jsonify(e.to_dict()), (400 if e.code == "already_open" else e.status)
 
     return jsonify({
         "success": True,
-        "disputeId": escrow.dispute_id,
-        "message": "Dispute raised. Funds are frozen. Our team will review within 48 hours.",
+        "disputeId": case.reference,
+        "dispute_case_id": case.id,
+        "message": "Dispute raised. The payment is on hold while both sides add evidence.",
     }), 200
 
 
@@ -1848,3 +1855,7 @@ def send_delivery_code():
         return jsonify({"message": "We couldn't send the code. Please try again shortly."}), 502
 
     return jsonify({"status": "success", "sent_to": _mask_email(email)}), 200
+
+
+# Dispute case routes for buyers and sellers (/api/escrow/disputes/...), Phase 2 item 2-5.
+from app.routes import disputes as _dispute_routes  # noqa: E402,F401

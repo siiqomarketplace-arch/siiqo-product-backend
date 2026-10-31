@@ -46,7 +46,18 @@ def auto_release_escrow():
     Run this task every hour via cron job or scheduler.
     """
     logger.info(f"[{utcnow()}] Running auto-release escrow task...")
-    
+
+    # Dispute deadlines ride on this hourly task: a case whose answering
+    # window has passed goes to review (app/services/disputes.py).
+    try:
+        from app.services.disputes import sweep_deadlines
+        moved = sweep_deadlines()
+        if moved:
+            logger.info(f"  [DISPUTES] {moved} case(s) moved to review after their deadline")
+    except Exception as e:
+        db.session.rollback()
+        logger.warning(f"  [DISPUTES] deadline sweep failed: {e}")
+
     # Find all delivered escrow transactions and filter dynamically in python
     delivered_escrows = EscrowTransaction.query.filter(
         EscrowTransaction.status == EscrowStatus.DELIVERED

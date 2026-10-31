@@ -82,12 +82,24 @@ class User(db.Model):
 
     @property
     def trust_score_or_default(self) -> int:
+        from app.services import trust_v1
+        if trust_v1.is_live():  # v1: 0-100, None below the minimum history
+            return trust_v1.public_v1(self.id)["score"]
         if not self.trust_profile:
             return 500
         return self.trust_profile.total_trust_score
 
     @property
+    def trust_score_max(self) -> int:
+        """Top of the scale for trust_score_or_default: 100 for v1, 1000 for the old score."""
+        from app.services import trust_v1
+        return trust_v1.SCORE_MAX if trust_v1.is_live() else 1000
+
+    @property
     def trust_tier_or_default(self) -> str:
+        from app.services import trust_v1
+        if trust_v1.is_live():  # v1: NEW below the minimum history
+            return trust_v1.public_v1(self.id)["tier"]
         if not self.trust_profile:
             return 'SILVER'
         return self.trust_profile.trust_tier
@@ -111,6 +123,7 @@ class User(db.Model):
             "city": self.city,
             "state": self.state,
             "trust_score": self.trust_score_or_default,
+            "trust_score_max": self.trust_score_max,
             "trust_tier": self.trust_tier_or_default,
             "telegram_id": self.telegram_id,
             "telegram_notification_prefs": self.telegram_notification_prefs or {},
@@ -282,6 +295,7 @@ class Storefront(db.Model):
             ),
             # ── trust fields ──
             "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
+            "trust_score_max": self.vendor.trust_score_max if self.vendor else 1000,
             "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
             # ── verification fields ──
             "account_type": self.account_type,

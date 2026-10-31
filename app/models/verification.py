@@ -126,8 +126,83 @@ class VerificationStatus(db.Model):
             self.is_identity_current(now)
             and self.subscription_active
             and self.source_provider not in (None, "mock")
+            and not self.recheck_paused(now)
         )
         return {
             "identity_verified": identity,
             "business_registered": bool(identity and self.business_verified_at),
         }
+
+    def recheck_paused(self, now=None) -> bool:
+        """A risk re-check whose grace period has ended pauses the mark."""
+        watch = VerificationWatch.query.filter_by(user_id=self.user_id).first()
+        return bool(watch and watch.is_paused(now))
+
+
+class VerificationWatch(db.Model):
+    """Per-seller re-check state (one row per user).
+
+    Holds the store name and payout account name seen when the identity check
+    passed (the baseline that risk events compare against) and, while a
+    re-check is open, its reason and grace period. No manual review queue
+    (V9): the seller clears a re-check by passing a new identity check.
+    """
+    __tablename__ = "verification_watch"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, unique=True)
+
+    baseline_store_name = db.Column(db.String(255), nullable=True)
+    baseline_payout_name = db.Column(db.String(255), nullable=True)
+    baseline_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    recheck_reason_code = db.Column(db.String(40), nullable=True)   # set while a re-check is open
+    recheck_source = db.Column(db.String(20), nullable=True)        # SYSTEM | ADMIN
+    recheck_requested_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    recheck_grace_until = db.Column(db.DateTime(timezone=True), nullable=True)
+    recheck_paused_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    @property
+    def recheck_open(self) -> bool:
+        return self.recheck_reason_code is not None
+
+    def is_paused(self, now=None) -> bool:
+        if not self.recheck_open or self.recheck_grace_until is None:
+            return False
+        grace = self.recheck_grace_until
+        if grace.tzinfo is None:
+            grace = grace.replace(tzinfo=timezone.utc)
+        return grace <= (now or utcnow())
+
+
+class VerificationReminder(db.Model):
+    """One row per expiry reminder sent, so each goes once per check.
+
+    `cycle` is the check's valid_until (as text), so a new check starts a new
+    set of reminders.
+    """
+    __tablename__ = "verification_reminders"
+    __table_args__ = (db.UniqueConstraint("user_id", "cycle", "kind", name="uq_verification_reminder"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    cycle = db.Column(db.String(32), nullable=False)
+    kind = db.Column(db.String(10), nullable=False)   # D30 | D7 | D1 | EXPIRED
+    sent_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class VerificationAuditEvent(db.Model):
+    """Append-only log of verification lifecycle events (re-checks, pauses,
+    clears, reminders). Admin actions are also written to admin_audit_logs."""
+    __tablename__ = "verification_audit_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    event = db.Column(db.String(40), nullable=False, index=True)
+    reason_code = db.Column(db.String(40), nullable=True)
+    actor_type = db.Column(db.String(20), nullable=False, default="SYSTEM")  # SYSTEM | SELLER | ADMIN
+    actor_id = db.Column(db.Integer, nullable=True)
+    details = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False, index=True)

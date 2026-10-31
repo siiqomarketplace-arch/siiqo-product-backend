@@ -138,3 +138,43 @@ def mock_complete():
         return jsonify({"message": "Not found"}), 404
     case = ver.refresh_identity_case(case)
     return jsonify({"case": case.to_seller_dict()}), 200
+
+
+@verification_bp.route("/admin/sellers/<int:user_id>/recheck", methods=["POST"])
+@jwt_required()
+@limiter.limit("30 per hour")
+def admin_request_recheck(user_id):
+    """Superadmin: ask a verified seller for a new identity check (2-3).
+
+    The seller keeps the Verified mark for the grace period, then it pauses
+    until they pass a new check. No review queue (V9). Body: {"note": "..."}
+    (internal only; never shown to the seller)."""
+    from app.models.audit import AdminAuditLog
+    from app.routes.admin import _require_superadmin
+    from app.services.verification import rechecks
+
+    admin = _require_superadmin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Superadmin access required"}), 403
+    if not db.session.get(User, user_id):
+        return jsonify({"message": "Seller not found"}), 404
+    note = str((request.get_json(silent=True) or {}).get("note") or "").strip()[:500]
+    if not note:
+        return jsonify({"message": "Add a short internal note", "code": "NOTE_REQUIRED"}), 400
+
+    already_open = bool(rechecks.seller_state(user_id)["recheck"])
+    watch = rechecks.request_recheck(user_id, rechecks.ADMIN_REQUEST, actor_type="ADMIN",
+                                     actor_id=admin.id, details={"note": note})
+    if watch is None:
+        db.session.rollback()
+        return jsonify({"message": "This seller has no current identity check",
+                        "code": "NOT_VERIFIED"}), 409
+    db.session.commit()
+    AdminAuditLog.log_action(admin, "VERIFICATION_RECHECK_REQUEST", "User", user_id,
+                             details={"note": note, "already_open": already_open,
+                                      "reason_code": watch.recheck_reason_code})
+    return jsonify({
+        "status": "already_open" if already_open else "opened",
+        "reason_code": watch.recheck_reason_code,
+        "reverify_by": rechecks.seller_state(user_id)["reverify_by"],
+    }), 200 if already_open else 201

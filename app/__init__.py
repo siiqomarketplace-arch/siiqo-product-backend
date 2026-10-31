@@ -627,6 +627,9 @@ def create_app(config_name: str | None = None) -> Flask:
     # Phase 1: AI seller onboarding (/start on the website)
     from app.routes.onboarding import onboarding_bp
     app.register_blueprint(onboarding_bp, url_prefix='/api/onboarding')
+    # Phase 2: Trust Score v1 shadow comparison (admin only)
+    from app.routes.trust_admin import trust_admin_bp
+    app.register_blueprint(trust_admin_bp, url_prefix='/api/admin/trust')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
@@ -794,6 +797,19 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as badge_err:
                 logger.warning(f"Pro badge expiry task registration skipped: {badge_err}")
+
+            # Trust Score v1 shadow run — daily 02:30 UTC; stores v1, never changes the public score
+            try:
+                from app.tasks.trust_v1_shadow import run_trust_v1_shadow
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_trust_v1_shadow),
+                    trigger=CronTrigger(hour=2, minute=30),
+                    id='trust_v1_shadow',
+                    name='Trust Score v1 shadow scores for every seller',
+                    replace_existing=True,
+                )
+            except Exception as trust_v1_err:
+                logger.warning(f"Trust v1 shadow task registration skipped: {trust_v1_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")

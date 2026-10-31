@@ -1393,6 +1393,11 @@ def admin_update_order_status(order_id):
     if new_status not in valid_statuses:
         return jsonify({"message": f"Invalid status. Must be one of {valid_statuses}"}), 400
 
+    from app.services.disputes import payout_blocked
+    if payout_blocked(order, order.escrow):
+        return jsonify({"message": "This order has an open dispute. Decide it on the Disputes screen.",
+                        "code": "DISPUTE_OPEN"}), 409
+
     old_status = order.status
     if new_status == 'COMPLETED':
         from app.models.escrow import EscrowTransaction
@@ -1579,6 +1584,11 @@ def admin_refund_buyer(order_id):
 
     if escrow.status == EscrowStatus.RELEASED:
         return jsonify({"message": "Funds already released to vendor — cannot refund"}), 400
+
+    from app.services.disputes import payout_blocked
+    if payout_blocked(escrow.order, escrow):
+        return jsonify({"message": "This order has an open dispute. Decide it on the Disputes screen.",
+                        "code": "DISPUTE_OPEN"}), 409
 
     # Internal refund — no external API call (Payscrow removed)
     logging.info(f"[ADMIN REFUND] Processing refund for Order #{order_id} (payment_method: {escrow.order.payment_method if escrow.order else 'N/A'})")
@@ -1909,7 +1919,12 @@ def admin_release_funds(order_id):
     order = escrow.order
     if not order:
         return jsonify({"message": "Order not found for this escrow"}), 404
-    
+
+    from app.services.disputes import payout_blocked
+    if payout_blocked(order, escrow):
+        return jsonify({"message": "This order has an open dispute. Decide it on the Disputes screen.",
+                        "code": "DISPUTE_OPEN"}), 409
+
     execute_order_escrow_release(order, escrow, source="admin_release")
 
     # Trigger trust score recalculation on admin release
@@ -2920,6 +2935,11 @@ def admin_retry_payout(order_id):
     if not escrow:
         return jsonify({"message": f"No escrow record for Order #{order_id}"}), 404
 
+    from app.services.disputes import payout_blocked
+    if payout_blocked(order, escrow):
+        return jsonify({"message": "This order has an open dispute. Decide it on the Disputes screen.",
+                        "code": "DISPUTE_OPEN"}), 409
+
     data = request.get_json() or {}
     override_amount = data.get("amount_ngn")
 
@@ -3111,6 +3131,13 @@ def admin_retry_all_failed_payouts():
         if not bank_acc:
             entry["status"] = "SKIPPED"
             entry["error"] = "No bank account registered for vendor"
+            results.append(entry)
+            continue
+
+        from app.services.disputes import payout_blocked
+        if payout_blocked(order, escrow):
+            entry["status"] = "SKIPPED"
+            entry["error"] = "Dispute open: payout frozen"
             results.append(entry)
             continue
 
@@ -3952,3 +3979,7 @@ def admin_storefront_detail(storefront_id):
     except Exception as e:
         logging.error(f"[ADMIN] Error fetching storefront detail: {e}")
         return jsonify({"message": "Failed to load storefront detail"}), 500
+
+
+# Dispute review routes (/api/admin/disputes/...), Phase 2 item 2-5.
+from app.routes import admin_disputes as _admin_dispute_routes  # noqa: E402,F401

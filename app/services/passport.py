@@ -68,12 +68,24 @@ def build_passport(sf):
     from app.models.trust import VendorTrustProfile
     from app.models.verification import VerificationStatus
 
+    from app.services import trust_v1
+
     vendor = sf.vendor
     s = settings_for(sf.vendor_id)
     done = completed_orders(sf.vendor_id)
-    profile = VendorTrustProfile.query.filter_by(vendor_id=sf.vendor_id).first()
-    # No made-up score: a seller without completed orders is shown as new.
-    earned = bool(profile and done > 0)
+    if trust_v1.is_live():
+        # Trust Score v1 (TRUST_SCORE_V1_LIVE): earned from evidence; below the
+        # minimum history the tier is NEW and there is no score.
+        v1 = trust_v1.public_v1(sf.vendor_id, compute_if_missing=True)
+        tier, score, score_max = v1["tier"], v1["score"], trust_v1.SCORE_MAX
+    else:
+        # Old score, kept until the v1 shadow period ends.
+        profile = VendorTrustProfile.query.filter_by(vendor_id=sf.vendor_id).first()
+        # No made-up score: a seller without completed orders is shown as new.
+        earned = bool(profile and done > 0)
+        tier = profile.trust_tier if earned else "NEW"
+        score = int(profile.total_trust_score) if earned else None
+        score_max = 1000
 
     status = VerificationStatus.query.filter_by(user_id=sf.vendor_id).first()
     flags = status.public_flags() if status else {"identity_verified": False, "business_registered": False}
@@ -85,9 +97,9 @@ def build_passport(sf):
         "store_slug": sf.store_slug,
         "store_name": sf.store_name,
         "url": f"https://siiqo.com/id/{sf.store_slug}",
-        "tier": profile.trust_tier if earned else "NEW",
-        "score": int(profile.total_trust_score) if earned else None,
-        "score_max": 1000,
+        "tier": tier,
+        "score": score,
+        "score_max": score_max,
         "verified": bool(flags["identity_verified"] or legacy),
         "business_registered": bool(flags["business_registered"]),
     }

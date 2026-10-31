@@ -176,7 +176,10 @@ def _do_deliver(assignment_id: int):
     if status == 'DELIVERED':
         assignment.delivered_at = _utcnow()
         if assignment.order and assignment.order.escrow:
-            assignment.order.escrow.status = 'DELIVERED'
+            # Only a held payment moves to DELIVERED; never a disputed, released
+            # or refunded one (auto-release pays out DELIVERED escrows).
+            if assignment.order.escrow.status in ('IN_ESCROW', 'SHIPPED'):
+                assignment.order.escrow.status = 'DELIVERED'
             db.session.add(Notification(
                 user_id=assignment.order.buyer_id,
                 title="Your Order Has Been Delivered",

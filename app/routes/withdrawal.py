@@ -177,6 +177,9 @@ def add_bank_account():
             existing.bank_code = cbn_bank_code or existing.bank_code
             existing.account_name = account_name or existing.account_name
             db.session.commit()
+            # Verification 2-3: a payout account in a different name opens a re-check.
+            from app.services.verification.rechecks import check_after_change
+            check_after_change(vendor_id)
             return jsonify({
                 'status': 'success',
                 'message': 'Bank account updated successfully',
@@ -281,6 +284,9 @@ def add_bank_account():
             )
 
         db.session.commit()
+        # Verification 2-3: a payout account in a different name opens a re-check.
+        from app.services.verification.rechecks import check_after_change
+        check_after_change(vendor_id)
         
         return jsonify({
             'status': 'success',
@@ -312,6 +318,9 @@ def set_default_account(account_id):
     # Set this as default
     account.is_default = True
     db.session.commit()
+    # Verification 2-3: a payout account in a different name opens a re-check.
+    from app.services.verification.rechecks import check_after_change
+    check_after_change(vendor_id)
     
     return jsonify({
         'status': 'success',
@@ -341,6 +350,9 @@ def delete_bank_account(account_id):
     
     db.session.delete(account)
     db.session.commit()
+    # Verification 2-3: a payout account in a different name opens a re-check.
+    from app.services.verification.rechecks import check_after_change
+    check_after_change(vendor_id)
     
     return jsonify({
         'status': 'success',
@@ -1275,6 +1287,9 @@ def add_daya_bank_account():
                 logging.warning("[DAYA BANK REG] Flutterwave subaccount error for vendor %s: %s", vendor_id, _flw_exc)
         
         db.session.commit()
+        # Verification 2-3: a payout account in a different name opens a re-check.
+        from app.services.verification.rechecks import check_after_change
+        check_after_change(vendor_id)
         return jsonify({"status": "success", "message": "Bank account updated successfully", "account": existing.to_dict()}), 200
 
     # Step 4: Save with Daya-native bank code and Paystack recipient_code
@@ -1368,6 +1383,9 @@ def add_daya_bank_account():
         )
 
     db.session.commit()
+    # Verification 2-3: a payout account in a different name opens a re-check.
+    from app.services.verification.rechecks import check_after_change
+    check_after_change(vendor_id)
 
     logging.info("[DAYA BANK REG] Vendor %s registered Daya bank: %s %s (%s)",
                  vendor_id, bank_name, account_number[-4:], bank_code)

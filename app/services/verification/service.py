@@ -125,7 +125,14 @@ def start_identity(user: User, *, seller_type: str, nin: str, consent: bool) -> 
 
     status = VerificationStatus.query.filter_by(user_id=user.id).first()
     if status and status.is_identity_current():
-        raise VerificationError("ALREADY_VERIFIED", "Your identity is already verified.", 409)
+        # Re-verification opens 30 days before expiry, or while a re-check is open.
+        from .rechecks import reverify_allowed, seller_state
+        if not reverify_allowed(user.id):
+            recheck = seller_state(user.id, status)["recheck"]
+            if recheck and recheck["contact_support"]:
+                raise VerificationError("CONTACT_SUPPORT",
+                                        "We couldn't confirm your identity. Please contact support@siiqo.com.", 403)
+            raise VerificationError("ALREADY_VERIFIED", "Your identity is already verified.", 409)
 
     # Resume an unfinished session instead of paying for a new provider call.
     open_case = (VerificationCase.query
@@ -225,6 +232,9 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
             row.valid_until = now + timedelta(days=validity_days())
             row.source_provider = case.provider
             row.business_verified_at = None  # business step must be redone with the new identity
+            # New baseline for risk events; clears any open re-check (2-3).
+            from .rechecks import on_identity_passed
+            on_identity_passed(case.user_id, case.id)
             if case.provider == "mock":
                 # Staff testing only: stands in for the paid subscription (VER-2).
                 row.subscription_active = True
@@ -236,6 +246,14 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
     else:
         case.status = CaseStatus.ON_HOLD
         case.reason_code = case.reason_code or "UNKNOWN_OUTCOME"
+
+    # 2-3: a fraud signal or face mismatch on a new check pauses a still-valid
+    # mark at once. Technical failures (RETRY, INCONCLUSIVE, provider errors)
+    # keep the current mark so the seller can retry.
+    if case.status == CaseStatus.FAILED_FRAUD or (
+            case.status == CaseStatus.FAILED and case.reason_code == "FACE_MISMATCH"):
+        from .rechecks import pause_after_failed_check
+        pause_after_failed_check(case.user_id, case)
 
     db.session.commit()
     if case.status == CaseStatus.FAILED and case.provider != "mock":
@@ -364,7 +382,11 @@ def seller_summary(user: User) -> dict:
     legacy_expiry = _aware(sf.pro_verified_expires_at) if sf else None
     legacy_active = bool(sf and sf.is_pro_verified
                          and (legacy_expiry is None or legacy_expiry > _utcnow()))
+    from .rechecks import seller_state
     return {
+        # Expiry and re-check state for the Trust tab (2-3): recheck, reverify_by,
+        # can_reverify, mark_paused.
+        **seller_state(user.id, status),
         "legacy": {
             "verified": legacy_active,
             "expires_at": legacy_expiry.isoformat() if legacy_active and legacy_expiry else None,

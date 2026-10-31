@@ -682,6 +682,12 @@ def update_settings():
 
     db.session.commit()
 
+    # Verification 2-3: a new store name or payout account name after the
+    # identity check opens a re-check (no-op for unverified sellers).
+    if 'business_name' in data or 'account_name' in data:
+        from app.services.verification.rechecks import check_after_change
+        check_after_change(user.id)
+
     pending_approval = sf.is_published and not sf.is_verified
     return jsonify({
         "status": "success",
@@ -1439,6 +1445,13 @@ def update_order_status(order_id):
     if order.payment_method == 'ESCROW' and new_status == 'COMPLETED':
         return jsonify({"message": "You cannot manually complete an Escrow order. The buyer must confirm delivery to release funds."}), 400
 
+    # While a dispute is open the order status is frozen (a status change could
+    # otherwise re-open a payout path). Respond on the dispute instead.
+    from app.services.disputes import payout_blocked
+    if payout_blocked(order, order.escrow):
+        return jsonify({"message": "This order has an open dispute. Respond to the dispute instead of changing the status.",
+                        "code": "DISPUTE_OPEN"}), 409
+
     # Stock Restoration
     if new_status == 'CANCELLED' and order.status != 'CANCELLED':
         for item in order.items:
@@ -1731,6 +1744,9 @@ def analyze_storefront():
 def get_vendor_trust_profile():
     user_id = _get_user_id()
     from app.services.trust import get_or_create_trust_profile, recalculate_vendor_trust
+    from app.services import trust_v1
+    if trust_v1.is_live():  # Trust Score v1: the same score buyers see, with its components
+        return jsonify(trust_v1.seller_view(int(user_id))), 200
     
     # Recalculate on load to ensure dashboard displays up-to-date data
     profile = recalculate_vendor_trust(int(user_id), reason="Dashboard Load")
@@ -1740,7 +1756,7 @@ def get_vendor_trust_profile():
     if not profile:
         return jsonify({"message": "Trust profile not found"}), 404
         
-    return jsonify(profile.to_dict()), 200
+    return jsonify({**profile.to_dict(), "score_max": 1000}), 200
 
 
 # ---------------------------------------------------------------------------

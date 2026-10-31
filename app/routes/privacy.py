@@ -474,6 +474,43 @@ def _verification(user):
             "checks": [{"check_type": ch.check_type, "result": ch.result,
                         "created_at": _iso(ch.created_at)} for ch in c.checks],
         } for c in cases],
+        **_verification_lifecycle(user),
+    }
+
+
+def _verification_lifecycle(user):
+    """Re-check state, expiry reminders and lifecycle events (2-3): the seller's
+    own rows only. Admin identity and internal admin notes are never included."""
+    from app.models.verification import (VerificationAuditEvent, VerificationReminder,
+                                         VerificationWatch)
+    from app.services.verification.rechecks import reason_text
+
+    watch = VerificationWatch.query.filter_by(user_id=user.id).first()
+    reminders = (VerificationReminder.query.filter_by(user_id=user.id)
+                 .order_by(VerificationReminder.id.asc()).all())
+    events = (VerificationAuditEvent.query.filter_by(user_id=user.id)
+              .order_by(VerificationAuditEvent.id.asc()).all())
+    safe_detail_keys = ("kind", "valid_until", "grace_until", "disputes", "window_days", "case_id")
+    return {
+        "recheck": {
+            "baseline_store_name": watch.baseline_store_name,
+            "baseline_payout_name": watch.baseline_payout_name,
+            "baseline_at": _iso(watch.baseline_at),
+            "reason_code": watch.recheck_reason_code,
+            "reason": reason_text(watch.recheck_reason_code),
+            "requested_at": _iso(watch.recheck_requested_at),
+            "reverify_by": _iso(watch.recheck_grace_until),
+            "paused_at": _iso(watch.recheck_paused_at),
+        } if watch else None,
+        "reminders": [{"kind": r.kind, "for_check_valid_until": r.cycle, "sent_at": _iso(r.sent_at)}
+                      for r in reminders],
+        "events": [{
+            "event": e.event,
+            "reason_code": e.reason_code,
+            "by": "Siiqo" if e.actor_type == "ADMIN" else e.actor_type.lower(),
+            "details": {k: v for k, v in (e.details or {}).items() if k in safe_detail_keys} or None,
+            "created_at": _iso(e.created_at),
+        } for e in events],
     }
 
 

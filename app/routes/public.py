@@ -120,6 +120,7 @@ def get_products():
             "storefront": sf.store_name if sf else None,
             "storefront_slug": sf.store_slug if sf else None,
             "trust_score": sf.vendor.trust_score_or_default if sf and sf.vendor else 500,
+            "trust_score_max": sf.vendor.trust_score_max if sf and sf.vendor else 1000,
             "trust_tier": sf.vendor.trust_tier_or_default if sf and sf.vendor else 'SILVER',
             # â”€â”€ vendor identity (required for chat / messaging) â”€â”€
             "vendor_id": sf.vendor_id if sf else None,
@@ -228,6 +229,7 @@ def get_product_details(product_id):
             "phone": p.storefront.phone,
             "social_links": p.storefront.social_links or {},
             "trust_score": p.storefront.vendor.trust_score_or_default if p.storefront.vendor else 500,
+            "trust_score_max": p.storefront.vendor.trust_score_max if p.storefront.vendor else 1000,
             "trust_tier": p.storefront.vendor.trust_tier_or_default if p.storefront.vendor else 'SILVER',
         } if p.storefront else None,
     }), 200
@@ -938,6 +940,11 @@ def get_vendor_trust_breakdown(vendor_id):
             {"label": "Community", "score": base, "max": 200},
         ]
 
+    # Trust Score v1 live: show its evidence components instead of the old pillars.
+    from app.services import trust_v1
+    if trust_v1.is_live():
+        pillars = trust_v1.pillars_for(trust_v1.latest_row(vendor_id))
+
     storefront = vendor.storefront if hasattr(vendor, 'storefront') else None
 
     # A typed NIN or CAC number proves nothing; only a completed v2 check
@@ -956,6 +963,7 @@ def get_vendor_trust_breakdown(vendor_id):
         "vendor_id": vendor_id,
         "tier": tier,
         "total_score": total_score,
+        "score_max": vendor.trust_score_max,
         "pillars": pillars,
         "verified": {
             "email": bool(vendor.is_verified),

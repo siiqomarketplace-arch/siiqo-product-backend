@@ -279,3 +279,13 @@ def run_daily_billing_tasks():
     for row in VerificationStatus.query.all():
         sync_verification_flag(row.user_id)
     db.session.commit()
+
+    # Verification expiry reminders, risk re-checks and pause notices (2-3).
+    # Same daily job and advisory lock; kept separate so a problem there never
+    # undoes the billing work committed above.
+    try:
+        from app.services.verification.rechecks import run_verification_upkeep
+        run_verification_upkeep(now)
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[BILLING] Verification upkeep failed: {e}")
