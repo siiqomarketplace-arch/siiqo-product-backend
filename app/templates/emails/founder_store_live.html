@@ -9,6 +9,7 @@
         <div style="background-color: #0b1b3b; padding: 30px; text-align: center;">
             <img src="{{ logo_url }}" alt="Siiqo" style="max-height: 48px; margin-bottom: 12px;">
             <h1 style="color: #E0921C; margin: 0; font-size: 26px; font-weight: 900;">You're One of Our Founding Vendors 🌟</h1>
+            {% include "emails/_brand_header.html" %}
         </div>
         <div style="padding: 32px; color: #333333; line-height: 1.7;">
             <p style="font-size: 16px;">Hi {{ first_name }},</p>
@@ -69,6 +70,7 @@
                 The Siiqo Team
             </p>
         </div>
+        {% include "emails/_brand_footer.html" %}
     </div>
 </body>
 </html>

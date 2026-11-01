@@ -31,6 +31,7 @@
         <img src="{{ logo_url }}" alt="Siiqo" height="36" style="display:inline-block;vertical-align:middle;border:0;">
         <span style="color:#ffffff;font-size:26px;font-weight:900;vertical-align:middle;margin-left:8px;">Siiqo</span>
       </a>
+      {% include "emails/_brand_header.html" %}
     </div>
     <div class="content">
       <h2 style="color:#0f172a;margin-top:0;font-size:24px;font-weight:800;">🎟️ Your Ticket is Ready!</h2>
@@ -102,6 +103,7 @@
       <p>Questions? Contact the event organizer or <a href="mailto:support@siiqo.com">support@siiqo.com</a></p>
       <p style="margin-top:12px;color:#cbd5e1;">© {{ year }} Siiqo. All rights reserved.</p>
     </div>
+    {% include "emails/_brand_footer.html" %}
   </div>
 </body>
 </html>

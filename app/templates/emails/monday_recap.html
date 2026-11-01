@@ -10,6 +10,7 @@
             <img src="{{ logo_url }}" alt="Siiqo" style="max-height: 48px; margin-bottom: 12px;">
             <h1 style="color: #ffffff; margin: 0; font-size: 24px;">Your Weekly Performance Recap 📊</h1>
             <p style="color: #cbd5e1; margin: 5px 0 0 0; font-size: 14px;">Week ending {{ date_str }}</p>
+            {% include "emails/_brand_header.html" %}
         </div>
         <div style="padding: 30px; color: #333333; line-height: 1.6;">
             <p style="font-size: 16px;">Good morning {{ first_name }},</p>
@@ -44,6 +45,7 @@
 
             <p style="margin-top: 30px; font-size: 14px; color: #64748b;">Have a productive week ahead!<br>The Siiqo Team</p>
         </div>
+        {% include "emails/_brand_footer.html" %}
     </div>
 </body>
 </html>
