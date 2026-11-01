@@ -398,6 +398,15 @@ def test_transcribe_provider_error(client, voice_on):
 
 def test_transcribe_rate_limited(client, voice_on, bot_env):
     bot_env.setenv("VOICE_RATE_PER_MINUTE", "2")
+    # Fix the clock mid-minute so the three calls can never straddle a window boundary.
+    from datetime import datetime as _dt, timezone as _tz
+    from app.services import bot_intent as _bi
+
+    class _Frozen(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt(2026, 11, 1, 12, 0, 30, tzinfo=_tz.utc)
+    bot_env.setattr(_bi, "datetime", _Frozen)
     for _ in range(2):
         assert call(client, "POST", f"{BASE}/transcribe", voice_body()).status_code == 200
     assert call(client, "POST", f"{BASE}/transcribe", voice_body()).status_code == 429
