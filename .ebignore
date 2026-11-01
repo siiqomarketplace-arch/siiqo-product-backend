@@ -8,3 +8,8 @@ __pycache__/
 .idea/
 .vscode/
 instance/
+.venv/
+.env.*
+*.db
+tests/
+.pytest_cache/
