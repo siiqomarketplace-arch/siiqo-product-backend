@@ -1078,7 +1078,7 @@ def _payout_vendor_via_daya(order, escrow):
     """
     from app.models.withdrawal import VendorBankAccount, VendorCryptoWallet, DayaPayment
     from app.models.communication import Notification
-    from app.routes.escrow import _payout_amount_or_hold, _dispute_blocks_payout
+    from app.routes.escrow import _payout_amount_or_hold, _dispute_blocks_payout, _verification_holds_payout
 
     if _dispute_blocks_payout(order, escrow):
         logger.warning("[DAYA PAYOUT] Refused for Order %s: dispute open", order.id)
@@ -1087,6 +1087,9 @@ def _payout_vendor_via_daya(order, escrow):
     # Convert or hold: naira at the payment-time rate, or held for support.
     net_amount_ngn = _payout_amount_or_hold(order, escrow)
     if net_amount_ngn is None:
+        return False
+    # Mandatory verification (D11): waits until the seller verifies; off by default.
+    if _verification_holds_payout(order, escrow, net_amount_ngn):
         return False
 
     dp = DayaPayment.query.filter_by(order_id=order.id).first()

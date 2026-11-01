@@ -264,6 +264,10 @@ def apply_identity_result(case: VerificationCase, result: IdentityResult) -> Ver
     # Trust Platform webhooks (business.verified / verification_lapsed); never raises.
     from app.services.platform_webhooks import notify_passport_change
     notify_passport_change(case.user_id, hint="verification")
+    if case.status == CaseStatus.PASSED:
+        # Mandatory verification (D11): send payouts / publish a store that waited.
+        from app.services.verification_requirement import notify_verified
+        notify_verified(case.user_id)
     return case
 
 

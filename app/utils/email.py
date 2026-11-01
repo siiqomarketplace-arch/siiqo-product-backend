@@ -127,10 +127,14 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
         logging.error(f"[EMAIL ERROR] Failed to send email to {to_email}. Error: {str(e)}\n{traceback.format_exc()}")
 
 
-def send_siiqo_email(to_email, subject, template_name, **context):
+def send_siiqo_email(to_email, subject, template_name, locale=None, **context):
     """
     Sends a branded Siiqo email via SMTP (AWS SES / any STARTTLS provider).
     Execution is offloaded to a background thread to prevent blocking HTTP requests.
+
+    locale (D19): the recipient's language, e.g. user_locale(user). Renders
+    templates/emails/<locale>/<name>.html when it exists and the locale is
+    enabled (LANGUAGES), else the English template. English is the default.
     
     Security: Validates email before sending to prevent SMTP injection attacks.
     """
@@ -152,9 +156,13 @@ def send_siiqo_email(to_email, subject, template_name, **context):
     except Exception:
         context['logo_url'] = "https://siiqo.com/images/Siiqo.png"  # Fallback
 
+    # Language (D19): English per missing template; templates may use {{ locale }}.
+    from app.i18n import email_template_names, resolve_locale
+    context.setdefault('locale', resolve_locale(locale))
+
     # Render the HTML template synchronously (requires request context)
     try:
-        html_content = render_template(f"emails/{template_name}.html", **context)
+        html_content = render_template(email_template_names(template_name, locale), **context)
     except Exception as tmpl_err:
         first_name = context.get('first_name', 'Vendor')
         html_content = f"<h1>Siiqo</h1><p>Hi {first_name},</p><p>{subject}</p>"

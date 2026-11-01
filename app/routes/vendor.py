@@ -461,6 +461,11 @@ def onboard_vendor():
     if Storefront.query.filter_by(store_slug=store_slug).first():
         return jsonify({"message": f"The store URL '{store_slug}' is already taken. Please choose another."}), 400
 
+    # Mandatory verification (D11): with VERIFICATION_REQUIRED_FOR at new_stores
+    # or all_sellers the store starts unpublished; none (default) changes nothing.
+    from app.services import verification_requirement
+    verify_step = verification_requirement.new_store_requirement(user)
+
     user.role = UserRole.VENDOR
 
     # Determine category & default template options
@@ -499,7 +504,7 @@ def onboard_vendor():
         template_options=default_template,
         # Auto-publish so vendor's store is immediately live upon onboarding.
         # Identity review / Verified badge is handled separately via KYC documents (NIN / CAC) or Pro Verified subscription.
-        is_published=True,
+        is_published=verify_step is None,
         is_verified=False,
     )
 
@@ -522,6 +527,9 @@ def onboard_vendor():
             return jsonify({"message": str(e)}), 400
 
     db.session.add(storefront)
+    db.session.flush()
+    if verify_step is not None:
+        verification_requirement.record_new_store_hold(user.id, storefront.id)
     db.session.commit()
 
     # ── Paystack subaccount (for Split Payments on digital/service checkouts) ──
@@ -552,6 +560,14 @@ def onboard_vendor():
     except Exception:
         pass
 
+    if verify_step is not None:
+        return jsonify({
+            "message": "Your store is saved. Verify your identity to publish it and start selling.",
+            "store_name": storefront.store_name,
+            "store_slug": storefront.store_slug,
+            "status": "verification_required",
+            "verification_required": verify_step,
+        }), 201
     return jsonify({
         "message": "Vendor onboarding complete! Your storefront is now live.",
         "store_name": storefront.store_name,
@@ -619,7 +635,15 @@ def update_settings():
 
     # Publish flag — vendor can set to True, but it only goes live after admin approval
     if 'is_published' in data:
-        sf.is_published = str(data['is_published']).lower() in ('true', '1', 'yes')
+        want_published = str(data['is_published']).lower() in ('true', '1', 'yes')
+        if want_published and not sf.is_published:
+            # Mandatory verification (D11); never blocks with the flag at none.
+            from app.services import verification_requirement
+            blocked = verification_requirement.publish_blocked(sf.vendor_id, sf)
+            if blocked is not None:
+                db.session.rollback()
+                return jsonify({"message": blocked["message"], **blocked}), 403
+        sf.is_published = want_published
 
     # Store editor / AI refresh saves keep a revision of the current design
     # first, so the seller can undo (app/services/store_editor.py).

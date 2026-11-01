@@ -115,6 +115,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_recovery_hashes JSON",
                 "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_challenge_nonce VARCHAR(64)",
                 "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_challenge_failures INTEGER DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_locale VARCHAR(8)",
                 # ── Product view tracking ────────────────────────────────────────
                 "ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count INTEGER DEFAULT 0",
                 # ── Payment link product type, digital file & currency ──────────
@@ -637,6 +638,15 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(v1_bp, url_prefix='/v1')
     from app.routes.platform import platform_bp
     app.register_blueprint(platform_bp, url_prefix='/api/platform')
+    # Phase 4: Evidence API consent (seller) and controls (superadmin)
+    from app.routes.partner_evidence import evidence_admin_bp, trust_partners_bp
+    app.register_blueprint(trust_partners_bp, url_prefix='/api/vendor/trust-partners')
+    app.register_blueprint(evidence_admin_bp, url_prefix='/api/admin/evidence-partners')
+    # Phase 4: mandatory verification flag (D11, VERIFICATION_REQUIRED_FOR)
+    from app.routes.verification_requirement import (verification_requirement_admin_bp,
+                                                     verification_requirement_bp)
+    app.register_blueprint(verification_requirement_bp, url_prefix='/api/vendor/verification-requirement')
+    app.register_blueprint(verification_requirement_admin_bp, url_prefix='/api/admin/verification-requirement')
     # Phase 3: business directory and claim flow
     from app.routes.directory import directory_admin_bp, directory_bp
     app.register_blueprint(directory_bp, url_prefix='/api/directory')
@@ -645,9 +655,18 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.search import market_bp, search_bp
     app.register_blueprint(search_bp, url_prefix='/api/search')
     app.register_blueprint(market_bp, url_prefix='/api/market')
+    # Phase 4: account language setting (D19) and optional address verification (V5)
+    from app.routes.account import account_bp
+    app.register_blueprint(account_bp, url_prefix='/api/account')
+    from app.routes.address_verification import address_verification_bp
+    app.register_blueprint(address_verification_bp, url_prefix='/api/verification/address')
     # Phase T/W: signed internal API for SiiqoBot (sessions, intent router, voice notes)
     from app.routes.bot_internal import bot_internal_bp
     app.register_blueprint(bot_internal_bp, url_prefix='/api/internal/bot')
+    # Phase 4: store concierge (buyer chat, opt-in per store) and seller copilot (read-only)
+    from app.routes.assistant import concierge_bp, copilot_bp
+    app.register_blueprint(concierge_bp, url_prefix='/api/concierge')
+    app.register_blueprint(copilot_bp, url_prefix='/api/copilot')
 
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
@@ -857,6 +876,34 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as platform_err:
                 logger.warning(f"Trust Platform task registration skipped: {platform_err}")
+
+            # Mandatory verification (D11): start the grace clock for a newly set
+            # VERIFICATION_REQUIRED_FOR, release holds of sellers who verified. Hourly.
+            try:
+                from app.services.verification_requirement import run_verification_requirement_sweep
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_verification_requirement_sweep),
+                    trigger=IntervalTrigger(hours=1),
+                    id='verification_requirement_sweep',
+                    name='Mandatory verification: grace clock and release of held payouts',
+                    replace_existing=True,
+                )
+            except Exception as verify_req_err:
+                logger.warning(f"Verification requirement task registration skipped: {verify_req_err}")
+
+            # Address verification (V5): read results of pending checks. Hourly; no-op while
+            # ADDRESS_VERIFICATION_ENABLED is off.
+            try:
+                from app.services.address_verification.service import refresh_pending as _refresh_addresses
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, _refresh_addresses),
+                    trigger=IntervalTrigger(hours=1),
+                    id='address_verification_refresh',
+                    name='Address verification: read pending results',
+                    replace_existing=True,
+                )
+            except Exception as address_err:
+                logger.warning(f"Address verification task registration skipped: {address_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")

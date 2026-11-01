@@ -70,6 +70,16 @@ Anti-gaming rules
                  not tiny, not in a burst) from 3 distinct buyers: tier NEW,
                  shown as "New seller".
 
+Partner evidence (Evidence API, PARTNER_RULES)
+----------------------------------------------
+A separate component from other platforms' signed reports, counted only when
+the seller accepted the platform, the platform is not revoked and the key is
+not the seller's own. Blended as (1 - w) × first-party + w × partner, with w
+at most 0.10 and one platform giving at most half of it. It applies only
+once the seller meets the minimum history on Siiqo, so partner reports can
+never turn a NEW seller into a scored one, and the dispute caps still apply
+after it. With no counted partner evidence the score is unchanged.
+
 Changing any weight or rule means a new VERSION; shadow rows keep the version
 that produced them.
 
@@ -139,6 +149,24 @@ RULES = {
     "min_distinct_buyers": 3,
 }
 
+# Partner evidence (Evidence API, app/services/partner_evidence.py): a separate
+# component with a small weight, blended in only when the seller has accepted
+# the platform and has their own minimum history. Never raises a NEW seller,
+# never lifts a dispute cap, never counts a key the seller owns.
+PARTNER_RULES = {
+    "max_weight": 0.10,             # at most 10 of 100 points ever come from partners
+    "full_weight_units": 20.0,      # weighted partner orders needed for the full 0.10
+    "order_weight": 0.5,            # one partner order weighs half a Siiqo order
+    "per_partner_cap_units": 10.0,  # one platform adds at most 10 weighted orders
+    "prior_mean": 0.75,             # same Bayesian prior as outcomes
+    "prior_weight": 5.0,
+    "refund_bad_units": 1.0,
+    "seller_fault_dispute_bad_units": 5.0,
+    "on_time_share": 0.15,          # share of the partner component from on-time reports
+    "on_time_prior_mean": 0.5,
+    "on_time_prior_weight": 3.0,
+}
+
 # Lowest score for each tier, highest first. Below the minimum history: NEW.
 TIERS = [(90, "PLATINUM"), (75, "GOLD"), (55, "SILVER"), (0, "BRONZE")]
 NEW_TIER = "NEW"
@@ -179,8 +207,70 @@ def tier_for(score):
 
 # ── pure scoring ───────────────────────────────────────────────────────────
 
-def score_orders(orders, now=None):
+def score_partner(facts, now=None):
+    """The partner component from partner order facts (already filtered for
+    consent, revocation and self-dealing). Pure. Returns the component (0..1),
+    the weight it gets (0..PARTNER_RULES["max_weight"]) and per-platform units.
+
+    Each partner order weighs recency × size × order_weight × the platform's
+    throttle factor × 1/k for the buyer's k-th order on that platform. One
+    platform's weighted orders are scaled down to per_partner_cap_units, so
+    a single platform can give at most half the partner weight."""
+    now = now or _now()
+    R, P = RULES, PARTNER_RULES
+    by_client = defaultdict(list)
+    for f in facts or []:
+        if f.get("outcome") in ("good", "bad") and (f.get("factor") or 0) > 0:
+            by_client[f["client_id"]].append(f)
+    good = bad = on_time_w = late_w = units_total = 0.0
+    per_partner = {}
+    for client_id, items in by_client.items():
+        per_buyer = defaultdict(int)
+        g = b = ot = lt = units = 0.0
+        for f in sorted(items, key=lambda x: x["time"]):
+            per_buyer[f["buyer_key"]] += 1
+            age_days = max(0.0, (now - f["time"]).total_seconds() / 86400.0)
+            recency = 0.5 ** (age_days / R["half_life_days"])
+            amount = f.get("amount_ngn")
+            size = 1.0 if amount is None else min(R["size_max"], 1.0 + math.log1p(max(0.0, amount) / R["size_reference_ngn"]))
+            if amount is not None and amount < R["tiny_order_ngn"]:
+                size *= R["tiny_order_weight"]
+            w = recency * size * P["order_weight"] * float(f["factor"]) / per_buyer[f["buyer_key"]]
+            units += w
+            if f["outcome"] == "good":
+                g += w
+            else:
+                b += w * (P["seller_fault_dispute_bad_units"] if f.get("seller_fault") else P["refund_bad_units"])
+            if f.get("delivered_on_time") is True:
+                ot += w
+            elif f.get("delivered_on_time") is False:
+                lt += w
+        scale = min(1.0, P["per_partner_cap_units"] / units) if units > 0 else 0.0
+        per_partner[str(client_id)] = {"orders": len(items), "units": round(units, 4),
+                                       "capped": scale < 1.0, "units_counted": round(units * scale, 4)}
+        good += g * scale
+        bad += b * scale
+        on_time_w += ot * scale
+        late_w += lt * scale
+        units_total += units * scale
+    if units_total <= 0:
+        return {"applied": False, "component": None, "weight": 0.0, "units": 0.0, "per_partner": per_partner}
+    component = (good + P["prior_mean"] * P["prior_weight"]) / (good + bad + P["prior_weight"])
+    if on_time_w + late_w > 0:
+        on_time = (on_time_w + P["on_time_prior_mean"] * P["on_time_prior_weight"]) / \
+                  (on_time_w + late_w + P["on_time_prior_weight"])
+        component = (1 - P["on_time_share"]) * component + P["on_time_share"] * on_time
+    weight = P["max_weight"] * min(1.0, units_total / P["full_weight_units"])
+    return {"applied": True, "component": round(component, 4), "weight": round(weight, 4),
+            "units": round(units_total, 4), "per_partner": per_partner}
+
+
+def score_orders(orders, now=None, partner_facts=None, partner_excluded=None):
     """Score a seller from a list of order facts. Pure: no database access.
+
+    `partner_facts` (optional) are Evidence API order facts; they only change
+    the result when the seller meets the minimum history on their own. With
+    none, the result is exactly the first-party score.
 
     Each fact is a dict:
         order_id, buyer_key, linked (bool), buyer_new (bool), time (aware dt),
@@ -304,7 +394,16 @@ def score_orders(orders, now=None):
     distinct_buyers = len({o["buyer_key"] for o in qualifying})
     enough = len(qualifying) >= R["min_qualifying_sales"] and distinct_buyers >= R["min_distinct_buyers"]
     raw = 100.0 * sum(WEIGHTS[c] * components[c] for c in WEIGHTS)
-    score = int(round(raw)) if enough else None
+    partner = score_partner(partner_facts, now=now) if partner_facts else \
+        {"applied": False, "component": None, "weight": 0.0, "units": 0.0, "per_partner": {}}
+    blended = raw
+    if partner["applied"] and enough:
+        blended = (1 - partner["weight"]) * raw + partner["weight"] * 100.0 * partner["component"]
+    else:
+        partner["applied"] = False
+    partner["blended_score"] = round(blended, 2)
+    partner["excluded"] = dict(partner_excluded or {})
+    score = int(round(blended)) if enough else None
     tier = tier_for(score)
 
     dispute_rate = round(100.0 * window_fault_w / window_w, 6) if window_w else None
@@ -358,6 +457,7 @@ def score_orders(orders, now=None):
         },
         "reasons": _reasons(components, counts, enough),
         "evidence_ids": sorted(set(evidence_ids)),
+        "partner": partner,
     }
 
 
@@ -538,7 +638,10 @@ def gather_orders(vendor_id):
 
 
 def compute(vendor_id, now=None):
-    return score_orders(gather_orders(vendor_id), now=now)
+    from app.services.partner_evidence import gather_partner_facts
+    partner_facts, excluded = gather_partner_facts(vendor_id)
+    return score_orders(gather_orders(vendor_id), now=now, partner_facts=partner_facts,
+                        partner_excluded=excluded)
 
 
 # ── old score, as buyers see it today ──────────────────────────────────────

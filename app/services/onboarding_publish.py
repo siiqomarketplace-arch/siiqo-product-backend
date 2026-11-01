@@ -251,8 +251,20 @@ def publish(session: OnboardingSession, user: User, body: dict) -> tuple[dict, b
             return session.publish_result, False
         raise PublishError(409, "BUILD_NOT_READY", "Your store draft is not ready yet.", status=session.status)
 
+    # Mandatory verification (D11): with VERIFICATION_REQUIRED_FOR at
+    # new_stores or all_sellers, the store is created unpublished and the
+    # seller sees one step. None (the default) changes nothing.
+    from app.services import verification_requirement
+    requirement = verification_requirement.new_store_requirement(user)
     try:
         result = _create_everything(session, user, answers, store_name, slug, bank)
+        if requirement is not None:
+            # A new dict (not a mutation) so the stored result is updated too.
+            result = {**result, "verification_required": requirement}
+            session.publish_result = result
+            storefront = db.session.get(Storefront, result["storefront_id"])
+            storefront.is_published = False
+            verification_requirement.record_new_store_hold(user.id, storefront.id)
         db.session.commit()
     except IntegrityError as exc:
         db.session.rollback()
@@ -266,7 +278,8 @@ def publish(session: OnboardingSession, user: User, body: dict) -> tuple[dict, b
         raise
 
     _attach_paystack_subaccount(session.published_storefront_id, user.id)
-    _send_store_live_email(user, result)
+    if requirement is None:
+        _send_store_live_email(user, result)
     return result, True
 
 

@@ -103,6 +103,11 @@ def build_passport(sf):
         "verified": bool(flags["identity_verified"] or legacy),
         "business_registered": bool(flags["business_registered"]),
     }
+    # Optional address check (V5): a separate claim, present only when true and
+    # current. It is not part of the score.
+    from app.services.address_verification.service import has_public_claim
+    if has_public_claim(sf.vendor_id):
+        claims["address_verified"] = True
     if s is None or s.show_completed_orders:
         claims["completed_orders"] = done
     if (s is None or s.show_member_since) and vendor.created_at:

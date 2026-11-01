@@ -144,3 +144,70 @@ class OwnershipClaim(db.Model):
     error_count = db.Column(db.Integer, nullable=False, default=0)
     identifier_added = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+
+
+# ── Evidence API (Phase 4, docs/PLATFORM_API_V1.md "Evidence API") ─────────
+
+class PartnerEvidenceSecret(db.Model):
+    """The secret a platform signs Evidence API requests with (one per API
+    key). Stored encrypted, shown once; creating a new one replaces the old."""
+    __tablename__ = 'partner_evidence_secrets'
+
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, nullable=False, unique=True, index=True)
+    secret_enc = db.Column(db.Text, nullable=False)
+    secret_prefix = db.Column(db.String(16), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+
+
+class PartnerEvidenceReceipt(db.Model):
+    """One accepted partner event. The unique (client_id, event_id) makes a
+    resent event harmless; body_hash tells a resend from a different event
+    reusing the same id."""
+    __tablename__ = 'partner_evidence_receipts'
+    __table_args__ = (db.UniqueConstraint('client_id', 'event_id', name='uq_partner_evidence_event'),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, nullable=False, index=True)
+    event_id = db.Column(db.String(100), nullable=False)
+    vendor_id = db.Column(db.Integer, nullable=False, index=True)
+    evidence_id = db.Column(db.Integer, nullable=True)
+    event_type = db.Column(db.String(40), nullable=False)
+    body_hash = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+
+
+class PartnerSellerLink(db.Model):
+    """A seller's consent for one platform to report to their Passport.
+    Created as 'pending' with the first report; partner evidence counts only
+    while the seller has it 'accepted'."""
+    __tablename__ = 'partner_seller_links'
+    __table_args__ = (db.UniqueConstraint('vendor_id', 'client_id', name='uq_partner_seller_link'),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    vendor_id = db.Column(db.Integer, nullable=False, index=True)
+    client_id = db.Column(db.Integer, nullable=False, index=True)
+    # pending | accepted | revoked
+    status = db.Column(db.String(16), nullable=False, default='pending', index=True)
+    disputed = db.Column(db.Boolean, nullable=False, default=False)   # seller said the reports are wrong
+    report_count = db.Column(db.Integer, nullable=False, default=0)
+    first_report_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_report_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    accepted_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    revoked_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+
+
+class PartnerEvidenceControl(db.Model):
+    """Superadmin control over one reporting platform (audit-logged):
+    active (default when no row), throttled (its evidence weighs `factor`
+    of normal) or revoked (its evidence stops counting; new reports refused)."""
+    __tablename__ = 'partner_evidence_controls'
+
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, nullable=False, unique=True, index=True)
+    status = db.Column(db.String(16), nullable=False, default='active')
+    factor = db.Column(db.Numeric(4, 3), nullable=True)
+    reason = db.Column(db.String(255), nullable=True)
+    set_by_admin_id = db.Column(db.Integer, nullable=True)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)

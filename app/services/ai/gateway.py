@@ -66,7 +66,11 @@ MODELS = {
 # "default" form must be paired with exactly this beta header - the array
 # form uses a different one and mixing them is a 400.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-SERVER_FALLBACK_MODELS = frozenset({"claude-opus-5-5"})
+SERVER_FALLBACK_MODELS = frozenset({"claude-opus-5-5", "claude-sonnet-5-5"})
+
+# Models a prompt may opt into through its "model_env" override (Phase 4
+# seller copilot: Haiku by default, Sonnet when evals show it is needed).
+OVERRIDE_MODELS = frozenset({"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"})
 
 # ── PlatformSetting keys (runtime overrides, no deploy needed) ──────────────
 SETTING_ENABLED = "ai_enabled"                    # "false"/"0"/"off" turns all AI off
@@ -201,6 +205,17 @@ def global_cost_today_usd() -> float:
     return int(total or 0) / 1_000_000
 
 
+def own_cap_actions() -> frozenset:
+    """Actions whose prompt sets ``own_monthly_cap``: the feature enforces its
+    own monthly cap (store concierge, seller copilot), so their rows neither
+    count towards nor are blocked by the seller's daily action cap. A buyer
+    chatting on a store must never use up the seller's own daily AI calls."""
+    return frozenset(
+        action for action, versions in prompts.load_all().items()
+        if any(spec.extra.get("own_monthly_cap") for spec in versions.values())
+    )
+
+
 def seller_actions_today(seller_id: int, action: str | None = None) -> int:
     q = AIUsage.query.filter(
         AIUsage.seller_id == seller_id,
@@ -209,7 +224,25 @@ def seller_actions_today(seller_id: int, action: str | None = None) -> int:
     )
     if action:
         q = q.filter(AIUsage.action == action)
+    else:
+        excluded = own_cap_actions()
+        if excluded:
+            q = q.filter(AIUsage.action.notin_(excluded))
     return q.count()
+
+
+def model_for(spec) -> str:
+    """The model for a prompt: by kind, unless the prompt names an env
+    override (``model_env``) and that env var holds an allowed model id."""
+    model = MODELS[spec.kind]
+    env_name = spec.extra.get("model_env")
+    if env_name:
+        wanted = (os.environ.get(env_name) or "").strip()
+        if wanted:
+            if wanted in OVERRIDE_MODELS:
+                return wanted
+            log.warning("AI gateway: %s=%r is not an allowed model, using %s", env_name, wanted, model)
+    return model
 
 
 def _record(**fields) -> int | None:
@@ -411,6 +444,65 @@ def _schema_errors(value, schema: dict, path: str = "$") -> list[str]:
     return errors
 
 
+# ── Shared steps (run and converse) ─────────────────────────────────────────
+def _resolve(action: str):
+    try:
+        return prompts.get(action)
+    except KeyError as exc:
+        raise AIRequestError(str(exc), reason="unknown_action") from exc
+
+
+def _enforce_kill_switch(spec, config: GatewayConfig) -> None:
+    """Fail closed if the settings table cannot be read."""
+    try:
+        enabled, why = kill_switch_state(spec.action, config)
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        raise AIUnavailable("could not read AI settings", reason="settings_unreadable") from exc
+    if not enabled:
+        raise AIDisabled(f"AI is disabled: {why}", reason=why)
+
+
+def _enforce_caps(row: dict, seller_id: int | None, spec, config: GatewayConfig) -> None:
+    """Global cost cap and per-seller daily caps. Fails closed if metering
+    cannot be read. Actions with their own monthly cap skip the seller's
+    total daily cap (the feature enforces its own)."""
+    try:
+        spent = global_cost_today_usd()
+        if config.daily_cost_cap_usd > 0 and spent >= config.daily_cost_cap_usd:
+            _record(**row, outcome="cap_exceeded", error_type="global_cost_cap")
+            raise AICapExceeded(
+                f"global daily AI cost cap reached (${spent:.2f} of ${config.daily_cost_cap_usd:.2f})",
+                reason="global_cost_cap",
+            )
+        if seller_id is not None:
+            if spec.action not in own_cap_actions() and \
+                    seller_actions_today(seller_id) >= config.seller_daily_action_cap:
+                _record(**row, outcome="cap_exceeded", error_type="seller_daily_cap")
+                raise AICapExceeded("seller daily AI action cap reached", reason="seller_daily_cap")
+            if spec.seller_daily_cap is not None and \
+                    seller_actions_today(seller_id, spec.action) >= spec.seller_daily_cap:
+                _record(**row, outcome="cap_exceeded", error_type="seller_action_cap")
+                raise AICapExceeded(
+                    f"seller daily cap for {spec.action!r} reached", reason="seller_action_cap"
+                )
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        raise AIUnavailable("could not read AI usage", reason="metering_unreadable") from exc
+
+
+def _client_for(client, row: dict, config: GatewayConfig, timeout: float | None):
+    if client is None:
+        try:
+            client = _default_client(config)
+        except AIUnavailable as exc:
+            _record(**row, outcome="unavailable", error_type=exc.reason)
+            raise
+    if timeout is not None and hasattr(client, "with_options"):
+        client = client.with_options(timeout=timeout, max_retries=0)
+    return client
+
+
 # ── Entry point ─────────────────────────────────────────────────────────────
 def run(
     action: str,
@@ -446,21 +538,12 @@ def run(
     config = GatewayConfig.from_env()
 
     # 1. Prompt
-    try:
-        spec = prompts.get(action)
-    except KeyError as exc:
-        raise AIRequestError(str(exc), reason="unknown_action") from exc
+    spec = _resolve(action)
 
     # 2. Kill switch (fail closed if the settings table cannot be read)
-    try:
-        enabled, why = kill_switch_state(spec.action, config)
-    except SQLAlchemyError as exc:
-        db.session.rollback()
-        raise AIUnavailable("could not read AI settings", reason="settings_unreadable") from exc
-    if not enabled:
-        raise AIDisabled(f"AI is disabled: {why}", reason=why)
+    _enforce_kill_switch(spec, config)
 
-    model = MODELS[spec.kind]
+    model = model_for(spec)
     output_schema = schema if schema is not None else spec.output_schema
     row = {
         "action": spec.action,
@@ -482,38 +565,10 @@ def run(
         )
 
     # 4. Caps (fail closed if metering cannot be read)
-    try:
-        spent = global_cost_today_usd()
-        if config.daily_cost_cap_usd > 0 and spent >= config.daily_cost_cap_usd:
-            _record(**row, outcome="cap_exceeded", error_type="global_cost_cap")
-            raise AICapExceeded(
-                f"global daily AI cost cap reached (${spent:.2f} of ${config.daily_cost_cap_usd:.2f})",
-                reason="global_cost_cap",
-            )
-        if seller_id is not None:
-            if seller_actions_today(seller_id) >= config.seller_daily_action_cap:
-                _record(**row, outcome="cap_exceeded", error_type="seller_daily_cap")
-                raise AICapExceeded("seller daily AI action cap reached", reason="seller_daily_cap")
-            if spec.seller_daily_cap is not None and \
-                    seller_actions_today(seller_id, spec.action) >= spec.seller_daily_cap:
-                _record(**row, outcome="cap_exceeded", error_type="seller_action_cap")
-                raise AICapExceeded(
-                    f"seller daily cap for {spec.action!r} reached", reason="seller_action_cap"
-                )
-    except SQLAlchemyError as exc:
-        db.session.rollback()
-        raise AIUnavailable("could not read AI usage", reason="metering_unreadable") from exc
+    _enforce_caps(row, seller_id, spec, config)
 
     # 5. Client
-    if client is None:
-        try:
-            client = _default_client(config)
-        except AIUnavailable as exc:
-            _record(**row, outcome="unavailable", error_type=exc.reason)
-            raise
-
-    if timeout is not None and hasattr(client, "with_options"):
-        client = client.with_options(timeout=timeout, max_retries=0)
+    client = _client_for(client, row, config, timeout)
 
     # 6. Request. The system prompt is stable and carries the cache marker;
     #    volatile inputs live only in the user turn. Thinking is always on for
@@ -606,4 +661,211 @@ def run(
         pii_redactions=redactions,
         request_id=meter["request_id"],
         usage_id=usage_id,
+    )
+
+
+# ── Tool-use turns (Phase 4 seller copilot) ─────────────────────────────────
+# The copilot is the only agent loop in Siiqo. The loop itself lives in the
+# feature (app/services/copilot.py) so the tools, the step cap and the actions
+# stay in code we test; every model call inside it comes through here, so the
+# kill switch, PII stripping, caps and metering apply to each step.
+
+REPLAY_BLOCK_TYPES = ("text", "thinking", "redacted_thinking", "tool_use")
+
+
+def _block_dict(block) -> dict:
+    """A response content block as a plain dict that can be sent back."""
+    if isinstance(block, dict):
+        return dict(block)
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json", exclude_none=True)
+        except TypeError:
+            return dump()
+    out = {}
+    for name in ("type", "text", "id", "name", "input", "thinking", "signature", "data"):
+        value = getattr(block, name, None)
+        if value is not None:
+            out[name] = value
+    return out
+
+
+def _strip_message_content(content) -> tuple[Any, int]:
+    """Strip personal data from user-side content: plain strings, text blocks
+    and tool_result content. Ids (tool_use_id) are never touched, or the
+    tool_use / tool_result pairing would break."""
+    if isinstance(content, str):
+        return pii.strip_text(content)
+    if not isinstance(content, list):
+        return content, 0
+    out, total = [], 0
+    for block in content:
+        if not isinstance(block, dict):
+            out.append(block)
+            continue
+        b = dict(block)
+        if b.get("type") == "text" and isinstance(b.get("text"), str):
+            b["text"], n = pii.strip_text(b["text"])
+            total += n
+        elif b.get("type") == "tool_result":
+            inner = b.get("content")
+            if isinstance(inner, str):
+                b["content"], n = pii.strip_text(inner)
+                total += n
+            elif isinstance(inner, list):
+                b["content"], n = _strip_message_content(inner)
+                total += n
+        out.append(b)
+    return out, total
+
+
+def strip_messages(messages: list[dict]) -> tuple[list[dict], int]:
+    """User turns are stripped; assistant turns are the model's own output and
+    go back unchanged (thinking blocks must not be edited)."""
+    clean, total = [], 0
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
+            raise AIRequestError("messages must be user/assistant dicts", reason="bad_inputs")
+        if msg["role"] == "user":
+            content, n = _strip_message_content(msg.get("content"))
+            total += n
+            clean.append({"role": "user", "content": content})
+        else:
+            clean.append({"role": "assistant", "content": msg.get("content")})
+    return clean, total
+
+
+def render_user(action: str, inputs: dict) -> str:
+    """The prompt's user turn for ``inputs`` (PII is stripped later, in converse)."""
+    spec = _resolve(action)
+    return spec.render_user(json.dumps(inputs, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def converse(
+    action: str,
+    seller_id: int | None,
+    messages: list[dict],
+    *,
+    tools: list[dict],
+    schema: dict | None = None,
+    client=None,
+    timeout: float | None = None,
+) -> AIResult:
+    """
+    One model call inside a caller-driven tool-use loop.
+
+    ``messages`` is the whole conversation so far (Messages API shape) and
+    ``tools`` the caller's tool definitions. Returns an AIResult whose
+    ``meta["content"]`` holds the response blocks (dicts, ready to append as
+    the assistant turn) and ``meta["tool_uses"]`` the requested tool calls
+    when ``stop_reason == "tool_use"``. On ``end_turn`` with a schema,
+    ``data`` holds the validated final JSON. Raises the same errors as ``run``.
+    """
+    config = GatewayConfig.from_env()
+    spec = _resolve(action)
+    _enforce_kill_switch(spec, config)
+
+    model = model_for(spec)
+    output_schema = schema if schema is not None else spec.output_schema
+    row = {"action": spec.action, "prompt_version": spec.version, "model": model, "seller_id": seller_id}
+
+    if not isinstance(messages, list) or not messages:
+        raise AIRequestError("messages must be a non-empty list", reason="bad_inputs")
+    if not isinstance(tools, list) or not all(
+        isinstance(t, dict) and t.get("name") and isinstance(t.get("input_schema"), dict) for t in tools
+    ):
+        raise AIRequestError("tools must be named dicts with an input_schema", reason="bad_inputs")
+
+    clean_messages, redactions = strip_messages(messages)
+    row["pii_redactions"] = redactions
+    size = len(json.dumps(clean_messages, ensure_ascii=False, default=str))
+    limit = max(config.max_input_chars, int(spec.extra.get("max_input_chars") or 0))
+    if size > limit:
+        raise AIRequestError(f"conversation too large ({size} > {limit} chars)", reason="input_too_large")
+
+    _enforce_caps(row, seller_id, spec, config)
+    client = _client_for(client, row, config, timeout)
+
+    output_config: dict = {"effort": spec.effort}
+    if output_schema:
+        output_config["format"] = {"type": "json_schema", "schema": output_schema}
+    request = {
+        "model": model,
+        "max_tokens": spec.max_tokens,
+        # Tools render before system, so the system breakpoint caches both.
+        "system": [{"type": "text", "text": spec.system, "cache_control": {"type": "ephemeral"}}],
+        "tools": tools,
+        "tool_choice": {"type": "auto"},
+        "messages": clean_messages,
+        "output_config": output_config,
+    }
+
+    started = time.monotonic()
+    try:
+        response = _call_claude(client, model=model, request=request)
+    except AIError as exc:
+        _record(**row, outcome="provider_error", error_type=exc.reason,
+                latency_ms=int((time.monotonic() - started) * 1000))
+        raise
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    totals = _usage_totals(response, model)
+    stop_reason = _get(response, "stop_reason")
+    meter = {
+        **row, **totals,
+        "served_model": _get(response, "model") or model,
+        "latency_ms": latency_ms,
+        "stop_reason": stop_reason,
+        "fell_back": _fell_back(response),
+        "request_id": _get(response, "_request_id") or _get(response, "id"),
+    }
+    if stop_reason == "refusal":
+        category = _get(_get(response, "stop_details"), "category")
+        _record(**meter, outcome="refused", error_type=category or "refusal")
+        raise AIRefused(f"Claude declined the {spec.action!r} request", category=category)
+    if stop_reason == "max_tokens":
+        _record(**meter, outcome="truncated", error_type="max_tokens")
+        raise AIInvalidOutput("response hit max_tokens before finishing", reason="max_tokens")
+
+    blocks = [_block_dict(b) for b in (_get(response, "content") or [])]
+    replay = [b for b in blocks if b.get("type") in REPLAY_BLOCK_TYPES]
+    tool_uses = [b for b in blocks if b.get("type") == "tool_use"]
+    texts = [b.get("text") or "" for b in blocks if b.get("type") == "text"]
+    text = "".join(texts)
+    data = None
+
+    if stop_reason == "tool_use":
+        if not tool_uses:
+            _record(**meter, outcome="invalid_output", error_type="tool_use_without_call")
+            raise AIInvalidOutput("tool_use stop without a tool call", reason="tool_use_without_call")
+    elif output_schema:
+        for candidate in [*reversed(texts), text]:
+            try:
+                data = json.loads(candidate)
+                break
+            except (json.JSONDecodeError, TypeError):
+                data = None
+        problems = ["no JSON object"] if data is None else _schema_errors(data, output_schema)
+        if problems:
+            _record(**meter, outcome="invalid_output", error_type="schema_mismatch")
+            raise AIInvalidOutput(
+                f"output did not match the schema: {'; '.join(problems[:5])}", reason="schema_mismatch"
+            )
+    elif not text.strip():
+        _record(**meter, outcome="invalid_output", error_type="empty")
+        raise AIInvalidOutput("empty response", reason="empty")
+
+    usage_id = _record(**meter, outcome="ok")
+    return AIResult(
+        action=spec.action, prompt_version=spec.version, model=model,
+        served_model=meter["served_model"], text=text, data=data, stop_reason=stop_reason,
+        fell_back=meter["fell_back"],
+        input_tokens=totals["input_tokens"], output_tokens=totals["output_tokens"],
+        cache_creation_input_tokens=totals["cache_creation_input_tokens"],
+        cache_read_input_tokens=totals["cache_read_input_tokens"],
+        estimated_cost_usd=totals["estimated_cost_microusd"] / 1_000_000,
+        latency_ms=latency_ms, pii_redactions=redactions,
+        request_id=meter["request_id"], usage_id=usage_id,
+        meta={"content": replay, "tool_uses": tool_uses},
     )

@@ -26,6 +26,8 @@ class Price:
 PRICES: dict[str, Price] = {
     "claude-opus-5-5": Price(input=4.00, output=20.00, cache_read=0.20, cache_write=5.00),
     "claude-haiku-5-5": Price(input=0.10, output=0.50, cache_read=0.01, cache_write=0.125),
+    # Optional seller-copilot tier (AI_COPILOT_MODEL); cache reads $0.20/MTok.
+    "claude-sonnet-5-5": Price(input=2.00, output=10.00, cache_read=0.20, cache_write=2.50),
     # Possible server-side fallback targets for Opus 5.5 refusals.
     "claude-opus-5": Price(input=5.00, output=25.00, cache_read=0.50, cache_write=6.25),
     "claude-opus-4-8": Price(input=5.00, output=25.00, cache_read=0.50, cache_write=6.25),

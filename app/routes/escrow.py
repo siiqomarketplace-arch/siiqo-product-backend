@@ -42,6 +42,16 @@ def _dispute_blocks_payout(order, escrow) -> bool:
     return payout_blocked(order, escrow)
 
 
+def _verification_holds_payout(order, escrow, net_amount) -> bool:
+    """Mandatory verification (D11, VERIFICATION_REQUIRED_FOR): True when this
+    payout must wait until the seller verifies. It is recorded as held and kept
+    out of the withdrawable balance, then sent once they verify
+    (app/services/verification_requirement.py). Always False with the flag at
+    its default, none."""
+    from app.services.verification_requirement import hold_payout
+    return hold_payout(order, escrow, net_amount)
+
+
 def _active_provider() -> str:
     """Return the currently-configured payment provider name."""
     return os.environ.get("ACTIVE_ESCROW_PROVIDER", "paystack").lower()
@@ -1010,6 +1020,8 @@ def _paystack_payout_vendor(order, escrow):
     net_amount = _payout_amount_or_hold(order, escrow)
     if net_amount is None:
         return False
+    if _verification_holds_payout(order, escrow, net_amount):
+        return False
     
     bank_acc = VendorBankAccount.query.filter_by(
         vendor_id=order.vendor_id, is_default=True
@@ -1138,6 +1150,8 @@ def _flutterwave_payout_vendor(order, escrow):
         return False
     net_amount = _payout_amount_or_hold(order, escrow)
     if net_amount is None:
+        return False
+    if _verification_holds_payout(order, escrow, net_amount):
         return False
     bank_acc = VendorBankAccount.query.filter_by(
         vendor_id=order.vendor_id, is_default=True

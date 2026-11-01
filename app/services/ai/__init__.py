@@ -13,10 +13,10 @@ from .errors import (
     AIRequestError,
     AIUnavailable,
 )
-from .gateway import AIResult, GatewayConfig, kill_switch_state, run, set_runtime_kill_switch
+from .gateway import AIResult, GatewayConfig, converse, kill_switch_state, run, set_runtime_kill_switch
 
 __all__ = [
-    "run", "AIResult", "GatewayConfig", "kill_switch_state", "set_runtime_kill_switch",
+    "run", "converse", "AIResult", "GatewayConfig", "kill_switch_state", "set_runtime_kill_switch",
     "AIError", "AIDisabled", "AICapExceeded", "AIRefused", "AIUnavailable",
     "AIInvalidOutput", "AIRequestError",
 ]

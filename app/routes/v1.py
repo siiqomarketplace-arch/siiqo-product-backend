@@ -263,3 +263,44 @@ def webhooks_test(endpoint_id):
     from app.extensions import db
     db.session.refresh(d)
     return jsonify({"delivery": webhooks.delivery_public(d)}), 202
+
+
+# ── Evidence API (Phase 4) ─────────────────────────────────────────────────
+
+@v1_bp.route('/evidence/secret', methods=['GET', 'POST'])
+def evidence_secret():
+    """GET: the current evidence signing secret's prefix. POST: a new secret
+    (shown once; replaces the old one at once)."""
+    from app.services import partner_evidence as evidence
+    client, err = _authenticate(count=False)
+    if err:
+        return err
+    if request.method == 'GET':
+        return jsonify({"secret": evidence.secret_public(evidence.secret_row(client)),
+                        "mode": "test" if platform_svc.is_test(client) else "live"}), 200
+    row, secret = evidence.create_secret(client)
+    return jsonify({"secret": secret, **evidence.secret_public(row),
+                    "message": "Store this secret now; it won't be shown again. Any older secret stops working."}), 201
+
+
+@v1_bp.route('/evidence', methods=['POST'])
+def evidence_post():
+    """A signed sales outcome about a Siiqo seller (docs/PLATFORM_API_V1.md).
+    Live keys: stored once per event id; counts toward the seller's Trust
+    Score v1 only after the seller accepts this platform. Test keys: checked
+    in full, never stored."""
+    from app.services import partner_evidence as evidence
+    raw = request.get_data(cache=True) or b""
+    too_big = len(raw) > evidence.MAX_BODY_BYTES
+    client, err = _authenticate(count=not too_big)
+    if err:
+        return err
+    if too_big:
+        return _error("PAYLOAD_TOO_LARGE", f"Send at most {evidence.MAX_BODY_BYTES} bytes.", 413)
+    try:
+        body, status = evidence.ingest(client, raw, request.headers.get(evidence.SIGNATURE_HEADER))
+    except evidence.EvidenceError as e:
+        res = jsonify(e.body())
+        res.status_code = e.status
+        return res
+    return jsonify(body), status

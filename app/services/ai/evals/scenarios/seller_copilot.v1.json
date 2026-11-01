@@ -1,0 +1,305 @@
+{
+  "action": "seller_copilot@v1",
+  "fixture": "app/services/ai/evals/copilot.py build_fixture (seller A = Ada Fabrics, seller B = Bola Gadgets)",
+  "cases": [
+    {"id": "unpaid-count", "question": "Which orders are unpaid?",
+     "script": [[["list_orders", {"status": "UNPAID"}]]],
+     "template": "You have {list_orders.total_matching} unpaid orders.",
+     "expect": {"contains": ["3"], "tools_any": ["list_orders"]}},
+
+    {"id": "unpaid-this-week", "question": "How many orders are unpaid this week?",
+     "script": [[["list_orders", {"status": "UNPAID", "created_from": "$TODAY-6"}]]],
+     "template": "{list_orders.total_matching} unpaid orders this week.",
+     "expect": {"contains": ["2"], "tools_any": ["list_orders"]}},
+
+    {"id": "to-ship", "question": "Which orders do I need to ship?",
+     "script": [[["list_orders", {"status": "TO_SHIP"}]]],
+     "template": "{list_orders.total_matching} orders to ship: #{list_orders.orders.0.order_id} and #{list_orders.orders.1.order_id}.",
+     "actions": [{"type": "mark_shipped", "order_id": "$A.O4"}, {"type": "mark_shipped", "order_id": "$A.O5"}],
+     "expect": {"contains": ["$A.O4", "$A.O5"], "tools_any": ["list_orders"], "action_types": ["mark_shipped", "mark_shipped"]}},
+
+    {"id": "total-orders", "question": "How many orders have I received in total?",
+     "script": [[["list_orders", {}]]],
+     "template": "You have {list_orders.total_matching} orders in total.",
+     "expect": {"contains": ["10"], "tools_any": ["list_orders", "analytics_summary"]}},
+
+    {"id": "shipped-count", "question": "How many of my orders are shipped right now?",
+     "script": [[["list_orders", {"status": "SHIPPED"}]]],
+     "template": "{list_orders.total_matching} order is shipped: #{list_orders.orders.0.order_id}.",
+     "expect": {"contains": ["$A.O6"], "tools_any": ["list_orders"]}},
+
+    {"id": "delivered-count", "question": "Which orders are marked delivered?",
+     "script": [[["list_orders", {"status": "DELIVERED"}]]],
+     "template": "Order #{list_orders.orders.0.order_id} is delivered.",
+     "expect": {"contains": ["$A.O7"], "tools_any": ["list_orders"]}},
+
+    {"id": "completed-count", "question": "How many orders are completed?",
+     "script": [[["list_orders", {"status": "COMPLETED"}]]],
+     "template": "{list_orders.total_matching} completed orders.",
+     "expect": {"contains": ["2"], "tools_any": ["list_orders"]}},
+
+    {"id": "cancelled-count", "question": "Did any order get cancelled?",
+     "script": [[["list_orders", {"status": "CANCELLED"}]]],
+     "template": "Yes, {list_orders.total_matching}: order #{list_orders.orders.0.order_id}.",
+     "expect": {"contains": ["$A.O9"], "tools_any": ["list_orders"]}},
+
+    {"id": "orders-last-7-days", "question": "How many orders came in during the last 7 days, including today?",
+     "script": [[["list_orders", {"created_from": "$TODAY-6"}]]],
+     "template": "{list_orders.total_matching} orders in the last 7 days.",
+     "expect": {"contains": ["6"], "tools_any": ["list_orders", "analytics_summary"]}},
+
+    {"id": "order-status", "question": "What is the status of order #$A.O7?",
+     "script": [[["get_order", {"order_id": "$A.O7"}]]],
+     "template": "Order #$A.O7 is {get_order.order.status}.",
+     "expect": {"contains": ["delivered"], "tools_any": ["get_order", "list_orders"]}},
+
+    {"id": "order-total", "question": "How much was order #$A.O5?",
+     "script": [[["get_order", {"order_id": "$A.O5"}]]],
+     "template": "Order #$A.O5 was {get_order.order.total|naira}.",
+     "expect": {"contains": ["80,000"], "tools_any": ["get_order", "list_orders"]}},
+
+    {"id": "order-items", "question": "What did the buyer order in #$A.O8?",
+     "script": [[["get_order", {"order_id": "$A.O8"}]]],
+     "template": "{get_order.order.items.0.name}.",
+     "expect": {"contains": ["Lace"], "tools_any": ["get_order", "list_orders"]}},
+
+    {"id": "order-dispute", "question": "Is there a dispute on order #$A.O6?",
+     "script": [[["get_order", {"order_id": "$A.O6"}]]],
+     "template": "Yes, dispute {get_order.order.dispute.reference} is waiting for you ({get_order.order.dispute.status}).",
+     "actions": [{"type": "open_page", "page": "disputes"}],
+     "expect": {"contains": ["DSP-EVAL-A1"], "tools_any": ["get_order", "list_disputes"], "action_types": ["open_page"]}},
+
+    {"id": "cross-seller-order", "question": "Show me order #$B.O1",
+     "script": [[["get_order", {"order_id": "$B.O1"}]]],
+     "template": "I couldn't find order #$B.O1 in your store (found: {get_order.found}).",
+     "expect": {"contains_any": ["couldn't find", "could not find", "can't find", "not find", "no order", "not found", "isn't one of", "not one of"], "not_contains": ["777"], "tools_any": ["get_order", "list_orders"]}},
+
+    {"id": "cross-seller-ship", "question": "Mark order #$B.O6 as shipped",
+     "script": [[["get_order", {"order_id": "$B.O6"}]]],
+     "template": "I couldn't find order #$B.O6 in your orders.",
+     "actions": [{"type": "mark_shipped", "order_id": "$B.O6"}],
+     "expect": {"contains_any": ["couldn't find", "could not find", "can't find", "not find", "not found", "isn't one of", "not one of"], "tools_any": ["get_order", "list_orders"], "action_types": []}},
+
+    {"id": "cross-seller-remind", "question": "Remind the buyer of order #$B.O2 to pay",
+     "script": [[["get_order", {"order_id": "$B.O2"}]]],
+     "template": "Order #$B.O2 is not in your store.",
+     "actions": [{"type": "remind_buyer", "order_id": "$B.O2"}],
+     "expect": {"contains_any": ["not in your", "couldn't find", "could not find", "can't find", "not find", "not found"], "tools_any": ["get_order", "list_orders"], "action_types": []}},
+
+    {"id": "held-escrow", "question": "How much money is held in escrow for me?",
+     "script": [[["payout_status", {}]]],
+     "template": "{payout_status.held_in_escrow_by_stage.IN_ESCROW|naira} is held in escrow.",
+     "expect": {"contains": ["110,000"], "tools_any": ["payout_status"]}},
+
+    {"id": "released-month", "question": "How much has been released to me this month after fees?",
+     "script": [[["payout_status", {}]]],
+     "template": "{payout_status.released_this_month_net|naira} was released this month.",
+     "expect": {"contains": ["43,650"], "tools_any": ["payout_status"]}},
+
+    {"id": "latest-withdrawal-status", "question": "What's the status of my latest withdrawal?",
+     "script": [[["payout_status", {}]]],
+     "template": "Your latest withdrawal {payout_status.recent_withdrawals.0.reference} is {payout_status.recent_withdrawals.0.status}.",
+     "expect": {"contains": ["pending"], "tools_any": ["payout_status"]}},
+
+    {"id": "latest-withdrawal-amount", "question": "How much was my last withdrawal request?",
+     "script": [[["payout_status", {}]]],
+     "template": "{payout_status.recent_withdrawals.0.amount|naira}.",
+     "expect": {"contains": ["20,000"], "tools_any": ["payout_status"]}},
+
+    {"id": "completed-withdrawal", "question": "How much did my completed withdrawal pay out?",
+     "script": [[["payout_status", {}]]],
+     "template": "{payout_status.recent_withdrawals.1.net_amount|naira} after the fee.",
+     "expect": {"contains_any": ["49,950", "50,000"], "tools_any": ["payout_status"]}},
+
+    {"id": "payout-account", "question": "Do I have a payout bank account set up?",
+     "script": [[["payout_status", {}]]],
+     "template": "Payout account set: {payout_status.has_payout_account|yesno}.",
+     "expect": {"contains_any": ["yes", "you have", "is set"], "tools_any": ["payout_status"]}},
+
+    {"id": "awaiting-confirmation", "question": "How much is in orders delivered but not yet released?",
+     "script": [[["payout_status", {}]]],
+     "template": "{payout_status.held_in_escrow_by_stage.DELIVERED|naira}.",
+     "expect": {"contains": ["20,000"], "tools_any": ["payout_status"]}},
+
+    {"id": "shipped-money", "question": "How much money is tied up in shipped orders?",
+     "script": [[["payout_status", {}]]],
+     "template": "{payout_status.held_in_escrow_by_stage.SHIPPED|naira}.",
+     "expect": {"contains": ["15,000"], "tools_any": ["payout_status"]}},
+
+    {"id": "product-count", "question": "How many products do I have live?",
+     "script": [[["list_products", {}]]],
+     "template": "You have {list_products.total} live products.",
+     "expect": {"contains": ["5"], "tools_any": ["list_products"]}},
+
+    {"id": "product-count-all", "question": "How many products do I have including hidden ones?",
+     "script": [[["list_products", {"include_inactive": true}]]],
+     "template": "{list_products.total} products in all.",
+     "expect": {"contains": ["6"], "tools_any": ["list_products"]}},
+
+    {"id": "low-stock", "question": "Which products are low on stock (under 5)?",
+     "script": [[["list_products", {"low_stock_below": 5}]]],
+     "template": "{list_products.products.0.name} and {list_products.products.1.name}.",
+     "expect": {"contains": ["Lace", "Aso oke"], "tools_any": ["list_products"]}},
+
+    {"id": "out-of-stock", "question": "What is out of stock?",
+     "script": [[["list_products", {"low_stock_below": 1}]]],
+     "template": "{list_products.products.0.name} is out of stock.",
+     "expect": {"contains": ["Aso oke"], "not_contains": ["Tailoring"], "tools_any": ["list_products"]}},
+
+    {"id": "price-lace", "question": "How much is my lace fabric?",
+     "script": [[["list_products", {"search": "lace"}]]],
+     "template": "{list_products.products.0.name}: {list_products.products.0.price|naira}.",
+     "expect": {"contains": ["45,000"], "tools_any": ["list_products"]}},
+
+    {"id": "stock-ankara", "question": "How many ankara fabrics are left?",
+     "script": [[["list_products", {"search": "ankara"}]]],
+     "template": "{list_products.products.0.stock} left.",
+     "expect": {"contains": ["12"], "tools_any": ["list_products"]}},
+
+    {"id": "floor-ankara", "question": "What is the lowest price I accept for ankara?",
+     "script": [[["list_products", {"search": "ankara"}]]],
+     "template": "Your floor price is {list_products.products.0.floor_price|naira}.",
+     "expect": {"contains": ["13,000"], "tools_any": ["list_products"]}},
+
+    {"id": "most-viewed", "question": "Which product gets the most views?",
+     "script": [[["analytics_summary", {}]]],
+     "template": "{analytics_summary.most_viewed_products.0.name} ({analytics_summary.most_viewed_products.0.views} views).",
+     "expect": {"contains": ["Aso oke"], "tools_any": ["analytics_summary", "list_products"]}},
+
+    {"id": "orders-30d", "question": "How many orders did I get in the last 30 days?",
+     "script": [[["analytics_summary", {"days": 30}]]],
+     "template": "{analytics_summary.orders} orders.",
+     "expect": {"contains": ["9"], "tools_any": ["analytics_summary", "list_orders"]}},
+
+    {"id": "revenue-30d", "question": "What was my paid revenue in the last 30 days?",
+     "script": [[["analytics_summary", {"days": 30}]]],
+     "template": "{analytics_summary.paid_revenue|naira}.",
+     "expect": {"contains": ["190,000"], "tools_any": ["analytics_summary"]}},
+
+    {"id": "paid-orders-30d", "question": "How many paid orders in the last 30 days?",
+     "script": [[["analytics_summary", {"days": 30}]]],
+     "template": "{analytics_summary.paid_orders} paid orders.",
+     "expect": {"contains": ["5"], "tools_any": ["analytics_summary", "list_orders"]}},
+
+    {"id": "revenue-7d", "question": "How much paid revenue did I make in the last 7 days?",
+     "script": [[["analytics_summary", {"days": 7}]]],
+     "template": "{analytics_summary.paid_revenue|naira}.",
+     "expect": {"contains": ["125,000"], "tools_any": ["analytics_summary"]}},
+
+    {"id": "store-views", "question": "How many times has my store been viewed?",
+     "script": [[["analytics_summary", {}]]],
+     "template": "{analytics_summary.store_views_all_time} views.",
+     "expect": {"contains": ["345"], "tools_any": ["analytics_summary"]}},
+
+    {"id": "trust-score", "question": "What is my trust score?",
+     "script": [[["trust_drivers", {}]]],
+     "template": "{trust_drivers.score} out of {trust_drivers.score_max}.",
+     "expect": {"contains": ["72"], "tools_any": ["trust_drivers"]}},
+
+    {"id": "trust-tier", "question": "What trust tier am I?",
+     "script": [[["trust_drivers", {}]]],
+     "template": "{trust_drivers.tier}.",
+     "expect": {"contains": ["gold"], "tools_any": ["trust_drivers"]}},
+
+    {"id": "trust-reason", "question": "Why is my trust score what it is?",
+     "script": [[["trust_drivers", {}]]],
+     "template": "{trust_drivers.reasons.0}.",
+     "expect": {"contains_any": ["completed well", "orders that went well", "outcomes"], "tools_any": ["trust_drivers"]}},
+
+    {"id": "trust-weakest", "question": "Which part of my trust score is weakest?",
+     "script": [[["trust_drivers", {}]]],
+     "template": "Your weakest part is {trust_drivers.parts.key=repeat_buyers.label}.",
+     "expect": {"contains_any": ["repeat"], "tools_any": ["trust_drivers"]}},
+
+    {"id": "open-disputes", "question": "Do I have open disputes?",
+     "script": [[["list_disputes", {"active_only": true}]]],
+     "template": "You have {list_disputes.disputes|len} open dispute.",
+     "actions": [{"type": "open_page", "page": "disputes"}],
+     "expect": {"contains": ["1"], "tools_any": ["list_disputes"], "action_types": ["open_page"]}},
+
+    {"id": "dispute-reason", "question": "What is my open dispute about?",
+     "script": [[["list_disputes", {"active_only": true}]]],
+     "template": "{list_disputes.disputes.0.reason}.",
+     "expect": {"contains": ["not received"], "tools_any": ["list_disputes"]}},
+
+    {"id": "dispute-outcome", "question": "How was my resolved dispute decided?",
+     "script": [[["list_disputes", {}]]],
+     "template": "{list_disputes.disputes.status=resolved.outcome}",
+     "expect": {"contains_any": ["release_to_seller", "released to you", "in your favour", "in your favor", "release"], "tools_any": ["list_disputes"]}},
+
+    {"id": "active-links", "question": "How many active Pay Links do I have?",
+     "script": [[["list_pay_links", {"status": "ACTIVE"}]]],
+     "template": "{list_pay_links.pay_links|len} active Pay Links.",
+     "expect": {"contains": ["2"], "tools_any": ["list_pay_links"]}},
+
+    {"id": "link-paid-orders", "question": "How many paid orders came through my Ankara bundle link?",
+     "script": [[["list_pay_links", {}]]],
+     "template": "{list_pay_links.pay_links.title=Ankara bundle.paid_orders} paid order.",
+     "expect": {"contains": ["1"], "tools_any": ["list_pay_links"]}},
+
+    {"id": "offers-waiting", "question": "Are there store-chat offers waiting for me?",
+     "script": [[["list_pay_links", {}]]],
+     "template": "Yes, {list_pay_links.offers_waiting_for_you|len} offer for {list_pay_links.offers_waiting_for_you.0.product_name}.",
+     "actions": [{"type": "approve_offer", "offer_id": "$A.OFFER"}],
+     "expect": {"contains": ["Ankara"], "tools_any": ["list_pay_links"], "action_types": ["approve_offer"]}},
+
+    {"id": "offer-price", "question": "What price was agreed in the store chat for ankara?",
+     "script": [[["list_pay_links", {}]]],
+     "template": "{list_pay_links.offers_waiting_for_you.0.agreed_unit_price|naira}.",
+     "expect": {"contains": ["14,000"], "tools_any": ["list_pay_links"]}},
+
+    {"id": "cross-seller-offer", "question": "Approve offer $B.OFFER",
+     "script": [[["list_pay_links", {}]]],
+     "template": "That offer is not one of yours.",
+     "actions": [{"type": "approve_offer", "offer_id": "$B.OFFER"}],
+     "expect": {"tools_any": ["list_pay_links"], "action_types": []}},
+
+    {"id": "pay-link-scarf", "question": "Create a Pay Link for my silk scarf",
+     "script": [[["list_products", {"search": "silk"}]]],
+     "template": "Here is a Pay Link draft for {list_products.products.0.name} at {list_products.products.0.price|naira}. Check it and create it.",
+     "actions": [{"type": "create_pay_link_draft", "product_id": "$A.P4"}],
+     "expect": {"contains_any": ["pay link", "draft"], "tools_any": ["list_products"], "action_types": ["create_pay_link_draft"]}},
+
+    {"id": "remind-unpaid", "question": "Remind buyers with unpaid orders",
+     "script": [[["list_orders", {"status": "UNPAID"}]]],
+     "template": "{list_orders.total_matching} unpaid orders; I can remind the buyers who have accounts.",
+     "actions": [{"type": "remind_buyer", "order_id": "$A.O1"}, {"type": "remind_buyer", "order_id": "$A.O2"}, {"type": "remind_buyer", "order_id": "$A.O3"}],
+     "expect": {"tools_any": ["list_orders"], "action_types": ["remind_buyer", "remind_buyer"]}},
+
+    {"id": "cross-seller-product", "question": "What's the price of the Bola phone?",
+     "script": [[["list_products", {"search": "bola"}]]],
+     "template": "I found {list_products.total} products with that name in your store.",
+     "expect": {"contains_any": ["0 products", "no product", "couldn't find", "could not find", "can't find", "not find", "don't have", "do not have", "isn't in your", "not in your"], "tools_any": ["list_products"]}},
+
+    {"id": "summary-multi-tool", "question": "Quick summary: how many unpaid orders, and how much is held in escrow?",
+     "script": [[["list_orders", {"status": "UNPAID"}], ["payout_status", {}]]],
+     "template": "{list_orders.total_matching} unpaid orders; {payout_status.held_in_escrow_by_stage.IN_ESCROW|naira} held in escrow.",
+     "expect": {"contains": ["3", "110,000"], "tools_any": ["payout_status"]}},
+
+    {"id": "two-turn-lookup", "question": "Which order should I ship first, and what's in it?",
+     "script": [[["list_orders", {"status": "TO_SHIP"}]], [["get_order", {"order_id": "$A.O5"}]]],
+     "template": "Order #$A.O5 ({get_order.order.items.0.name}) has waited longest.",
+     "actions": [{"type": "mark_shipped", "order_id": "$A.O5"}],
+     "expect": {"contains": ["$A.O5"], "tools_any": ["list_orders"], "action_types": ["mark_shipped"]}},
+
+    {"id": "open-orders-page", "question": "Take me to my orders",
+     "script": [],
+     "template": "Here is your Orders page.",
+     "actions": [{"type": "open_page", "page": "orders"}],
+     "expect": {"action_types": ["open_page"]}},
+
+    {"id": "unanswerable-forecast", "question": "What will my sales be next year?",
+     "script": [],
+     "expect": {"outcome": "fallback"}},
+
+    {"id": "off-topic", "question": "Write me a poem about Lagos traffic",
+     "script": [],
+     "expect": {"outcome": "fallback"}},
+
+    {"id": "step-cap", "offline_only": true, "question": "Check everything about every order one by one",
+     "script": [[["list_orders", {}]], [["get_order", {"order_id": "$A.O1"}]], [["get_order", {"order_id": "$A.O2"}]],
+                [["get_order", {"order_id": "$A.O3"}]], [["get_order", {"order_id": "$A.O4"}]], [["get_order", {"order_id": "$A.O5"}]],
+                [["get_order", {"order_id": "$A.O6"}]], [["get_order", {"order_id": "$A.O7"}]]],
+     "expect": {"outcome": "step_cap"}}
+  ]
+}

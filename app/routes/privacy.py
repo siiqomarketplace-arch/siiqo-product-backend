@@ -319,6 +319,7 @@ def _account(user):
         "points_balance": _iso(user.points_balance),
         "telegram_id": user.telegram_id,
         "telegram_notification_prefs": user.telegram_notification_prefs or {},
+        "preferred_locale": user.preferred_locale,
         "city": user.city,
         "state": user.state,
         "created_at": _iso(user.created_at),
@@ -514,6 +515,13 @@ def _verification_lifecycle(user):
     }
 
 
+def _address_verification(user):
+    """Address checks (V5): outcome and dates only. The address and NIN were sent
+    to the provider and never stored by Siiqo, so they cannot appear here."""
+    from app.services.address_verification.service import export_for
+    return export_for(user)
+
+
 def _passport(user):
     from app.models.passport import PassportSettings
     ps = PassportSettings.query.filter_by(vendor_id=user.id).first()
@@ -559,6 +567,7 @@ def build_export(user):
         "subscriptions": subscriptions,
         "subscription_payments": subscription_payments,
         "verification": _verification(user),
+        "address_verification": _address_verification(user),
         "passport_settings": _passport(user),
         "consents": {
             "current": current_consents(user),

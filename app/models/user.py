@@ -45,6 +45,9 @@ class User(db.Model):
     nin = db.Column(db.String(11), nullable=True)
     telegram_id = db.Column(db.String(50), unique=True, nullable=True, index=True)
     telegram_notification_prefs = db.Column(db.JSON, nullable=True, default=dict)
+    # Language for emails, notifications and the website (D19). NULL = not
+    # chosen (English). Additive nullable column; see docs/TRANSLATIONS.md.
+    preferred_locale = db.Column(db.String(8), nullable=True)
 
     # Location (for hyper-local features)
     city = db.Column(db.String(100), nullable=True)
@@ -127,6 +130,7 @@ class User(db.Model):
             "trust_tier": self.trust_tier_or_default,
             "telegram_id": self.telegram_id,
             "telegram_notification_prefs": self.telegram_notification_prefs or {},
+            "preferred_locale": self.preferred_locale,
         }
 
 
