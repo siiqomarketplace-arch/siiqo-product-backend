@@ -48,7 +48,12 @@ def _ev(**over):
     (_ev(completed_orders=12, score=None, tier="NEW"), "building"),
     (_ev(completed_orders=12, tier="SILVER", score=60), "good"),
     (_ev(tenure_days=60), "good"),                             # many orders but under 6 months
-    (_ev(tier="BRONZE", score=40), "mixed"),
+    (_ev(tier="BRONZE", score=40), "mixed"),                   # Trust Score v1: low outcome score
+    # Original 0-1000 score: a low tier is little activity, not a poor record
+    (_ev(tier="BRONZE", score=180, score_max=1000, completed_orders=1, tenure_days=30), "early"),
+    (_ev(tier="BRONZE", score=180, score_max=1000, completed_orders=8), "good"),
+    (_ev(tier="BRONZE", score=180, score_max=1000, completed_orders=8,
+         disputes={"opened": 1, "seller_fault": 1}), "mixed"),   # disputes still make it mixed
     (_ev(disputes={"opened": 2, "seller_fault": 1}, completed_orders=31), "mixed"),   # 3.2 per 100
     (_ev(disputes={"opened": 1, "seller_fault": 1}, completed_orders=100), "established"),  # 1 per 100
     (_ev(disputes={"opened": 2, "open_now": 2}), "mixed"),

@@ -43,7 +43,10 @@ RULES = {
     "established_tiers": ("SILVER", "GOLD", "PLATINUM"),
     "mixed_fault_per_100": 2.0,       # seller-fault disputes per 100 completed orders
     "mixed_open_disputes": 2,         # this many disputes open at once
+    # A low tier means a poor record only on Trust Score v1 (0-100, built from outcomes and
+    # dispute caps). On the original 0-1000 score a low tier just means little activity yet.
     "mixed_tiers": ("BRONZE",),
+    "mixed_tiers_score_max": 100,
 }
 
 VERDICTS = {
@@ -207,7 +210,8 @@ def verdict_code(ev):
     earned_tier = ev["tier"] if ev.get("score") is not None else "NEW"
     if (d["seller_fault"] and fault_rate_per_100(ev) >= R["mixed_fault_per_100"]) \
             or d["open_now"] >= R["mixed_open_disputes"] \
-            or (done > 0 and earned_tier in R["mixed_tiers"]):
+            or (done > 0 and earned_tier in R["mixed_tiers"]
+                and ev.get("score_max") == R["mixed_tiers_score_max"]):
         return "mixed"
     if done == 0:
         return "new"
