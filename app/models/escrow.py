@@ -51,6 +51,8 @@ class EscrowTransaction(db.Model):
 
     paid_at = db.Column(db.DateTime(timezone=True), nullable=True)
     released_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # When the buyer was reminded of the Safe Pay deadline (one reminder per order).
+    buyer_reminded_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)

@@ -26,7 +26,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -50,7 +50,13 @@ def frontend_url() -> str:
 
 
 def store_url(slug: str) -> str:
-    return f"{frontend_url()}/{slug}"
+    """A store's public address: https://<slug>.siiqo.com. Local hosts keep the
+    path form (http://localhost:3000/<slug>), which has no subdomains."""
+    base = urlsplit(frontend_url())
+    host = (base.hostname or "").removeprefix("www.")
+    if not host or base.port or host in ("localhost", "127.0.0.1") or "." not in host:
+        return f"{frontend_url()}/{slug}"
+    return f"{base.scheme or 'https'}://{slug}.{host}"
 
 
 def pay_link_url(slug: str) -> str:
@@ -304,28 +310,28 @@ def _send_store_live_email(user: User, result: dict) -> None:
         log.info("onboarding publish: store-live email not sent: %s", exc)
 
 
-def _create_everything(session, user, answers, store_name, slug, bank) -> dict:
-    template_options = template_options_from_spec(session.draft_spec)
-    logo = session.logo()
-    place_city, place_state = answers.get("city"), answers.get("state")
-
+def _new_store(user, store_name, slug, bank, *, description=None, city=None, state=None, phone=None,
+               template_options=None, logo_url=None) -> Storefront:
+    """The Storefront (as onboard_vendor) and its bank account, in the caller's
+    transaction. Shared by publish and the Safe Pay request fast path."""
+    template_options = template_options or {}
     user.role = UserRole.VENDOR
     storefront = Storefront(
         vendor_id=user.id,
         store_name=store_name[:100],
         store_slug=slug,
-        store_description=answers.get("about") or answers.get("what_you_sell"),
-        city=place_city,
-        state=place_state,
+        store_description=description,
+        city=city,
+        state=state,
         country="Nigeria",
         bank_code=bank["bank_code"],
         account_number=bank["account_number"],
         account_name=bank["account_name"],
-        phone=answers.get("contact_phone"),
+        phone=phone,
         account_type="INDIVIDUAL",
         theme_color=template_options.get("primary_color", "#0b1b3b"),
         template_options=template_options,
-        store_logo=logo.url if logo else None,
+        store_logo=logo_url,
         # As onboard_vendor: the store is live once created; identity review
         # and badges are separate.
         is_published=True,
@@ -351,6 +357,19 @@ def _create_everything(session, user, answers, store_name, slug, bank) -> dict:
         )
         db.session.add(bank_row)
         db.session.flush()
+    return storefront
+
+
+def _create_everything(session, user, answers, store_name, slug, bank) -> dict:
+    template_options = template_options_from_spec(session.draft_spec)
+    logo = session.logo()
+    place_city, place_state = answers.get("city"), answers.get("state")
+    storefront = _new_store(
+        user, store_name, slug, bank,
+        description=answers.get("about") or answers.get("what_you_sell"),
+        city=place_city, state=place_state, phone=answers.get("contact_phone"),
+        template_options=template_options, logo_url=logo.url if logo else None,
+    )
 
     # Products: listings with a title and a price above zero. Products for
     # digital/service sellers need a file or booking link first, so only

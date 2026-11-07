@@ -6,33 +6,44 @@ from app.extensions import db
 def utcnow():
     return datetime.now(timezone.utc)
 
-def get_vendor_auto_release_hours(vendor_id) -> int:
-    """
-    Get dynamic auto-release window based on vendor trust tier.
-    PLATINUM: 24h
-    GOLD: 48h
-    SILVER: 72h (Standard)
-    BRONZE: 96h (Extended)
-    """
-    from app.models.trust import VendorTrustProfile
+AUTO_RELEASE_HOURS_DEFAULT = 72
+
+
+def auto_release_hours() -> int:
+    """The one Safe Pay window every buyer is told about: after the seller marks a
+    physical order delivered, the buyer has this long to confirm or report a
+    problem; with neither, the seller is paid. Same for every seller (a new
+    seller must not wait longer for their money, and a buyer of a top seller
+    must not get less time). Env AUTO_RELEASE_HOURS, 24-168, default 72."""
+    import os
     try:
-        profile = VendorTrustProfile.query.filter_by(vendor_id=vendor_id).first()
-        if not profile:
-            return 72
-        
-        tier = str(profile.trust_tier).upper()
-        if tier == 'PLATINUM':
-            return 24
-        elif tier == 'GOLD':
-            return 48
-        elif tier == 'SILVER':
-            return 72
-        elif tier == 'BRONZE':
-            return 96
-        return 72
-    except Exception as e:
-        logging.error(f"[TRUST] Error fetching auto-release hours for vendor {vendor_id}: {e}")
-        return 72
+        hours = int(os.environ.get("AUTO_RELEASE_HOURS") or AUTO_RELEASE_HOURS_DEFAULT)
+    except ValueError:
+        return AUTO_RELEASE_HOURS_DEFAULT
+    return min(168, max(24, hours))
+
+
+def get_vendor_auto_release_hours(vendor_id) -> int:
+    """Kept for callers; the window no longer depends on the seller's tier."""
+    return auto_release_hours()
+
+
+def release_deadline(escrow):
+    """When a DELIVERED Safe Pay payment is released if the buyer does nothing,
+    or None when the order isn't waiting for confirmation."""
+    from app.models.escrow import EscrowStatus
+    if escrow is None or escrow.status != EscrowStatus.DELIVERED:
+        return None
+    # The order's delivered time is set once, when it first becomes DELIVERED
+    # (services/foundations.py); later edits must not restart the buyer's clock.
+    order = getattr(escrow, "order", None)
+    start = (getattr(order, "delivered_at", None) if order is not None else None) or escrow.updated_at
+    if start is None:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return start + timedelta(hours=auto_release_hours())
+
 
 def get_or_create_trust_profile(vendor_id):
     """

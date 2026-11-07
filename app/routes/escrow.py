@@ -1125,7 +1125,7 @@ def _paystack_payout_vendor(order, escrow):
                     to_email=vendor_user.email,
                     subject=f"Action Required: Add bank account to receive payout for Order #{order.id}",
                     template_name="base_notification",
-                    first_name=vendor_user.first_name or "Vendor",
+                    first_name=vendor_user.first_name or "there",
                     title="Payout Pending — Add Bank Account",
                     message=notif_msg,
                     cta_text="Add Bank Details",
@@ -1213,7 +1213,7 @@ def _flutterwave_payout_vendor(order, escrow):
                         to_email=vendor_user.email,
                         subject=f"Action Required: Add bank account to receive payout for Order #{order.id}",
                         template_name="base_notification",
-                        first_name=vendor_user.first_name or "Vendor",
+                        first_name=vendor_user.first_name or "there",
                         title="Payout Pending — Add Bank Account",
                         message=notif_msg,
                         cta_text="Add Bank Details",
@@ -1645,6 +1645,14 @@ def get_order_details_by_token():
         except Exception:
             vendor_name = "Vendor"
 
+        # Safe Pay deadline: after the seller marks it delivered, the buyer has
+        # until this time to confirm or report a problem.
+        from app.models.escrow import EscrowTransaction as _Escrow
+        from app.services.trust import release_deadline
+        from app.tasks.escrow_tasks import format_deadline
+        escrow_row = _Escrow.query.filter_by(order_id=order.id).first()
+        confirm_by = release_deadline(escrow_row)
+
         items_list = []
         for it in order.items:
             unit_price = getattr(it, 'price_at_purchase', getattr(it, 'price', 0))
@@ -1666,6 +1674,9 @@ def get_order_details_by_token():
                 "vendor_name": vendor_name,
                 "created_at": order.created_at.isoformat() if order.created_at else None,
                 "items": items_list,
+                "confirm_by": confirm_by.isoformat() if confirm_by else None,
+                "confirm_by_text": format_deadline(confirm_by) if confirm_by else None,
+                "safe_pay": escrow_row is not None,
             },
             "verified_buyer": bool(token_valid or _is_buyer_or_admin(user_id, order)),
             "code_email_hint": _mask_email(_buyer_contact_email(order)),

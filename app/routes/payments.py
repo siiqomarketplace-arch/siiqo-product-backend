@@ -1239,7 +1239,7 @@ def _payout_vendor_via_daya(order, escrow):
                     to_email=vendor_user.email,
                     subject=f"Action Required: Add bank account to receive payout for Order #{order.id}",
                     template_name="base_notification",
-                    first_name=vendor_user.first_name or "Vendor",
+                    first_name=vendor_user.first_name or "there",
                     title="Payout Pending — Add Bank Account",
                     message=notif_msg,
                     cta_text="Add Bank Details",

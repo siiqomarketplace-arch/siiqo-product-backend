@@ -300,9 +300,13 @@ def _timeline_items(order, escrow) -> list[DisputeEvidence]:
 
 
 def open_case(order, user_id, reason: str, details: str | None = None, *, photo_url: str | None = None,
-              allow_seller: bool = False) -> DisputeCase:
-    """Open a case and freeze the payout. Commits."""
-    party = party_of(order, user_id)
+              allow_seller: bool = False, verified_buyer: bool = False) -> DisputeCase:
+    """Open a case and freeze the payout. Commits.
+
+    ``verified_buyer``: the caller already proved this is the order's buyer
+    without an account (their private order link or emailed code), so a
+    guest Pay Link buyer can report a problem too; ``user_id`` may be None."""
+    party = "buyer" if verified_buyer else party_of(order, user_id)
     if party is None or (party == "seller" and not allow_seller):
         raise DisputeError("forbidden", "Only the buyer on this order can raise a dispute.", 403)
     reason = (reason or "").strip()
@@ -336,9 +340,10 @@ def open_case(order, user_id, reason: str, details: str | None = None, *, photo_
     )
     case.evidence.extend(_timeline_items(order, escrow))
     statement = reason + (f": {details}" if details else "")
-    case.evidence.append(DisputeEvidence(party=party, author_user_id=int(user_id), kind="text", text=statement))
+    author = int(user_id) if user_id not in (None, "") else None
+    case.evidence.append(DisputeEvidence(party=party, author_user_id=author, kind="text", text=statement))
     if photo_url:
-        case.evidence.append(DisputeEvidence(party=party, author_user_id=int(user_id), kind="photo",
+        case.evidence.append(DisputeEvidence(party=party, author_user_id=author, kind="photo",
                                              file_url=photo_url))
     db.session.add(case)
 
@@ -360,6 +365,7 @@ def open_case(order, user_id, reason: str, details: str | None = None, *, photo_
         db.session.rollback()
         raise DisputeError("already_open", "A dispute is already open on this order.", 409)
     log.info("[DISPUTE] %s opened on Order #%s by %s", case.reference, order.id, party)
+    _email_dispute_opened(case, order, respondent, days)
 
     try:  # existing behaviour of the old dispute endpoint
         from app.services.trust import recalculate_vendor_trust
@@ -938,3 +944,45 @@ def admin_view(case: DisputeCase, *, with_evidence: bool = True) -> dict:
         "can_decide": case.status == DisputeStatus.UNDER_REVIEW,
     })
     return data
+
+
+def _email_dispute_opened(case, order, respondent: str, days: int) -> None:
+    """In-app notices are easy to miss; a seller who never sees a dispute can
+    lose it by default. Email both sides. Best effort; never raises."""
+    try:
+        from app.models.user import User
+        from app.utils.email import send_siiqo_email
+        from app.tasks.escrow_tasks import buyer_email_address, format_deadline
+        when = format_deadline(case.deadline_at) if case.deadline_at else f"{days} days"
+        seller = db.session.get(User, order.vendor_id) if order.vendor_id else None
+        if seller is not None and seller.email:
+            send_siiqo_email(
+                to_email=seller.email,
+                subject=f"A buyer reported a problem with order #{order.id}",
+                template_name="base_notification",
+                first_name=seller.first_name or "there",
+                title="A buyer reported a problem",
+                message=(f"The buyer on order #{order.id} reported: \"{case.reason}\". "
+                         "The payment is on hold while a person at Siiqo reviews it. "
+                         + (f"Please add your side, with any photos or messages, by {when}. "
+                            "If you don't, Siiqo decides with what it has."
+                            if respondent == "seller" else "The buyer has been asked to add more detail.")),
+                cta_text="Add your side",
+                cta_url="https://siiqo.com/vendor/orders",
+            )
+        buyer_email = buyer_email_address(order)
+        if buyer_email:
+            send_siiqo_email(
+                to_email=buyer_email,
+                subject=f"We received your report on order #{order.id} ({case.reference})",
+                template_name="base_notification",
+                first_name=((order.buyer_name or "there").split(" ")[0]),
+                title="Your report is open",
+                message=(f"Reference {case.reference}. The payment is on hold and won't go to the seller "
+                         f"while this is open. The seller has until {when} to respond, then a person at "
+                         "Siiqo reviews both sides and emails you the decision."),
+                cta_text="Contact support",
+                cta_url="https://siiqo.com/support",
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.info("[DISPUTE] opened emails not sent for %s: %s", getattr(case, "reference", "?"), exc)

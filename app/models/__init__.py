@@ -34,6 +34,8 @@ from . import trust_report  # noqa: F401  (Phase 3: AI Trust Report cache)
 from . import telegram_webapp  # noqa: F401  (Phase T: Mini App initData replay guard)
 from . import bot  # noqa: F401  (Phase T/W: bot sessions, nonces, rate counters, intent cache)
 from . import address_verification  # noqa: F401  (Phase 4: optional address verification, V5)
+from . import pay_request  # noqa: F401  (Safe Pay requests: buyers bring sellers)
+from . import seller_report  # noqa: F401  (Report this seller)
 from . import assistant  # noqa: F401  (Phase 4: store concierge and seller copilot)
 from . import verification_requirement  # noqa: F401  (Phase 4: mandatory verification holds)
 

@@ -1321,7 +1321,7 @@ def paystack_webhook():
                                 title="Payment Confirmed",
                                 message=(
                                     f"Your payment for Order #{order.id} is confirmed. "
-                                    "Funds held by Siiqo until you confirm delivery."
+                                    "Safe Pay holds it until you confirm delivery, or 72 hours after the seller marks it delivered."
                                 ),
                                 type="ORDER",
                                 order_id=order.id,

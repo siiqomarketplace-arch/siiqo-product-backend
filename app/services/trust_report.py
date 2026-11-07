@@ -66,9 +66,10 @@ MIXED_LABELS = {
 
 SAFE_PAY_ADVICE = {
     "physical": ("Pay through Siiqo checkout or a Siiqo Pay Link. For physical orders, Safe Pay holds "
-                 "your money until you confirm delivery."),
+                 "your money until you confirm delivery, or 72 hours after the seller marks it delivered "
+                 "if you don't report a problem."),
     "mixed": ("Pay through Siiqo checkout or a Siiqo Pay Link. Safe Pay holds your money until you confirm "
-              "delivery for physical orders only. Digital products, services and tickets are paid to the "
+              "delivery (or 72 hours after the seller marks it delivered) for physical orders only. Digital products, services and tickets are paid to the "
               "seller when you pay."),
     "not_held": ("This seller sells digital products or services. Safe Pay does not hold these payments: "
                  "the seller is paid as soon as you pay."),

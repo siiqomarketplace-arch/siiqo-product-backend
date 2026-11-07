@@ -1540,6 +1540,19 @@ def update_order_status(order_id):
         logging.error(f"Failed to update order status: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"message": "Failed to update order status", "error": "Internal database error."}), 500
 
+    # Safe Pay: tell the buyer (guests too) the exact deadline to confirm or report a problem.
+    if order.payment_method == 'ESCROW' and new_status == 'DELIVERED':
+        try:
+            from app.services.trust import release_deadline
+            from app.tasks.escrow_tasks import email_buyer_confirm_by
+            escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+            deadline = release_deadline(escrow)
+            if deadline is not None:
+                email_buyer_confirm_by(order, deadline)
+        except Exception as e:  # noqa: BLE001 - the status change already succeeded
+            import logging
+            logging.info(f"[SAFE PAY] delivered email not sent for order {order.id}: {e}")
+
     return jsonify({"message": f"Order status updated to {new_status}", "status": "success"}), 200
 
 

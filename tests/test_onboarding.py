@@ -296,7 +296,7 @@ def test_old_preset_defaults_are_claim_free():
 def test_name_check_available(client):
     body = client.get(f"{API}/name-check?name=Mama Put Kitchen").get_json()
     assert body["available"] is True and body["slug"] == "mama-put-kitchen"
-    assert body["suggestions"] == [] and body["store_url"].endswith("/mama-put-kitchen")
+    assert body["suggestions"] == [] and body["store_url"] == "https://mama-put-kitchen.siiqo.com"
 
 
 def test_name_check_taken_suggests_free_slugs(client, make_vendor):
@@ -696,7 +696,7 @@ def test_publish_creates_everything_once(client, seller, auth_headers, paystack)
     res = client.post(f"{API}/sessions/{s['id']}/publish", headers=h, json=BANK)
     assert res.status_code == 201, res.get_json()
     body = res.get_json()
-    assert body["store_url"] == "https://siiqo.com/ada-fabrics"
+    assert body["store_url"] == "https://ada-fabrics.siiqo.com"
     assert body["pay_link_url"].startswith("https://siiqo.com/pay/style-1-")
     assert body["share"]["url"] == body["store_url"] and body["share"]["pay_link_url"] == body["pay_link_url"]
     assert body["store_url"] in body["share"]["whatsapp_text"]

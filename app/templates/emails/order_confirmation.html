@@ -106,12 +106,12 @@
             {% elif payment_method == 'TRANSFER' %}
             <div class="highlight-box transfer">
                 <span class="badge transfer">🏦 Bank Transfer</span>
-                <p style="margin: 0; font-weight: 600; color: #c2410c;">Your order is awaiting your <strong>bank transfer to Siiqo Escrow</strong>. Please make the transfer and upload your receipt from your order dashboard to proceed.</p>
+                <p style="margin: 0; font-weight: 600; color: #c2410c;">Your order is awaiting your <strong>bank transfer to Siiqo's Safe Pay account</strong>. Please make the transfer and upload your receipt from your order dashboard to proceed.</p>
             </div>
             {% else %}
             <div class="highlight-box escrow">
                 <span class="badge escrow">🔒 Escrow Payment</span>
-                <p style="margin: 0; font-weight: 600; color: #1e3a8a;">Your payment is <strong>securely held in Siiqo Escrow</strong>. The funds will only be released to the vendor after you confirm that you have received your items safely.</p>
+                <p style="margin: 0; font-weight: 600; color: #1e3a8a;">Your payment is <strong>held by Safe Pay</strong>. The seller is paid when you confirm you received your items, or 72 hours after the seller marks the order delivered if you don't report a problem. If something is wrong, report it from your order page within that time.</p>
             </div>
             {% endif %}
 

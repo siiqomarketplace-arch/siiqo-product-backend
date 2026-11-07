@@ -105,6 +105,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS buyer_reminded_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE passport_api_clients ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
                 "CREATE INDEX IF NOT EXISTS ix_passport_api_clients_owner_user_id ON passport_api_clients (owner_user_id)",
                 "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_secret_enc VARCHAR(255)",
@@ -651,6 +652,13 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.directory import directory_admin_bp, directory_bp
     app.register_blueprint(directory_bp, url_prefix='/api/directory')
     app.register_blueprint(directory_admin_bp, url_prefix='/api/admin/directory')
+    # Safe Pay requests: buyers bring sellers (docs/SAFE_PAY_REQUEST_PLAN.md)
+    from app.routes.pay_requests import pay_requests_admin_bp, pay_requests_bp
+    app.register_blueprint(pay_requests_bp, url_prefix='/api/pay-requests')
+    app.register_blueprint(pay_requests_admin_bp, url_prefix='/api/admin/pay-requests')
+    from app.routes.seller_reports import seller_reports_admin_bp, seller_reports_bp
+    app.register_blueprint(seller_reports_bp, url_prefix='/api/check')
+    app.register_blueprint(seller_reports_admin_bp, url_prefix='/api/admin/seller-reports')
     # Phase 3: Ask (AI search) and Market (server-paginated browsing)
     from app.routes.search import market_bp, search_bp
     app.register_blueprint(search_bp, url_prefix='/api/search')
@@ -728,7 +736,7 @@ def create_app(config_name: str | None = None) -> Flask:
             # Send buyer delivery reminders once a day
             scheduler.add_job(
                 func=lambda: _run_in_context(app, send_delivery_reminders),
-                trigger=IntervalTrigger(hours=24),
+                trigger=IntervalTrigger(hours=1),
                 id='send_delivery_reminders',
                 name='Remind buyers to confirm delivery',
                 replace_existing=True,

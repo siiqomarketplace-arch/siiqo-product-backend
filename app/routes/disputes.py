@@ -74,6 +74,43 @@ def open_dispute():
     return jsonify({"status": "success", "dispute": svc.party_view(case, user_id)}), 201
 
 
+@escrow_bp.route("/disputes/by-token", methods=["POST"])
+@limiter.limit("5 per hour")
+def open_dispute_by_token():
+    """"Report a problem" for a buyer without an account (Pay Link guests).
+    Proof of being the buyer: their private order link token, or the code
+    emailed to them (the same proofs that confirm delivery)."""
+    import hmac
+    from app.routes.escrow import _check_delivery_code, generate_order_token
+    data = _payload()
+    try:
+        order_id = int(data.get("order_id") or 0)
+    except (TypeError, ValueError):
+        order_id = 0
+    order = db.session.get(Order, order_id) if order_id else None
+    if order is None:
+        return jsonify({"message": "Order not found", "code": "not_found"}), 404
+    token = str(data.get("token") or "").strip()
+    code = str(data.get("code") or "").strip()
+    proven = bool(token) and hmac.compare_digest(generate_order_token(order.id), token)
+    if not proven:
+        if not code:
+            return jsonify({"message": "Request a code to your email to continue.",
+                            "code": "BUYER_CODE_REQUIRED"}), 403
+        ok, message = _check_delivery_code(order, code)
+        if not ok:
+            return jsonify({"message": message, "code": "BUYER_CODE_INVALID"}), 403
+    photo_url, photo_error = _photo_url()
+    if photo_error:
+        return jsonify({"message": photo_error, "code": "bad_photo"}), 400
+    try:
+        case = svc.open_case(order, order.buyer_id, data.get("reason"), data.get("details"),
+                             photo_url=photo_url, verified_buyer=True)
+    except svc.DisputeError as e:
+        return _err(e)
+    return jsonify({"status": "success", "dispute": {"reference": case.reference, "status": case.status}}), 201
+
+
 @escrow_bp.route("/disputes/mine", methods=["GET"])
 @jwt_required()
 def my_disputes():
