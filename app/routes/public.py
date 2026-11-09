@@ -351,8 +351,8 @@ def get_storefront_details(slug):
             Event.is_deleted == False
         ).order_by(Event.start_date.asc()).all()
         events_data = [
-            e.to_dict(include_ticket_types=True) 
-            for e in events 
+            e.to_dict(include_ticket_types=True)
+            for e in events
             if getattr(e, 'show_on_storefront', True) is not False
         ]
     except Exception as ev_err:
@@ -638,7 +638,7 @@ def get_articles():
     per_page = min(int(request.args.get('per_page', 10)), 50)
     category = request.args.get('category')
     sub_category = request.args.get('sub_category')
-    
+
     try:
         query = Article.query.filter_by(is_published=True)
         if category:
@@ -675,7 +675,7 @@ def get_articles():
                 query = query.filter(or_(*conditions))
             except Exception:
                 pass
-            
+
         paginated = (
             query
             .order_by(Article.created_at.desc())
@@ -703,7 +703,7 @@ def get_articles():
             from sqlalchemy import text
             from app.extensions import db
             import math
-            
+
             db.session.rollback()
             offset = (page - 1) * per_page
             sql = "SELECT id, title, slug, category, excerpt, cover_image, content, created_at FROM articles WHERE is_published = true"
@@ -712,10 +712,10 @@ def get_articles():
                 sql += " AND category = :category"
                 params["category"] = category
             sql += " ORDER BY created_at DESC LIMIT :per_page OFFSET :offset"
-            
+
             result = db.session.execute(text(sql), params)
             rows = result.fetchall()
-            
+
             count_sql = "SELECT COUNT(*) FROM articles WHERE is_published = true"
             count_params = {}
             if category:
@@ -723,7 +723,7 @@ def get_articles():
                 count_params["category"] = category
             count_res = db.session.execute(text(count_sql), count_params)
             total = count_res.scalar() or 0
-            
+
             articles_list = []
             for r in rows:
                 content_str = r[6] or ""
@@ -810,8 +810,8 @@ def get_article_by_slug(slug):
             if not res:
                 # Fallback raw sql check for redirects
                 sql_redir = """
-                    SELECT a.slug FROM article_slug_redirects r 
-                    JOIN articles a ON r.article_id = a.id 
+                    SELECT a.slug FROM article_slug_redirects r
+                    JOIN articles a ON r.article_id = a.id
                     WHERE r.old_slug = :slug AND a.is_published = true
                 """
                 redir_res = db.session.execute(text(sql_redir), {"slug": clean_slug}).fetchone()
@@ -988,27 +988,27 @@ def get_order_downloads(order_id):
     """
     from app.models.order import Order
     from flask_jwt_extended import jwt_required, get_jwt_identity
-    
+
     # Optional auth - if user is logged in, verify they own the order
     try:
         from flask_jwt_extended import verify_jwt_in_request
         verify_jwt_in_request(optional=True)
         user_id = get_jwt_identity()
-        
+
         if user_id:
             order = Order.query.filter_by(id=order_id, buyer_id=int(user_id)).first()
         else:
             order = Order.query.filter_by(id=order_id).first()
     except:
         order = Order.query.filter_by(id=order_id).first()
-    
+
     if not order:
         return jsonify({'message': 'Order not found'}), 404
-    
+
     # Only show downloads for completed/delivered orders
     if order.status not in ['DELIVERED', 'COMPLETED']:
         return jsonify({'message': 'Order not completed yet'}), 400
-    
+
     # Get digital products from order
     downloads = []
     for item in order.items:
@@ -1019,10 +1019,10 @@ def get_order_downloads(order_id):
                 'download_url': item.product.file_url,
                 'image': item.product.images[0] if item.product.images else None
             })
-    
+
     if not downloads:
         return jsonify({'message': 'No digital products in this order'}), 404
-    
+
     return jsonify({
         'order_id': order.id,
         'downloads': downloads
@@ -1032,49 +1032,59 @@ def get_order_downloads(order_id):
 @public_bp.route('/products/<int:product_id>/claim-free', methods=['POST'])
 def claim_free_product(product_id):
     """
-    Claim a free digital product or service
-    Creates order and immediately provides access
-    Requires authentication
+    Claim a free digital product or service.
+    Creates an order and immediately provides access. Signed-in buyers claim
+    with their account; guests (no account) give a name and email, and the
+    access link is also emailed to them.
     """
     from flask_jwt_extended import jwt_required, get_jwt_identity
     from app.models.order import Order, OrderItem
     from app.models.communication import Notification
     from datetime import datetime
-    
+
+    import re as _re
+    from flask_jwt_extended import verify_jwt_in_request
+    user = None
     try:
-        from flask_jwt_extended import verify_jwt_in_request
-        verify_jwt_in_request()
+        verify_jwt_in_request(optional=True)
         user_id = get_jwt_identity()
-    except:
-        return jsonify({'message': 'Authentication required to claim free products'}), 401
-    
-    user = db.session.get(User, int(user_id))
-    if not user:
-        return jsonify({'message': 'User not found'}), 404
-    
+        if user_id is not None and not str(user_id).startswith('admin:'):
+            user = db.session.get(User, int(user_id))
+    except Exception:
+        user = None
+
+    body = request.get_json(silent=True) or {}
+    guest_email = (str(body.get('email') or '').strip().lower())[:120]
+    guest_name = (str(body.get('name') or '').strip())[:120]
+    if user is None:
+        if not _re.match(r"^[^@\s]{1,64}@[^@\s]{1,120}\.[a-z]{2,24}$", guest_email, _re.I):
+            return jsonify({'message': 'Enter your email so we can send you the download link.',
+                            'code': 'EMAIL_REQUIRED'}), 400
+    buyer_email = user.email if user is not None else guest_email
+
     product = Product.query.filter(
         Product.id == product_id,
         Product.is_active == True,
         db.or_(Product.is_free == True, Product.price == 0)
     ).first()
-    
+
     if not product:
         return jsonify({'message': 'Free product not found'}), 404
-    
+
     # Auto-ensure is_free flag is updated if price is 0
     if product.price == 0 and not product.is_free:
         product.is_free = True
         db.session.commit()
-    
+
     p_type = product.product_type or ('digital' if product.file_url else 'service' if product.booking_link else 'digital')
-    
-    # Check if user already claimed this product
+
+    # Check if this buyer already claimed this product (by account, or by email for guests)
     existing_order = Order.query.join(OrderItem).filter(
-        Order.buyer_id == user.id,
+        (Order.buyer_id == user.id) if user is not None else (Order.buyer_email == buyer_email),
         OrderItem.product_id == product.id,
         Order.total_amount == 0
     ).first()
-    
+
     if existing_order:
         file_url = product.file_url or product.booking_link
         return jsonify({
@@ -1086,10 +1096,12 @@ def claim_free_product(product_id):
             'access_type': 'booking' if product.product_type == 'service' else 'download',
             'access_url': file_url,
         }), 200
-    
+
     # Create free order
     order = Order(
-        buyer_id=user.id,
+        buyer_id=user.id if user is not None else None,
+        buyer_email=buyer_email or None,
+        buyer_name=(user.full_name if user is not None else guest_name) or None,
         vendor_id=product.storefront.vendor_id,
         total_amount=0,
         status='COMPLETED',  # Free products are instantly completed
@@ -1097,7 +1109,7 @@ def claim_free_product(product_id):
     )
     db.session.add(order)
     db.session.flush()
-    
+
     # Create order item
     order_item = OrderItem(
         order_id=order.id,
@@ -1106,23 +1118,27 @@ def claim_free_product(product_id):
         quantity=1
     )
     db.session.add(order_item)
-    
-    # Send notification to buyer
-    notification = Notification(
-        user_id=user.id,
-        title=f'Free {product.product_type.title()} Claimed! 🎉',
-        message=f'You now have access to: {product.name}',
-        type='ORDER',
-        order_id=order.id
-    )
+
+    # Notify a signed-in buyer in the app (guests get the email below)
+    if user is not None:
+        db.session.add(Notification(
+            user_id=user.id,
+            title=f'Free {(product.product_type or "product").title()} Claimed! 🎉',
+            message=f'You now have access to: {product.name}',
+            type='ORDER',
+            order_id=order.id
+        ))
     # Update/create CRM CustomerProfile for the vendor so free claims are tracked
     try:
         from app.models.crm import CustomerProfile
         from datetime import datetime as _dt_crm, timezone as _tz_crm
         _utcnow = lambda: _dt_crm.now(_tz_crm.utc)
         vid = product.storefront.vendor_id
-        profile = CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user.id).first()
-        if profile:
+        profile = (CustomerProfile.query.filter_by(vendor_id=vid, buyer_id=user.id).first()
+                   if user is not None else None)
+        if user is None:
+            pass  # CRM profiles are per account; a guest claim is still counted as an order
+        elif profile:
             profile.total_orders = (profile.total_orders or 0) + 1
             profile.last_purchase_date = _utcnow()
         else:
@@ -1139,7 +1155,7 @@ def claim_free_product(product_id):
 
     db.session.commit()
 
-    logging.info(f"Free product claimed: {product.id} by user {user.id}")
+    logging.info(f"Free product claimed: {product.id} by {'user ' + str(user.id) if user is not None else 'guest'}")
 
     raw_file_url = product.file_url or product.booking_link
     raw_booking_url = product.booking_link or product.file_url
@@ -1161,12 +1177,15 @@ def claim_free_product(product_id):
         from app.utils.email import send_siiqo_email
         from datetime import datetime, timezone
 
-        buyer_name = user.full_name or (user.email.split('@')[0] if user.email else 'there')
+        if user is not None:
+            buyer_name = user.full_name or (user.email.split('@')[0] if user.email else 'there')
+        else:
+            buyer_name = guest_name or 'there'
         claimed_at = datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
 
         # 1. Email to buyer with download link
         send_siiqo_email(
-            to_email=user.email,
+            to_email=buyer_email,
             subject=f'📥 Your Free Download is Ready — {product.name}',
             template_name='free_download_buyer',
             buyer_name=buyer_name,

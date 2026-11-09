@@ -602,6 +602,9 @@ def get_buyer_order_detail(order_id):
     buyer = db.session.get(User, int(user_id))
 
     escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    from app.services.trust import release_deadline as _release_deadline
+    from app.tasks.escrow_tasks import format_deadline as _fmt_deadline
+    _confirm_by = _release_deadline(escrow)
     if is_all_digital and order.status == 'PAID' and escrow:
         from app.routes.escrow import _deliver_digital_products
         _deliver_digital_products(order, escrow)
@@ -638,6 +641,9 @@ def get_buyer_order_detail(order_id):
             # Convenience alias so both buyer order pages get the OTP directly (omitted for digital)
             "delivery_otp": None if is_all_digital else (escrow.escrow_code if escrow else None),
             "logistics_assignment_id": assignment.id if assignment else None,
+            # Safe Pay: confirm or report a problem by this time, or the seller is paid.
+            "confirm_by": _confirm_by.isoformat() if _confirm_by else None,
+            "confirm_by_text": _fmt_deadline(_confirm_by) if _confirm_by else None,
         },
     }), 200
 

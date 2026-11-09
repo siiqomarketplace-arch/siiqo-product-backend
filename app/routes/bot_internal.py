@@ -252,3 +252,106 @@ def transcribe():
     if not text:
         return _bad("EMPTY_TRANSCRIPT", "No speech was recognised.", 422)
     return jsonify({"text": text, "language_code": result.language_code}), 200
+
+
+# ── Log in with an email code (no password in chat) ─────────────────────────
+#   POST /api/internal/bot/login-code/send    {platform, user_id, email}
+#   POST /api/internal/bot/login-code/verify  {platform, user_id, email, code}
+# The same answer whether or not the email has an account. On Telegram the
+# verified account is linked to the Telegram id (as /auth/verify-link-otp does).
+LOGIN_CODE_TTL = timedelta(minutes=10)
+LOGIN_CODE_RESEND_AFTER = timedelta(seconds=60)
+_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,120}\.[a-z]{2,24}$", re.I)
+
+
+def _code_hash(user_id_db: int, code: str) -> str:
+    import hashlib
+    import hmac
+    secret = (os.environ.get("SECRET_KEY") or "").encode()
+    # users.reset_otp is VARCHAR(10): keep a 10-character keyed fingerprint, not the code.
+    return hmac.new(secret, f"bot-login:{user_id_db}:{code}".encode(), hashlib.sha256).hexdigest()[:10]
+
+
+@bot_internal_bp.route("/login-code/send", methods=["POST"])
+@require_bot_signature
+def login_code_send():
+    import secrets
+    from app.models.user import User
+    body = request.get_json(silent=True) or {}
+    platform, user_id = str(body.get("platform") or ""), str(body.get("user_id") or "")
+    bad = _check_identity(platform, user_id)
+    if bad:
+        return bad
+    email = str(body.get("email") or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return _bad("BAD_EMAIL", "Type the email on your Siiqo account.")
+    sent = {"status": "sent", "message": "If that email has a Siiqo account, we sent it a 6-digit code."}
+    user = User.query.filter(db.func.lower(User.email) == email).first()
+    if user is None or not getattr(user, "is_active", True):
+        return jsonify(sent), 200
+    now = _now()
+    if user.otp_expiry and _aware(user.otp_expiry) - LOGIN_CODE_TTL + LOGIN_CODE_RESEND_AFTER > now:
+        return jsonify({**sent, "status": "recently_sent"}), 200
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    user.reset_otp = _code_hash(user.id, code)
+    user.otp_expiry = now + LOGIN_CODE_TTL
+    db.session.commit()
+    try:
+        from app.utils.email import send_siiqo_email
+        send_siiqo_email(to_email=user.email, subject="Your Siiqo login code",
+                         template_name="verify_email_otp", first_name=user.first_name or "there", otp=code)
+    except Exception as e:  # noqa: BLE001
+        log.warning("bot login code email failed: %s", e)
+    return jsonify(sent), 200
+
+
+@bot_internal_bp.route("/login-code/verify", methods=["POST"])
+@require_bot_signature
+def login_code_verify():
+    import hmac
+    from app.models.user import User
+    from app.routes.auth import _make_tokens, _user_payload
+    body = request.get_json(silent=True) or {}
+    platform, user_id = str(body.get("platform") or ""), str(body.get("user_id") or "")
+    bad = _check_identity(platform, user_id)
+    if bad:
+        return bad
+    email = str(body.get("email") or "").strip().lower()
+    code = re.sub(r"\D", "", str(body.get("code") or ""))
+    user = User.query.filter(db.func.lower(User.email) == email).first() if email else None
+    wrong = _bad("BAD_CODE", "That code didn't work. Check it, or ask for a new one.", 400)
+    if user is None or len(code) != 6 or not user.reset_otp or not user.otp_expiry:
+        return wrong
+    if _aware(user.otp_expiry) < _now():
+        return _bad("CODE_EXPIRED", "That code has expired. Ask for a new one.", 400)
+    if not hmac.compare_digest(user.reset_otp, _code_hash(user.id, code)):
+        return wrong
+    user.reset_otp = None
+    user.otp_expiry = None
+    user.is_verified = True
+    if platform == "telegram":
+        other = User.query.filter(User.telegram_id == user_id, User.id != user.id).first()
+        if other is None:
+            user.telegram_id = user_id
+    db.session.commit()
+    return jsonify({"status": "success", "user": _user_payload(user), **_make_tokens(user)}), 200
+
+
+# ── Safe Pay requests from chat ─────────────────────────────────────────────
+#   POST /api/internal/bot/pay-requests  {platform, user_id, seller, item?, amount?, email?}
+# Limits count per chat user (not per bot IP, which every user shares).
+@bot_internal_bp.route("/pay-requests", methods=["POST"])
+@require_bot_signature
+def bot_pay_request():
+    from app.services import pay_requests as pr
+    body = request.get_json(silent=True) or {}
+    platform, user_id = str(body.get("platform") or ""), str(body.get("user_id") or "")
+    bad = _check_identity(platform, user_id)
+    if bad:
+        return bad
+    try:
+        req, token = pr.create(body.get("seller"), item=body.get("item"), amount=body.get("amount"),
+                               buyer_email=body.get("email"), ip=f"bot:{platform}:{user_id}")
+    except pr.PayRequestError as e:
+        return jsonify(e.body()), e.status
+    return jsonify({"request": pr.public(req), "buyer_token": token}), 201

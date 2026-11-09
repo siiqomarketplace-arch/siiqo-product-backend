@@ -558,9 +558,11 @@ def daya_status():
 # ===========================================================================
 
 @payments_bp.route("/daya/refresh-rate", methods=["POST"])
-@jwt_required()
+@jwt_required(optional=True)
 def daya_refresh_rate():
-    """Refresh an expired Daya rate for an existing pending payment."""
+    """Refresh an expired Daya rate for an existing pending payment.
+    Guests (Pay Link and store checkout buyers without an account) can refresh
+    their own guest payment; it only renews the quote, never where money goes."""
     buyer_user_id = _get_user_id()
     data = request.get_json() or {}
 
@@ -573,8 +575,14 @@ def daya_refresh_rate():
     dp = DayaPayment.query.filter_by(order_id=order_id).first()
     if not dp:
         return jsonify({"message": "No crypto payment found for this order"}), 404
-    if dp.buyer_id != buyer_user_id:
-        return jsonify({"message": "Unauthorized"}), 403
+    if buyer_user_id:
+        if dp.buyer_id != int(buyer_user_id):
+            return jsonify({"message": "Unauthorized"}), 403
+    elif dp.buyer_id is not None:
+        # A signed-in buyer's payment: they must be signed in to refresh it.
+        return jsonify({"message": "Please sign in to refresh this payment.", "code": "SIGN_IN_REQUIRED"}), 401
+    if dp.status not in ("PENDING", "EXPIRED"):
+        return jsonify({"message": "This payment can't be refreshed now.", "status": dp.status}), 409
     if not _key_configured():
         return jsonify({"message": "Crypto payments not configured"}), 503
 
