@@ -939,3 +939,16 @@ def test_vendor_onboard_rejects_unsafe_store_urls(client, seller, auth_headers, 
                       json={"business_name": "Tunde Gadgets", "store_slug": slug})
     assert res.status_code == 400
     assert Storefront.query.count() == 0
+
+
+def test_publish_reads_the_location_answer(client, seller, auth_headers, paystack):
+    """The website interview asks one free-text "location" (no city/state)."""
+    answers = {k: v for k, v in ANSWERS.items() if k not in ("city", "state")}
+    answers["location"] = "Wuse 2, Abuja"
+    h = auth_headers(seller)
+    s = _built(client, h, answers=answers, photos=1, prices=(15000,))
+    res = client.post(f"{API}/sessions/{s['id']}/publish", headers=h, json=BANK)
+    assert res.status_code == 201, res.get_json()
+    store = Storefront.query.one()
+    assert (store.city, store.state) == ("Abuja", "FCT")
+    assert Product.query.one().location == "Abuja, FCT"

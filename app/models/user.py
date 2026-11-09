@@ -134,6 +134,11 @@ class User(db.Model):
         }
 
 
+def _storefront_trust(sf, with_label=True) -> dict:
+    from app.services.search import storefront_trust
+    return storefront_trust(sf, with_label=with_label)
+
+
 class Storefront(db.Model):
     __tablename__ = 'storefronts'
 
@@ -160,6 +165,8 @@ class Storefront(db.Model):
 
     # Logistics Settings
     logistics_settings = db.Column(db.JSON, nullable=True, default=list)
+    # Seller's own delivery fees and pickup area (app/services/delivery.py).
+    delivery_settings = db.Column(db.JSON, nullable=True)
 
     # Storefront Builder & Customization
     theme_color = db.Column(db.String(20), default='#0b1b3b')
@@ -221,7 +228,7 @@ class Storefront(db.Model):
             (not self.pro_verified_expires_at or self.pro_verified_expires_at > now_dt)
         )
 
-    def to_public_dict(self, include_sensitive: bool = False) -> dict:
+    def to_public_dict(self, include_sensitive: bool = False, trust_label: bool = True) -> dict:
         # Avoid circular imports by loading models inline
         from app.models.community import Review
         from app.models.product import Product
@@ -298,9 +305,8 @@ class Storefront(db.Model):
                 else None
             ),
             # ── trust fields ──
-            "trust_score": self.vendor.trust_score_or_default if self.vendor else 500,
-            "trust_score_max": self.vendor.trust_score_max if self.vendor else 1000,
-            "trust_tier": self.vendor.trust_tier_or_default if self.vendor else 'SILVER',
+            # Same trust as the Market card; no made-up default (NEW, no score).
+            **_storefront_trust(self, with_label=trust_label),
             # ── verification fields ──
             "account_type": self.account_type,
             "verification_status": self.verification_status,

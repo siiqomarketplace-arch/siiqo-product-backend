@@ -99,6 +99,52 @@ def payout_account_hash(bank_code, account_number):
 _ESCROW_PAID_STATUSES = ("IN_ESCROW", "SHIPPED", "DELIVERED", "RELEASED")
 
 
+# Order status -> buying funnel step (BUYING_FIX_PLAN A1).
+_ORDER_STEPS = {"SHIPPED": "shipped", "DELIVERED": "shipped", "COMPLETED": "confirmed", "DISPUTED": "disputed"}
+
+
+def _default_order_source(order):
+    """orders.source for an order no route attributed: a Pay Link, the bot
+    (X-Siiqo-Client header), else 'direct'."""
+    if order.payment_link_id:
+        return "pay_link"
+    try:
+        from flask import has_request_context, request
+        if has_request_context():
+            from app.services.attribution import client_header_source
+            bot = client_header_source(request.headers)
+            if bot:
+                return bot
+    except Exception:
+        pass
+    return "direct"
+
+
+def _order_kind(order):
+    if order.payment_link_id:
+        return "pay_link"
+    return getattr(order, "_funnel_kind", None) or "order"
+
+
+def _order_props(order, kind_only=False):
+    props = {"source": order.source, "campaign": order.campaign, "kind": _order_kind(order)}
+    if not kind_only:
+        props.update({"payment_method": order.payment_method,
+                      "amount": float(order.total_amount or 0) + float(order.logistics_fee or 0),
+                      "currency": order.currency or "NGN"})
+    return {k: v for k, v in props.items() if v is not None}
+
+
+def _first_paid(order, is_new):
+    """True in the flush where the order's paid_at is first set."""
+    if order.paid_at is None:
+        return False
+    if is_new:
+        return True
+    hist = inspect(order).attrs.paid_at.history
+    return bool(hist.added) and hist.added[0] is not None and not any(d is not None for d in hist.deleted)
+
+
 # ── hooks ──────────────────────────────────────────────────────────────────
 
 def _before_flush(session, flush_context, instances):
@@ -108,6 +154,8 @@ def _before_flush(session, flush_context, instances):
         now = _now()
         for obj in list(session.new) + list(session.dirty):
             if isinstance(obj, Order):
+                if obj in session.new and not getattr(obj, "source", None):
+                    obj.source = _default_order_source(obj)
                 if obj.currency is None:
                     obj.currency = "NGN"
                 if obj.currency == "NGN" and obj.fx_rate_to_ngn is None:
@@ -188,12 +236,27 @@ def _collect(session):
     for obj in list(session.new) + list(session.dirty):
         try:
             if isinstance(obj, Order):
-                change = _status_change(obj, is_new=obj in new_objs)
+                is_new = obj in new_objs
+                change = _status_change(obj, is_new=is_new)
+                buying = (obj.payment_method or "").upper() != "FREE"
+                if is_new and buying:
+                    ev("order_created", vendor_id=obj.vendor_id, user_id=obj.buyer_id, order_id=obj.id,
+                       payment_link_id=obj.payment_link_id, session_id=getattr(obj, "_funnel_session_id", None),
+                       props=_order_props(obj))
+                if buying and _first_paid(obj, is_new):
+                    ev("paid", vendor_id=obj.vendor_id, user_id=obj.buyer_id, order_id=obj.id,
+                       payment_link_id=obj.payment_link_id, once=True,
+                       props={**_order_props(obj), "_repeat_check": True, "buyer_email": obj.buyer_email})
                 if change:
                     rows["history"].append({"order_id": obj.id, "from_status": change[0],
                                             "to_status": change[1], "created_at": now})
-                    if (change[1] or "").upper() == "DELIVERED":
+                    new_status = (change[1] or "").upper()
+                    if new_status == "DELIVERED":
                         ev("delivered", vendor_id=obj.vendor_id, user_id=obj.buyer_id, order_id=obj.id)
+                    step = _ORDER_STEPS.get(new_status)
+                    if step and buying and not is_new:
+                        ev(step, vendor_id=obj.vendor_id, user_id=obj.buyer_id, order_id=obj.id,
+                           once=True, props=_order_props(obj, kind_only=True))
 
             elif isinstance(obj, EscrowTransaction):
                 change = _status_change(obj, is_new=obj in new_objs)
@@ -209,13 +272,17 @@ def _collect(session):
                                          "currency": currency, "created_at": now})
                     evidence(order.vendor_id, "ORDER_PAID", order_id=order.id, value=obj.amount,
                              currency=currency, source="escrow")
-                    ev("paid", vendor_id=order.vendor_id, user_id=order.buyer_id, order_id=order.id,
-                       payment_link_id=order.payment_link_id, props={"_repeat_check": True,
-                                                                     "buyer_email": order.buyer_email})
+                    # funnel.paid is recorded once per order, when the order's
+                    # paid_at is first set (stamped from this escrow above).
                 elif new == EscrowStatus.RELEASED:
                     evidence(order.vendor_id, "ORDER_RELEASED", order_id=order.id, value=obj.amount,
                              currency=currency, source="escrow")
                     ev("released", vendor_id=order.vendor_id, user_id=order.buyer_id, order_id=order.id)
+                    ev("confirmed", vendor_id=order.vendor_id, user_id=order.buyer_id, order_id=order.id,
+                       once=True, props=_order_props(order, kind_only=True))
+                elif new in (EscrowStatus.SHIPPED, EscrowStatus.DELIVERED):
+                    ev("shipped", vendor_id=order.vendor_id, user_id=order.buyer_id, order_id=order.id,
+                       once=True, props=_order_props(order, kind_only=True))
                 elif new == EscrowStatus.REFUNDED:
                     rows["fees"].append({"order_id": order.id, "escrow_id": obj.id, "vendor_id": order.vendor_id,
                                          "event": "REVERSED", "gross_amount": obj.amount or 0,
@@ -229,7 +296,8 @@ def _collect(session):
                         evidence(order.vendor_id, "DISPUTE_LOST", order_id=order.id, source="escrow")
                 elif new == EscrowStatus.DISPUTED:
                     evidence(order.vendor_id, "DISPUTE_OPENED", order_id=order.id, source="escrow")
-                    ev("disputed", vendor_id=order.vendor_id, user_id=order.buyer_id, order_id=order.id)
+                    ev("disputed", vendor_id=order.vendor_id, user_id=order.buyer_id, order_id=order.id,
+                       once=True, props=_order_props(order, kind_only=True))
 
             elif isinstance(obj, Review) and obj in new_objs:
                 evidence(obj.vendor_id, "REVIEW", order_id=obj.order_id, value=obj.vendor_rating, source="review")
@@ -307,7 +375,18 @@ def _write(conn, rows):
 
     events = []
     order_t = Order.__table__
+    event_t = PlatformEvent.__table__
+    once_seen = set()
     for e in rows["events"]:
+        if e.get("once") and e.get("order_id"):
+            # One funnel.<step> per order, whichever path gets there (webhook
+            # retries, SHIPPED then DELIVERED, escrow and order both changing).
+            key = (e["name"], e["order_id"])
+            if key in once_seen or conn.execute(select(event_t.c.id).where(
+                    event_t.c.event_name == f"funnel.{e['name']}",
+                    event_t.c.order_id == e["order_id"])).first():
+                continue
+            once_seen.add(key)
         props = dict(e.get("props") or {})
         if props.pop("_repeat_check", False):
             # A repeat purchase: this buyer already paid this seller before.
@@ -382,6 +461,7 @@ def _event_row(e):
     return {
         "event_name": f"funnel.{e['name']}",
         "timestamp": e["created_at"],
+        "session_id": str(e["session_id"])[:100] if e.get("session_id") else None,
         "user_id": e.get("user_id"),
         "business_id": e.get("vendor_id"),
         "order_id": e.get("order_id"),

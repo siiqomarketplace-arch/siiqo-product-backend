@@ -724,38 +724,15 @@ def submit_review():
     if order_status not in ['COMPLETED', 'DELIVERED'] and escrow_status not in ['RELEASED', 'REFUNDED']:
         return jsonify({"message": "You can only review orders that have been delivered or completed."}), 400
 
-    # Prevent duplicate reviews
-    existing = Review.query.filter_by(order_id=order_id, buyer_id=user_id).first()
+    # One review per order, whoever wrote it: a review left from the guest
+    # review link counts too (app/routes/escrow.py review-by-token).
+    existing = Review.query.filter_by(order_id=order.id).first()
     if existing:
-        return jsonify({"message": "You have already reviewed this order"}), 409
+        return jsonify({"message": "You have already reviewed this order", "code": "ALREADY_REVIEWED"}), 409
 
-    review = Review(
-        order_id=order_id,
-        buyer_id=user_id,
-        vendor_id=order.vendor_id,
-        vendor_rating=vendor_rating,
-        product_rating=product_rating,
-        review_text=review_text,
-    )
-    db.session.add(review)
-
-    # Notify vendor
-    db.session.add(Notification(
-        user_id=order.vendor_id,
-        title=f"New Review ({vendor_rating}/5 ⭐)",
-        message=review_text or f"A buyer left a {vendor_rating}-star review for Order #{order_id}.",
-        type="REVIEW",
-        order_id=order_id,
-    ))
-
-    db.session.commit()
-
-    # Trigger trust score recalculation instantly
-    try:
-        from app.services.trust import recalculate_vendor_trust
-        recalculate_vendor_trust(order.vendor_id, reason="Review Submitted")
-    except Exception as e:
-        logging.error(f"[TRUST ERROR] Failed to recalculate trust on review submit: {e}")
+    from app.routes.escrow import create_order_review, buyer_first_name
+    create_order_review(order, vendor_rating, product_rating, review_text,
+                        buyer_id=int(user_id), reviewer_name=buyer_first_name(order))
 
     return jsonify({"message": "Review submitted. Thank you!", "status": "success"}), 201
 

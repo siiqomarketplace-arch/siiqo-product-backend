@@ -37,6 +37,7 @@ from app.models.payment_link import PaymentLink
 from app.models.product import Category, Product
 from app.models.user import Storefront, User, UserRole
 from app.models.withdrawal import VendorBankAccount
+from app.services.places import place_label, split_place
 from app.services.store_spec import template_options_from_spec
 
 log = logging.getLogger(__name__)
@@ -364,6 +365,9 @@ def _create_everything(session, user, answers, store_name, slug, bank) -> dict:
     template_options = template_options_from_spec(session.draft_spec)
     logo = session.logo()
     place_city, place_state = answers.get("city"), answers.get("state")
+    if not place_city and not place_state:
+        # The website interview asks one free-text "location" question.
+        place_city, place_state = split_place(answers.get("location"))
     storefront = _new_store(
         user, store_name, slug, bank,
         description=answers.get("about") or answers.get("what_you_sell"),
@@ -401,7 +405,7 @@ def _create_everything(session, user, answers, store_name, slug, bank) -> dict:
             stock_quantity=int(quantity) if isinstance(quantity, int) and quantity > 0 else 1,
             category_id=_category_id(listing.get("category")),
             condition=None,
-            location=", ".join(p for p in (place_city, place_state) if p) or None,
+            location=place_label(place_city, place_state),
             product_type="physical",
             is_free=False,
             images=[listing["image_url"]] if listing.get("image_url") else [],

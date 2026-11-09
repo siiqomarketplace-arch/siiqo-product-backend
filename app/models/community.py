@@ -97,9 +97,12 @@ class Review(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
-    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # None for a guest buyer who reviewed from their private review link.
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=True)
+    # First name only, shown publicly when there is no buyer account.
+    reviewer_name = db.Column(db.String(80), nullable=True)
 
     vendor_rating = db.Column(db.Integer, nullable=False)   # 1–5
     product_rating = db.Column(db.Integer, nullable=True)   # 1–5

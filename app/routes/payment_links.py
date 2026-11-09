@@ -320,6 +320,9 @@ def pay_payment_link(link_id):
         delivery_state=delivery_state if link_product_type == 'physical' else None,
         is_guest=not existing_account,
     )
+    from app.services.attribution import apply_to_order as _apply_attribution
+    _apply_attribution(new_order, data, request.headers, pay_link=True)
+    new_order._funnel_session_id = data.get("session_id") or request.headers.get("X-Session-ID")
     db.session.add(new_order)
     db.session.flush()
 

@@ -240,8 +240,9 @@ def test_trust_boost_uses_only_score_and_tier():
     assert 0 < low < high <= 1
 
 
-def test_stores_are_searchable_and_link_to_store_page(client, shop):
+def test_stores_are_searchable_and_link_to_store_page(client, shop, item):
     _, store = shop(name="Mama Put Kitchen", description="Home-cooked jollof and soups")
+    item(store, "Plate of rice")  # a store with nothing to buy is left out (C1)
     body = client.get("/api/search?q=jollof").get_json()
     assert body["results"][0]["kind"] == "store"
     assert body["results"][0]["href"] == f"/{store.store_slug}"

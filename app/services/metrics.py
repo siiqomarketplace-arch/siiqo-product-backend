@@ -7,7 +7,7 @@ figures exist only from the date the Phase 0B hooks were deployed.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 
 from app.extensions import db
 
@@ -85,8 +85,115 @@ def monthly_metrics(month: str) -> dict:
                 VendorSubscription.end_date > now).count(),
         },
         "funnel": funnel,
+        "buying": buying_metrics(month),
         "notes": [
             "GMV counts NGN payments only; other currencies are reported separately once FX rates are stored.",
             "Funnel and fee figures start from the Phase 0B deployment date.",
+        ],
+    }
+
+
+# ── Buying funnel (BUYING_FIX_PLAN A3) ──────────────────────────────────────
+# Each step counts the new "funnel.<step>" name plus the older website name
+# where one existed, so the report works across the switch-over.
+BUYING_STEPS = (
+    ("product_viewed", ("funnel.product_viewed", "product_viewed")),
+    ("store_viewed", ("funnel.store_viewed", "store_viewed")),
+    ("add_to_cart", ("funnel.add_to_cart", "add_to_cart")),
+    ("checkout_opened", ("funnel.checkout_opened", "checkout_opened")),
+    ("delivery_submitted", ("funnel.delivery_submitted",)),
+    ("order_created", ("funnel.order_created",)),   # + legacy checkout_started, see below
+    ("payment_started", ("funnel.payment_started",)),
+    ("paid", ("funnel.paid",)),
+    ("shipped", ("funnel.shipped",)),
+    ("confirmed", ("funnel.confirmed",)),
+    ("disputed", ("funnel.disputed",)),
+)
+NOT_SHIPPED_AFTER_HOURS = 72
+_SHIPPED_OR_DONE = ("SHIPPED", "DELIVERED", "COMPLETED", "REFUNDED", "CANCELLED", "DISPUTED")
+
+
+def _aware(dt):
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def buying_metrics(month: str) -> dict:
+    from app.models.order import Order
+    from app.models.telemetry import PlatformEvent
+
+    start, end = month_bounds(month)
+    in_month = (PlatformEvent.timestamp >= start) & (PlatformEvent.timestamp < end)
+    names = {n for _, group in BUYING_STEPS for n in group} | {"checkout_started"}
+    raw = dict(db.session.query(PlatformEvent.event_name, func.count(PlatformEvent.id))
+               .filter(in_month, PlatformEvent.event_name.in_(names))
+               .group_by(PlatformEvent.event_name).all())
+    counts = {step: sum(int(raw.get(n, 0)) for n in group) for step, group in BUYING_STEPS}
+
+    # The cart also logs the older "checkout_started" for each order it creates;
+    # count it only for orders without a funnel.order_created (before the switch).
+    if raw.get("checkout_started"):
+        has_new = select(PlatformEvent.order_id).where(PlatformEvent.event_name == "funnel.order_created",
+                                                       PlatformEvent.order_id.isnot(None))
+        counts["order_created"] += (db.session.query(func.count(PlatformEvent.id))
+                                    .filter(in_month, PlatformEvent.event_name == "checkout_started",
+                                            ~func.coalesce(PlatformEvent.order_id, -1).in_(has_new))
+                                    .scalar() or 0)
+
+    steps = [s for s, _ in BUYING_STEPS if s != "disputed"]
+    conversion = {}
+    for prev, cur in zip(steps, steps[1:]):
+        conversion[f"{prev}_to_{cur}"] = (round(100.0 * counts[cur] / counts[prev], 1)
+                                          if counts[prev] else None)
+
+    paid_orders = (Order.query
+                   .filter(Order.paid_at >= start, Order.paid_at < end,
+                           func.upper(func.coalesce(Order.payment_method, "")) != "FREE")
+                   .all())
+    by_source, by_campaign = {}, {}
+    for o in paid_orders:
+        amount = float(o.total_amount or 0) if (o.currency or "NGN") == "NGN" else 0.0
+        for bucket, key in ((by_source, o.source or "unknown"), (by_campaign, o.campaign or "none")):
+            row = bucket.setdefault(key, {"paid_orders": 0, "gmv_ngn": 0.0})
+            row["paid_orders"] += 1
+            row["gmv_ngn"] = round(row["gmv_ngn"] + amount, 2)
+
+    order_ids = [o.id for o in paid_orders]
+    shipped_at = {}
+    if order_ids:
+        for oid, ts in (db.session.query(PlatformEvent.order_id, func.min(PlatformEvent.timestamp))
+                        .filter(PlatformEvent.event_name == "funnel.shipped",
+                                PlatformEvent.order_id.in_(order_ids))
+                        .group_by(PlatformEvent.order_id)):
+            shipped_at[oid] = _aware(ts)
+
+    now = datetime.now(timezone.utc)
+    hours, not_shipped = [], 0
+    for o in paid_orders:
+        paid = _aware(o.paid_at)
+        shipped = shipped_at.get(o.id) or _aware(o.delivered_at)
+        if shipped and paid and shipped >= paid:
+            hours.append((shipped - paid).total_seconds() / 3600)
+        elif (not shipped and o.released_at is None and (o.status or "").upper() not in _SHIPPED_OR_DONE
+              and paid and (now - paid).total_seconds() > NOT_SHIPPED_AFTER_HOURS * 3600):
+            not_shipped += 1
+    hours.sort()
+    median = None
+    if hours:
+        mid = len(hours) // 2
+        median = round(hours[mid] if len(hours) % 2 else (hours[mid - 1] + hours[mid]) / 2, 1)
+
+    return {
+        "steps": counts,
+        "conversion_pct": conversion,
+        "paid_by_source": by_source,
+        "paid_by_campaign": by_campaign,
+        "median_hours_paid_to_shipped": median,
+        "paid_not_shipped_after_72h": not_shipped,
+        "notes": [
+            "Website steps (views, cart, checkout, delivery, payment started) can be missed by ad blockers; "
+            "orders, paid, shipped, confirmed and disputed come from the server.",
+            "GMV by source and campaign counts NGN orders paid this month (goods only, no delivery fee).",
         ],
     }

@@ -18,6 +18,7 @@ from app.models.order import Order
 from app.models.finance import Invoice, Ledger
 from app.models.marketing import Coupon, Campaign
 from app.models.crm import CustomerProfile
+from app.services.places import place_label
 from app.utils.upload import save_uploaded_file
 from app.utils.email import send_siiqo_email
 from app.utils.algolia_sync import sync_product_to_algolia, delete_product_from_algolia
@@ -33,6 +34,7 @@ RESERVED_STORE_SLUGS = frozenset({
     'market', 'search', 'ask', 'check', 't', 'sell', 'pay', 'developers', 'help', 'id',
     'me',  # /api/passport/me is the seller's own Passport
     'start',  # Phase 1 seller onboarding page siiqo.com/start
+    'review', 'order-confirm',  # guest review and order pages (website routes)
     'fonts', 'images', 'assets',  # static folders served by the website
     # Trust Platform API v1 test-mode fixtures (app/services/platform.py)
     'test-trusted-store', 'test-new-seller', 'test-unverified',
@@ -945,7 +947,10 @@ def add_product():
         is_active=not is_draft,
         category_id=category_id,
         condition=data.get('condition') or None,
-        location=data.get('location'),
+        # A physical product with no place shows the store's "City, State".
+        location=((data.get('location') or '').strip() or
+                  (place_label(sf.city, sf.state) if (p_type or 'physical') == 'physical' else None)
+                  or None),
         latitude=float(data['latitude']) if data.get('latitude') else None,
         longitude=float(data['longitude']) if data.get('longitude') else None,
         is_negotiable=str(data.get('is_negotiable', 'false')).lower() in ('true', '1', 'yes'),
@@ -1228,6 +1233,9 @@ def edit_product(product_id):
     # Validate type-specific required fields after applying updates
     # (a hidden draft may still be missing them; they are required to go live)
     effective_type = product.product_type or 'physical'
+    if effective_type == 'physical' and not (product.location or '').strip():
+        _sf = sf or db.session.get(Storefront, product.storefront_id)
+        product.location = place_label(_sf.city, _sf.state) if _sf else None
     if product.is_active and effective_type == 'digital' and not product.file_url:
         return jsonify({"message": "A Download Link (file_url) is required for digital products."}), 400
     if product.is_active and effective_type == 'service' and not product.booking_link:

@@ -189,10 +189,27 @@ def visible_products(query=None):
     )
 
 
+def has_sellable_products():
+    """SQL condition: the store has at least one active, in-stock product
+    (digital, service and event listings count without stock)."""
+    return (
+        db.session.query(Product.id)
+        .filter(
+            Product.storefront_id == Storefront.id,
+            Product.is_active.is_(True),
+            or_(Product.is_deleted.is_(False), Product.is_deleted.is_(None)),
+            or_(Product.stock_quantity > 0, Product.product_type.in_(DIGITAL_TYPES)),
+        )
+        .exists()
+    )
+
+
 def visible_stores(query=None):
+    """Published stores of active owners with something to buy. Empty stores
+    stay reachable at their own link; they are only left out of lists."""
     q = query if query is not None else Storefront.query
     return q.join(User, Storefront.vendor_id == User.id).filter(
-        Storefront.is_published.is_(True), User.is_active.is_(True)
+        Storefront.is_published.is_(True), User.is_active.is_(True), has_sellable_products()
     )
 
 
@@ -268,6 +285,27 @@ def trust_facts(stores) -> dict[int, dict]:
             "tier": tier or "NEW",
         }
     return out
+
+
+def storefront_trust(sf, with_label: bool = True) -> dict:
+    """Trust fields for product and store payloads, identical to the Market
+    card (trust_facts) plus the Check-a-seller verdict label. No made-up
+    default: a seller with no earned score is tier "NEW" with score None."""
+    facts = trust_facts([sf]).get(getattr(sf, "vendor_id", None)) if sf is not None else None
+    facts = facts or {}
+    label = None
+    if with_label and sf is not None and sf.vendor is not None:
+        try:
+            from app.services import trust_report
+            label = trust_report.verdict(trust_report.gather(sf))["verdict"]["label"]
+        except Exception as e:  # noqa: BLE001 - a label must never break the page
+            log.warning("trust label skipped for store %s: %s", getattr(sf, "id", None), e)
+    return {
+        "trust_score": facts.get("score"),
+        "trust_score_max": facts.get("score_max") or (sf.vendor.trust_score_max if sf is not None and sf.vendor else 100),
+        "trust_tier": facts.get("tier") or "NEW",
+        "trust_label": label,
+    }
 
 
 def trust_boost(facts: dict | None) -> float:

@@ -10,6 +10,7 @@ from app.models.product import Product, Category
 from app.models.user import Storefront, User
 from app.models.community import Article, Review, ArticleSlugRedirect
 from app.models.admin import SponsoredListing
+from app.services.search import has_sellable_products, storefront_trust
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -119,9 +120,8 @@ def get_products():
             "storefront_id": p.storefront_id,
             "storefront": sf.store_name if sf else None,
             "storefront_slug": sf.store_slug if sf else None,
-            "trust_score": sf.vendor.trust_score_or_default if sf and sf.vendor else 500,
-            "trust_score_max": sf.vendor.trust_score_max if sf and sf.vendor else 1000,
-            "trust_tier": sf.vendor.trust_tier_or_default if sf and sf.vendor else 'SILVER',
+            # Same trust as the Market card; no made-up default (NEW, no score).
+            **storefront_trust(sf, with_label=False),
             # â”€â”€ vendor identity (required for chat / messaging) â”€â”€
             "vendor_id": sf.vendor_id if sf else None,
             "user_id": sf.vendor_id if sf else None,
@@ -228,9 +228,8 @@ def get_product_details(product_id):
             "state": p.storefront.state,
             "phone": p.storefront.phone,
             "social_links": p.storefront.social_links or {},
-            "trust_score": p.storefront.vendor.trust_score_or_default if p.storefront.vendor else 500,
-            "trust_score_max": p.storefront.vendor.trust_score_max if p.storefront.vendor else 1000,
-            "trust_tier": p.storefront.vendor.trust_tier_or_default if p.storefront.vendor else 'SILVER',
+            # Same trust as the Market card and Check a seller (B2).
+            **storefront_trust(p.storefront),
         } if p.storefront else None,
     }), 200
 
@@ -251,6 +250,7 @@ def get_storefronts():
         .filter(
             Storefront.is_published == True,
             User.is_active == True,
+            has_sellable_products(),  # empty stores stay out of Market lists (C1)
         )
     )
 
@@ -265,7 +265,7 @@ def get_storefronts():
     paginated = query.paginate(page=page, per_page=per_page, error_out=False)
 
     return jsonify({
-        "storefronts": [s.to_public_dict() for s in paginated.items],
+        "storefronts": [s.to_public_dict(trust_label=False) for s in paginated.items],
         "total": paginated.total,
         "page": page,
         "pages": paginated.pages,
@@ -496,6 +496,7 @@ def search():
         Storefront.query
         .filter(
             Storefront.is_published == True,
+            has_sellable_products(),  # empty stores stay out of search (C1)
             Storefront.store_name.ilike(f'%{keyword}%') | Storefront.store_description.ilike(f'%{keyword}%')
         )
     )
@@ -523,6 +524,7 @@ def search():
         fallback_storefronts = (
             Storefront.query.filter(
                 Storefront.is_published == True,
+                has_sellable_products(),
                 Storefront.store_name.ilike(f'%{keyword}%') | Storefront.store_description.ilike(f'%{keyword}%')
             ).limit(6).all()
         )
@@ -560,7 +562,7 @@ def search():
             "longitude": p.longitude,
             "product_type": p.product_type or "physical",
         } for p in products],
-        "storefronts": [s.to_public_dict() for s in storefronts],
+        "storefronts": [s.to_public_dict(trust_label=False) for s in storefronts],
         "intent": intent,
         "zero_results": is_zero_result,
     }), 200
@@ -847,6 +849,18 @@ def get_article_by_slug(slug):
 # Reviews (public read)
 # ---------------------------------------------------------------------------
 
+def public_reviewer_name(review):
+    """First name only (account or the name saved with a guest review),
+    else "Verified buyer". Never a surname or an email."""
+    name = None
+    if review.buyer is not None:
+        name = review.buyer.first_name
+    name = (name or review.reviewer_name or "").strip()
+    if not name or "@" in name:
+        return "Verified buyer"
+    return name.split()[0]
+
+
 @public_bp.route('/reviews/<int:vendor_id>', methods=['GET'])
 def get_vendor_reviews(vendor_id):
     reviews = (
@@ -868,7 +882,8 @@ def get_vendor_reviews(vendor_id):
             "id": r.id,
             "rating": r.vendor_rating,
             "text": r.review_text,
-            "buyer_name": r.buyer.full_name if r.buyer else "Anonymous",
+            "buyer_name": public_reviewer_name(r),
+            "verified_purchase": True,  # every review is tied to an order
             "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in reviews],
     }), 200

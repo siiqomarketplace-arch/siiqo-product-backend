@@ -1024,6 +1024,7 @@ def purchase_tickets(slug):
                 buyer_name=buyer_name,
                 is_guest=(user is None)
             )
+            order._funnel_kind = "event_ticket"
             db.session.add(order)
             db.session.flush()  # Get order ID
             

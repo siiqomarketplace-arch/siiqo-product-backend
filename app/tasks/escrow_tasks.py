@@ -176,15 +176,216 @@ def send_delivery_reminders():
     return reminded_count
 
 
+# ── Unpaid orders: one reminder, then a predictable cancellation ─────────────
+
+# Orders that are not "unpaid" in the Safe Pay sense: pay on delivery is
+# collected by the seller, free claims cost nothing.
+_NOT_PREPAID_METHODS = ("POD", "FREE")
+# Daya payment states where the buyer's money may be on its way or has arrived
+# but isn't confirmed yet. PENDING only counts while its rate hasn't expired.
+_DAYA_IN_FLIGHT = ("RECEIVED", "REQUIRES_REVIEW")
+UNPAID_REMINDER_AFTER = timedelta(minutes=45)
+UNPAID_REMINDER_UNTIL = timedelta(hours=20)
+
+
+def _aware(dt):
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def pending_payment_cancel_hours() -> int:
+    """How long an unpaid order waits before it is cancelled:
+    PENDING_PAYMENT_CANCEL_HOURS, default 24, kept between 1 and 72."""
+    import os
+    try:
+        hours = int(os.environ.get("PENDING_PAYMENT_CANCEL_HOURS", "24"))
+    except (TypeError, ValueError):
+        hours = 24
+    return max(1, min(72, hours))
+
+
+def _unpaid_started_at(order, escrow):
+    return _aware(getattr(escrow, "created_at", None)) or _aware(getattr(order, "created_at", None))
+
+
+def _is_prepaid_unpaid(order, escrow) -> bool:
+    """True for an order still waiting for the buyer to pay online."""
+    if order is None or escrow is None or escrow.status != EscrowStatus.PENDING_PAYMENT:
+        return False
+    if (order.payment_method or "").upper() in _NOT_PREPAID_METHODS:
+        return False
+    if (order.status or "").upper() in ("CANCELLED", "PENDING_DELIVERY"):
+        return False
+    payable = float(order.total_amount or 0) + float(order.logistics_fee or 0)
+    return payable > 0
+
+
+def unpaid_cancel_at(order, escrow):
+    """When an unpaid order will be cancelled, or None if it isn't waiting for payment."""
+    if not _is_prepaid_unpaid(order, escrow):
+        return None
+    start = _unpaid_started_at(order, escrow)
+    return start + timedelta(hours=pending_payment_cancel_hours()) if start else None
+
+
+def daya_payment_in_flight(order_id, include_open_accounts=True) -> bool:
+    """True while a Daya bank transfer / crypto payment for this order may still
+    land: money received but not confirmed, under review, or (when
+    include_open_accounts) a payment account whose rate hasn't expired yet.
+    Such orders are not cancelled."""
+    from app.models.withdrawal import DayaPayment
+    now = utcnow()
+    for dp in DayaPayment.query.filter_by(order_id=order_id).all():
+        status = (dp.status or "").upper()
+        if status in _DAYA_IN_FLIGHT:
+            return True
+        if status == "PENDING" and include_open_accounts:
+            expires = _aware(dp.rate_expires_at)
+            if expires is not None and expires > now:
+                return True
+    return False
+
+
+def _money(order, amount) -> str:
+    currency = (getattr(order, "currency", None) or "NGN").upper()
+    return f"₦{amount:,.2f}" if currency == "NGN" else f"{currency} {amount:,.2f}"
+
+
+def _buyer_email_for(order):
+    """The buyer's real email: the address on the order, else their account's."""
+    email = buyer_email_address(order)
+    if email:
+        return email
+    buyer = getattr(order, "buyer", None)
+    return real_email(buyer.email) if buyer is not None else None
+
+
+def _buyer_first_name(order):
+    try:
+        if order.buyer is not None and order.buyer.first_name:
+            return order.buyer.first_name
+    except Exception:  # noqa: BLE001
+        pass
+    name = (getattr(order, "buyer_name", None) or "").strip()
+    return name.split(" ")[0] if name and "@" not in name else "there"
+
+
+def _items_summary(order) -> str:
+    parts = []
+    for it in order.items:
+        name = it.product.name if it.product else "Item"
+        parts.append(f"{name} x{it.quantity}" if (it.quantity or 1) > 1 else name)
+    return ", ".join(parts) or "your items"
+
+
+def _store_name(order):
+    try:
+        sf = order.vendor.storefront if order.vendor else None
+        return sf.store_name if sf and sf.store_name else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _order_again_url(order) -> str:
+    for it in order.items:
+        if it.product is not None and getattr(it.product, "is_active", True):
+            return f"https://siiqo.com/products/{it.product.id}"
+    try:
+        sf = order.vendor.storefront if order.vendor else None
+        if sf and sf.store_slug:
+            return f"https://siiqo.com/{sf.store_slug}"
+    except Exception:  # noqa: BLE001
+        pass
+    return "https://siiqo.com"
+
+
+def send_unpaid_reminders():
+    """
+    One email (and an in-app notice for signed-in buyers) for an order that is
+    still waiting for payment 45 minutes after it was placed, with the private
+    link to finish paying and the exact time it will be cancelled.
+    Runs every hour.
+    """
+    from app.routes.escrow import generate_order_token
+    from app.utils.email import send_siiqo_email
+
+    now = utcnow()
+    hours = pending_payment_cancel_hours()
+    newest = now - UNPAID_REMINDER_AFTER
+    oldest = now - min(UNPAID_REMINDER_UNTIL, timedelta(hours=hours))
+
+    rows = (EscrowTransaction.query
+            .join(Order, Order.id == EscrowTransaction.order_id)
+            .filter(EscrowTransaction.status == EscrowStatus.PENDING_PAYMENT,
+                    EscrowTransaction.created_at <= newest,
+                    EscrowTransaction.created_at >= oldest,
+                    Order.payment_reminded_at.is_(None))
+            .all())
+
+    sent = 0
+    for escrow in rows:
+        order = escrow.order
+        try:
+            if not _is_prepaid_unpaid(order, escrow):
+                continue
+            # Money already sent and being confirmed: don't tell them it's missing.
+            if daya_payment_in_flight(order.id, include_open_accounts=False):
+                continue
+            email = _buyer_email_for(order)
+            if not email and not order.buyer_id:
+                continue
+            cancel_at = unpaid_cancel_at(order, escrow)
+            when = format_deadline(cancel_at)
+            link = f"https://siiqo.com/order-confirm/{order.id}?token={generate_order_token(order.id)}"
+            total = _money(order, float(order.total_amount or 0) + float(order.logistics_fee or 0))
+            store = _store_name(order)
+
+            order.payment_reminded_at = now
+            if order.buyer_id:
+                db.session.add(Notification(
+                    user_id=order.buyer_id,
+                    title=f"Your order #{order.id} is waiting",
+                    message=(f"Order #{order.id} ({total}) hasn't been paid yet. "
+                             f"Pay by {when} or it will be cancelled."),
+                    type="ORDER",
+                    order_id=order.id,
+                ))
+            db.session.commit()
+
+            if email:
+                send_siiqo_email(
+                    to_email=email,
+                    subject=f"Your order #{order.id} is waiting",
+                    template_name="base_notification",
+                    first_name=_buyer_first_name(order),
+                    title="Your order is waiting for payment",
+                    message=(f"You ordered {_items_summary(order)}"
+                             f"{' from ' + store if store else ''}. Total: {total}. "
+                             f"We haven't received your payment yet. Complete your payment here: {link} "
+                             f"If it isn't paid within {hours} hours of ordering, by {when}, "
+                             "the order will be cancelled. Nothing has been charged."),
+                    cta_text="Complete payment",
+                    cta_url=link,
+                )
+            sent += 1
+        except Exception as e:  # noqa: BLE001
+            db.session.rollback()
+            logger.info(f"  ✗ Unpaid reminder failed for order {getattr(order, 'id', '?')}: {e}")
+    logger.info(f"[{utcnow()}] Unpaid reminders sent: {sent}")
+    return sent
+
+
 def check_pending_payments():
     """
-    Check for orders stuck in PENDING_PAYMENT for more than 24 hours and cancel them.
-    Run this task daily.
+    Cancel orders still unpaid PENDING_PAYMENT_CANCEL_HOURS (default 24) after
+    they were placed, put the stock back and tell the buyer once. Orders with a
+    Daya payment still on its way are left alone. Runs every hour.
     """
     logger.info(f"[{utcnow()}] Running pending payment check task...")
 
-    # Find escrow transactions that are PENDING_PAYMENT for more than 1 hour
-    cutoff_time = utcnow() - timedelta(hours=1)
+    hours = pending_payment_cancel_hours()
+    cutoff_time = utcnow() - timedelta(hours=hours)
 
     stale_escrows = EscrowTransaction.query.filter(
         EscrowTransaction.status == EscrowStatus.PENDING_PAYMENT,
@@ -198,6 +399,11 @@ def check_pending_payments():
             order = escrow.order
             if not order:
                 continue
+            if (order.payment_method or "").upper() in _NOT_PREPAID_METHODS:
+                continue
+            if daya_payment_in_flight(order.id):
+                logger.info(f"  … Order #{order.id} has a Daya payment in progress; not cancelled")
+                continue
 
             # Restore stock quantity for the items in the cancelled order
             for item in order.items:
@@ -208,20 +414,39 @@ def check_pending_payments():
             escrow.status = EscrowStatus.CANCELLED
             order.status = 'CANCELLED'
 
-            # Notify buyer
+            notice = (f"Order #{order.id} was cancelled because payment didn't arrive within "
+                      f"{hours} hours. Nothing was charged.")
             if order.buyer_id:
                 db.session.add(Notification(
                     user_id=order.buyer_id,
                     title="Order Cancelled",
-                    message=f"Order #{order.id} was cancelled due to non-payment within 1 hour.",
+                    message=notice,
                     type="ORDER",
                     order_id=order.id,
                 ))
 
             db.session.commit()
             cancelled_count += 1
-
             logger.info(f"  ✓ Cancelled stale order #{order.id}")
+
+            # The status change to CANCELLED happens once, so this email does too.
+            email = _buyer_email_for(order)
+            if email:
+                try:
+                    from app.utils.email import send_siiqo_email
+                    again = _order_again_url(order)
+                    send_siiqo_email(
+                        to_email=email,
+                        subject=f"Order #{order.id} was cancelled",
+                        template_name="base_notification",
+                        first_name=_buyer_first_name(order),
+                        title="Your order was cancelled",
+                        message=f"{notice} You can order again: {again}",
+                        cta_text="Order again",
+                        cta_url=again,
+                    )
+                except Exception as mail_err:  # noqa: BLE001
+                    logger.info(f"  [UNPAID] cancel email not sent for order {order.id}: {mail_err}")
 
         except Exception as e:
             db.session.rollback()
@@ -230,6 +455,108 @@ def check_pending_payments():
 
     logger.info(f"[{utcnow()}] Pending payment check completed. Cancelled {cancelled_count} order(s).")
     return cancelled_count
+
+
+# ── Sellers: reminders to ship paid orders ───────────────────────────────────
+
+_SHIP_REMINDER_AT = {0: 24, 1: 48}   # reminders already sent -> hours since paid
+_UNSHIPPED_ORDER_STATUSES = ("PAID", "PROCESSING")
+
+
+def _needs_shipping(order) -> bool:
+    """A paid physical order the seller has to send out (not pickup, not
+    digital or service, not pay on delivery)."""
+    from app.services.delivery import PICKUP_IDS
+    if (order.payment_method or "").upper() in _NOT_PREPAID_METHODS:
+        return False
+    if (order.logistics_provider_id or "") in PICKUP_IDS:
+        return False
+    items = list(order.items)
+    if not items:
+        return False
+    return any(((it.product.product_type if it.product else None) or "physical") == "physical"
+               for it in items)
+
+
+def send_ship_reminders():
+    """
+    Remind the seller when a paid physical order hasn't been marked shipped:
+    once 24 hours after payment, again at 48 hours. Email, in-app notice, and
+    Telegram when the seller has linked it. Runs every hour.
+    """
+    from app.utils.email import send_siiqo_email
+    from app.utils.telegram import send_telegram_message
+
+    now = utcnow()
+    rows = (EscrowTransaction.query
+            .join(Order, Order.id == EscrowTransaction.order_id)
+            .filter(EscrowTransaction.status == EscrowStatus.IN_ESCROW,
+                    Order.status.in_(_UNSHIPPED_ORDER_STATUSES),
+                    db.or_(Order.ship_reminders_sent.is_(None), Order.ship_reminders_sent < 2))
+            .all())
+
+    sent = 0
+    for escrow in rows:
+        order = escrow.order
+        try:
+            paid_at = _aware(order.paid_at) or _aware(escrow.paid_at)
+            if paid_at is None or not _needs_shipping(order):
+                continue
+            already = order.ship_reminders_sent or 0
+            due_hours = _SHIP_REMINDER_AT.get(already)
+            if due_hours is None or now - paid_at < timedelta(hours=due_hours):
+                continue
+            try:
+                from app.services.disputes import payout_blocked
+                if payout_blocked(order, escrow):
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+
+            hours_ago = int((now - paid_at).total_seconds() // 3600)
+            text = (f"Order #{order.id} was paid {hours_ago} hours ago and hasn't been marked shipped. "
+                    "The buyer is waiting. Ship it and mark it shipped here: https://siiqo.com/vendor/orders")
+            if already >= 1:
+                text += " If you can't fulfil it, cancel it so the buyer is refunded."
+
+            order.ship_reminders_sent = already + 1
+            db.session.add(Notification(
+                user_id=order.vendor_id,
+                title=f"Ship order #{order.id}",
+                message=text,
+                type="ORDER",
+                order_id=order.id,
+            ))
+            db.session.commit()
+            sent += 1
+
+            vendor = order.vendor
+            if vendor is not None and vendor.email:
+                try:
+                    send_siiqo_email(
+                        to_email=vendor.email,
+                        subject=f"Order #{order.id} is waiting to be shipped",
+                        template_name="base_notification",
+                        first_name=vendor.first_name or "there",
+                        title="Your buyer is waiting",
+                        message=text,
+                        cta_text="Mark it shipped",
+                        cta_url="https://siiqo.com/vendor/orders",
+                    )
+                except Exception as mail_err:  # noqa: BLE001
+                    logger.info(f"  [SHIP] reminder email not sent for order {order.id}: {mail_err}")
+            if vendor is not None and getattr(vendor, "telegram_id", None):
+                try:
+                    send_telegram_message(vendor.telegram_id, text.replace(
+                        "https://siiqo.com/vendor/orders",
+                        "<a href='https://siiqo.com/vendor/orders'>siiqo.com/vendor/orders</a>"))
+                except Exception as tg_err:  # noqa: BLE001
+                    logger.info(f"  [SHIP] Telegram reminder not sent for order {order.id}: {tg_err}")
+        except Exception as e:  # noqa: BLE001
+            db.session.rollback()
+            logger.info(f"  ✗ Ship reminder failed for order {getattr(order, 'id', '?')}: {e}")
+    logger.info(f"[{utcnow()}] Ship reminders sent: {sent}")
+    return sent
 
 
 # Main task runner (call this from cron job or scheduler)
@@ -241,7 +568,9 @@ def run_all_escrow_tasks():
 
     auto_release_escrow()
     send_delivery_reminders()
+    send_unpaid_reminders()
     check_pending_payments()
+    send_ship_reminders()
 
     logger.info("=" * 60)
     logger.info("ALL TASKS COMPLETED")
@@ -265,7 +594,12 @@ def format_deadline(deadline) -> str:
 
 def buyer_email_address(order):
     """The buyer's real email, or None for the guest placeholders Pay Links store."""
-    email = (getattr(order, "buyer_email", None) or "").strip()
+    return real_email(getattr(order, "buyer_email", None))
+
+
+def real_email(raw):
+    """raw if it is a real address, else None (empty or a guest placeholder)."""
+    email = (raw or "").strip()
     if not email or "@" not in email:
         return None
     lowered = email.lower()
@@ -281,7 +615,7 @@ def email_buyer_confirm_by(order, deadline, reminder=False) -> None:
     if not email:
         return
     try:
-        from app.routes.escrow import generate_order_token
+        from app.routes.escrow import generate_order_token, review_url
         from app.utils.email import send_siiqo_email
         link = f"https://siiqo.com/order-confirm/{order.id}?token={generate_order_token(order.id)}"
         when = format_deadline(deadline)
@@ -302,7 +636,9 @@ def email_buyer_confirm_by(order, deadline, reminder=False) -> None:
             message=(f"{seller} marked order #{order.id} as delivered. Your payment is still held by Safe Pay. "
                      f"Please confirm it arrived, or report a problem, by {when}. "
                      "If you do neither, the seller is paid then. "
-                     "Keep this link private: it is only for you. Never share it with the seller."),
+                     "Keep this link private: it is only for you. Never share it with the seller."
+                     + ("" if reminder else
+                        f" How was it? Rate {store or 'the seller'} in one tap: {review_url(order.id)}")),
             cta_text="Confirm or report a problem",
             cta_url=link,
         )

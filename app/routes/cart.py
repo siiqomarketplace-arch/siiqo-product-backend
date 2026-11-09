@@ -20,6 +20,8 @@ from app.utils.email import send_siiqo_email
 from app.utils.telegram import send_telegram_message
 from app.routes.escrow import generate_order_token
 from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
+from app.services.attribution import apply_to_order as apply_attribution
+from app.services.delivery import DeliveryError, price_option as price_delivery_option
 
 cart_bp = Blueprint('cart', __name__)
 
@@ -469,14 +471,17 @@ def checkout():
         if has_physical_items and logistics_selections:
             for sel in logistics_selections:
                 sel_vid = sel.get('vendorId')
-                if sel_vid is not None and int(sel_vid) == int(vid):
-                    opt = sel.get('selectedOption') or {}
+                if sel_vid is not None and str(sel_vid).strip().isdigit() and int(sel_vid) == int(vid):
+                    # The server prices the option; the browser's fee is not
+                    # trusted (app/services/delivery.py).
                     try:
-                        raw_fee = float(opt.get('fee', 0.0))
-                        logistics_fee = max(0.0, raw_fee)
-                    except (ValueError, TypeError):
-                        logistics_fee = 0.0
-                    logistics_provider_id = opt.get('id')
+                        logistics_fee, logistics_provider_id = price_delivery_option(
+                            sel.get('selectedOption') or {},
+                            vendor_user.storefront if vendor_user else None,
+                            data.get('delivery_city'), data.get('delivery_state'))
+                    except DeliveryError as e:
+                        db.session.rollback()
+                        return jsonify({"code": e.code, "message": e.message}), e.status
                     break
 
         guest_email = (data.get('delivery_email') or data.get('email') or (data.get('customer', {}).get('email')) or (user.email if user else '')).strip().lower()
@@ -515,6 +520,11 @@ def checkout():
             delivery_phone=guest_phone or None,
             delivery_name=guest_name or (data.get('customer', {}).get('name') if data.get('customer') else None),
         )
+        # Where the buyer came from; funnel.order_created is recorded by the
+        # flush hook in app/services/foundations.py.
+        apply_attribution(new_order, data, request.headers)
+        new_order._funnel_kind = "cart"
+        new_order._funnel_session_id = data.get("session_id") or request.headers.get("X-Session-ID")
         db.session.add(new_order)
         db.session.flush()
 

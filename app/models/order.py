@@ -78,6 +78,16 @@ class Order(db.Model):
     delivered_at = db.Column(db.DateTime(timezone=True), nullable=True)
     released_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # Where the buyer came from (app/services/attribution.py): utm_source or
+    # pay_link / telegram / whatsapp / market / store / direct, and utm_campaign.
+    source = db.Column(db.String(40), nullable=True)
+    campaign = db.Column(db.String(100), nullable=True)
+
+    # When the unpaid-order reminder went out (one per order), and how many
+    # "please ship" reminders the seller has had (0, 1 or 2).
+    payment_reminded_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    ship_reminders_sent = db.Column(db.Integer, default=0)
+
     # Relationships
     buyer = db.relationship('User', foreign_keys=[buyer_id])
     vendor = db.relationship('User', foreign_keys=[vendor_id])

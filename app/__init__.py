@@ -105,6 +105,9 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source VARCHAR(40)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign VARCHAR(100)",
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS delivery_settings JSON",
                 "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS buyer_reminded_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE passport_api_clients ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
                 "CREATE INDEX IF NOT EXISTS ix_passport_api_clients_owner_user_id ON passport_api_clients (owner_user_id)",
@@ -194,6 +197,12 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(255)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_phone VARCHAR(50)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_guest BOOLEAN DEFAULT FALSE",
+                # ── Unpaid-order reminder, seller ship reminders ─────────────
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reminded_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ship_reminders_sent INTEGER DEFAULT 0",
+                # ── Reviews from guest buyers (private review link) ──────────
+                "ALTER TABLE reviews ALTER COLUMN buyer_id DROP NOT NULL",
+                "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS reviewer_name VARCHAR(80)",
                 # ── Daya Payments Guest Support ──────────────────────────────
                 "ALTER TABLE daya_payments ALTER COLUMN buyer_id DROP NOT NULL",
                 # ── Articles Schema Enhancements ─────────────────────────────
@@ -471,6 +480,21 @@ def create_app(config_name: str | None = None) -> Flask:
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] Articles table verification skipped: {_e}")
 
+        # ── Store place backfill (BUYING_FIX_PLAN C2) ────────────────────────
+        # Stores set up through the website interview saved their place as one
+        # free-text "location" answer that publish never read. Fill empty
+        # store city/state from those answers, then empty physical product
+        # locations from their store. Only fills blanks; a no-op once done.
+        try:
+            from app.services.places import backfill_store_places
+            _stats = backfill_store_places()
+            if _stats["stores"] or _stats["products"]:
+                logging.getLogger(__name__).info(
+                    f"[STARTUP] Place backfill: {_stats['stores']} store(s), {_stats['products']} product(s)")
+        except Exception as _e:
+            db.session.rollback()
+            logging.getLogger(__name__).warning(f"[STARTUP] Place backfill skipped: {_e}")
+
     # -----------------------------------------------------------------------
     # Basic Logging Configuration
     # -----------------------------------------------------------------------
@@ -622,6 +646,8 @@ def create_app(config_name: str | None = None) -> Flask:
 
     from app.routes.passport import passport_bp
     app.register_blueprint(passport_bp, url_prefix='/api/passport')
+    from app.routes.product_questions import product_questions_bp
+    app.register_blueprint(product_questions_bp, url_prefix='/api/public')
     from app.routes.check import check_bp
     app.register_blueprint(check_bp, url_prefix='/api/check')
     from app.routes.trust_report import trust_report_bp
@@ -719,6 +745,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 auto_release_escrow,
                 send_delivery_reminders,
                 check_pending_payments,
+                send_unpaid_reminders,
+                send_ship_reminders,
             )
             from app.tasks.onboarding_tasks import run_onboarding_email_sequence
             from app.tasks.recap_tasks import run_monday_recap_task
@@ -741,12 +769,29 @@ def create_app(config_name: str | None = None) -> Flask:
                 name='Remind buyers to confirm delivery',
                 replace_existing=True,
             )
-            # Cancel stale unpaid orders once a day
+            # Cancel unpaid orders every hour, PENDING_PAYMENT_CANCEL_HOURS
+            # (default 24) after they were placed.
             scheduler.add_job(
                 func=lambda: _run_in_context(app, check_pending_payments),
-                trigger=IntervalTrigger(hours=24),
+                trigger=IntervalTrigger(hours=1),
                 id='check_pending_payments',
-                name='Cancel orders stuck in PENDING_PAYMENT for 24 h',
+                name='Cancel orders unpaid after PENDING_PAYMENT_CANCEL_HOURS',
+                replace_existing=True,
+            )
+            # Remind buyers once about an unpaid order (45 min to 20 h old)
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, send_unpaid_reminders),
+                trigger=IntervalTrigger(hours=1),
+                id='send_unpaid_reminders',
+                name='Remind buyers to finish paying',
+                replace_existing=True,
+            )
+            # Remind sellers to ship paid orders (24 h and 48 h after payment)
+            scheduler.add_job(
+                func=lambda: _run_in_context(app, send_ship_reminders),
+                trigger=IntervalTrigger(hours=1),
+                id='send_ship_reminders',
+                name='Remind sellers to ship paid orders',
                 replace_existing=True,
             )
             # Onboarding email sequence — check every 6 hours (lightweight)

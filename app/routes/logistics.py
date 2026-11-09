@@ -12,6 +12,7 @@ from app.models.user import Storefront, User, UserRole
 from app.models.escrow import LogisticsAssignment
 from app.models.partnerships import PartnerApplication, PartnerStaff
 from app.models.communication import Notification
+from app.services.delivery import DeliveryError, clean_delivery_settings, public_delivery_settings
 
 logistics_bp = Blueprint('logistics', __name__)
 
@@ -38,10 +39,12 @@ def vendor_logistics_settings():
                     "enabled_logistics": sf.logistics_settings or [],
                     "store_city": sf.city,
                     "store_state": sf.state,
+                    "delivery_settings": public_delivery_settings(sf),
                 }), 200
         except Exception:
             pass
-        return jsonify({"enabled_logistics": [], "store_city": None, "store_state": None}), 200
+        return jsonify({"enabled_logistics": [], "store_city": None, "store_state": None,
+                        "delivery_settings": None}), 200
 
     user_id = get_jwt_identity()
     if not user_id:
@@ -57,10 +60,17 @@ def vendor_logistics_settings():
             "enabled_logistics": sf.logistics_settings or [],
             "store_city": sf.city,
             "store_state": sf.state,
+            "delivery_settings": public_delivery_settings(sf),
         }), 200
 
     data = request.get_json() or {}
-    sf.logistics_settings = data.get('enabled_logistics', [])
+    if 'delivery_settings' in data:
+        try:
+            sf.delivery_settings = clean_delivery_settings(data.get('delivery_settings'))
+        except DeliveryError as e:
+            return jsonify({"code": e.code, "message": e.message}), e.status
+    if 'enabled_logistics' in data or 'delivery_settings' not in data:
+        sf.logistics_settings = data.get('enabled_logistics', [])
     if 'store_city' in data:
         sf.city = data['store_city']
     if 'store_state' in data:

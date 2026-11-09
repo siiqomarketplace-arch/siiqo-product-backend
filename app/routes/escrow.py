@@ -16,6 +16,7 @@ import uuid
 import os
 import hmac
 import hashlib
+import html as _html
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, request, jsonify
@@ -1408,7 +1409,8 @@ def execute_order_escrow_release(order, escrow, source="admin"):
                 first_name=buyer_name,
                 notice_text=(
                     f"Thank you! Order #{order.id} is now complete and payment has been released to the vendor.<br><br>"
-                    "We hope you enjoyed your purchase. Leave a review from your order dashboard."
+                    f"How was it? Rate {_html.escape(_store_name(order))} in one tap: "
+                    f"<a href='{review_url(order.id)}'>{review_url(order.id)}</a>"
                 ),
             )
         except Exception as e:
@@ -1593,6 +1595,196 @@ def generate_order_token(order_id: int) -> str:
     return hmac.new(secret, f"order-confirm-{order_id}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
+def generate_review_token(order_id: int) -> str:
+    """Private link token for reviewing an order without an account.
+    Separate from the order token, so a review link can't confirm delivery."""
+    secret = (os.environ.get("SECRET_KEY") or "siiqo-secret-key-salt-2026").encode()
+    return hmac.new(secret, f"order-review-{order_id}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def review_token_valid(order_id, token) -> bool:
+    token = (token or "").strip()
+    if not token or order_id is None:
+        return False
+    return hmac.compare_digest(generate_review_token(int(order_id)), token)
+
+
+def review_url(order_id: int) -> str:
+    return f"https://siiqo.com/review/{order_id}?token={generate_review_token(order_id)}"
+
+
+def review_block_reason(order):
+    """None when the order can be reviewed now, else NOT_DELIVERED_YET or
+    ALREADY_REVIEWED. Same gate for the logged-in and the review-link routes."""
+    from app.models.community import Review
+    order_status = (order.status or "").upper()
+    escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    escrow_status = (escrow.status or "").upper() if escrow else ""
+    if order_status not in ('COMPLETED', 'DELIVERED') and escrow_status not in ('RELEASED', 'REFUNDED'):
+        return "NOT_DELIVERED_YET"
+    # One review per order, whoever wrote it (guest link or signed-in buyer).
+    if Review.query.filter_by(order_id=order.id).first() is not None:
+        return "ALREADY_REVIEWED"
+    return None
+
+
+def buyer_first_name(order):
+    """First name only, for the review page and public reviews. Never the email."""
+    name = None
+    try:
+        if order.buyer is not None:
+            name = order.buyer.first_name
+    except Exception:  # noqa: BLE001
+        name = None
+    if not name:
+        name = getattr(order, "buyer_name", None)
+    name = (name or "").strip()
+    if not name or "@" in name:
+        return None
+    return name.split()[0][:80]
+
+
+def _store_name(order):
+    try:
+        sf = order.vendor.storefront if order.vendor else None
+        if sf and sf.store_name:
+            return sf.store_name
+    except Exception:  # noqa: BLE001
+        pass
+    return "the seller"
+
+
+def _item_image(product):
+    if product is None:
+        return None
+    for attr in ("image_url", "main_image", "thumbnail"):
+        val = getattr(product, attr, None)
+        if isinstance(val, str) and val:
+            return val
+    imgs = getattr(product, "images", None)
+    if isinstance(imgs, (list, tuple)) and imgs:
+        first = imgs[0]
+        if isinstance(first, str):
+            return first
+        if isinstance(first, dict):
+            return first.get("url") or first.get("image_url")
+    return None
+
+
+def _parse_rating(value):
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, float) and value != rating:
+        return None
+    return rating if 1 <= rating <= 5 else None
+
+
+def create_order_review(order, vendor_rating, product_rating, review_text, buyer_id=None, reviewer_name=None):
+    """Save a review, tell the seller and refresh their trust score.
+    Shared by POST /reviews and POST /escrow/review-by-token."""
+    from app.models.community import Review
+    product_id = None
+    for it in order.items:
+        if it.product_id:
+            product_id = it.product_id
+            break
+    review = Review(
+        order_id=order.id,
+        buyer_id=buyer_id,
+        vendor_id=order.vendor_id,
+        product_id=product_id,
+        vendor_rating=vendor_rating,
+        product_rating=product_rating,
+        review_text=review_text or None,
+        reviewer_name=reviewer_name,
+    )
+    db.session.add(review)
+    db.session.add(Notification(
+        user_id=order.vendor_id,
+        title=f"New Review ({vendor_rating}/5 ⭐)",
+        message=review_text or f"A buyer left a {vendor_rating}-star review for Order #{order.id}.",
+        type="REVIEW",
+        order_id=order.id,
+    ))
+    db.session.commit()
+    try:
+        from app.services.trust import recalculate_vendor_trust
+        recalculate_vendor_trust(order.vendor_id, reason="Review Submitted")
+    except Exception as e:  # noqa: BLE001
+        logging.error(f"[TRUST ERROR] Failed to recalculate trust on review submit: {e}")
+    return review
+
+
+@escrow_bp.route('/review-by-token', methods=['GET'])
+@limiter.limit("60 per hour")
+def get_review_by_token():
+    """What the guest review page shows. Needs the private review token."""
+    order_id = request.args.get('order_id', type=int)
+    token = request.args.get('token')
+    order = db.session.get(Order, order_id) if order_id else None
+    if not order or not review_token_valid(order_id, token):
+        return jsonify({"message": "This review link is not valid."}), 404
+
+    items = []
+    for it in order.items:
+        product = it.product
+        items.append({
+            "name": product.name if product else "Item",
+            "image": _item_image(product),
+        })
+    reason = review_block_reason(order)
+    return jsonify({
+        "order_id": order.id,
+        "store_name": _store_name(order),
+        "items": items,
+        "can_review": reason is None,
+        "reason": reason,
+        "buyer_first_name": buyer_first_name(order),
+    }), 200
+
+
+@escrow_bp.route('/review-by-token', methods=['POST'])
+@limiter.limit("10 per hour")
+def submit_review_by_token():
+    """Leave a review from the private link in the order emails. No account needed."""
+    data = request.get_json(silent=True) or {}
+    try:
+        order_id = int(data.get('order_id'))
+    except (TypeError, ValueError):
+        order_id = None
+    order = db.session.get(Order, order_id) if order_id else None
+    if not order or not review_token_valid(order_id, data.get('token')):
+        return jsonify({"message": "This review link is not valid."}), 404
+
+    vendor_rating = _parse_rating(data.get('vendor_rating'))
+    if vendor_rating is None:
+        return jsonify({"message": "Pick a rating from 1 to 5.", "code": "BAD_RATING"}), 400
+    product_rating = None
+    if data.get('product_rating') not in (None, ""):
+        product_rating = _parse_rating(data.get('product_rating'))
+        if product_rating is None:
+            return jsonify({"message": "Pick a product rating from 1 to 5.", "code": "BAD_RATING"}), 400
+    review_text = data.get('review') or data.get('review_text') or ''
+    if not isinstance(review_text, str):
+        return jsonify({"message": "Review must be text.", "code": "BAD_REVIEW"}), 400
+    review_text = review_text.strip()
+    if len(review_text) > 1000:
+        return jsonify({"message": "Keep your review under 1000 characters.", "code": "REVIEW_TOO_LONG"}), 400
+
+    reason = review_block_reason(order)
+    if reason == "NOT_DELIVERED_YET":
+        return jsonify({"message": "You can review this order once it has been delivered.",
+                        "code": reason}), 400
+    if reason == "ALREADY_REVIEWED":
+        return jsonify({"message": "This order has already been reviewed. Thank you!", "code": reason}), 409
+
+    create_order_review(order, vendor_rating, product_rating, review_text,
+                        buyer_id=order.buyer_id, reviewer_name=buyer_first_name(order))
+    return jsonify({"status": "success", "message": "Thank you for your review!"}), 201
+
+
 @escrow_bp.route('/order-details-by-token', methods=['GET'])
 @jwt_required(optional=True)
 def get_order_details_by_token():
@@ -1662,9 +1854,32 @@ def get_order_details_by_token():
                 "price": float(unit_price or 0),
             })
 
+        # What the website needs to resume an unpaid order, and the review link.
+        from app.tasks.escrow_tasks import unpaid_cancel_at
+        escrow_status = escrow_row.status if escrow_row else None
+        cancel_at = unpaid_cancel_at(order, escrow_row)
+        is_order_buyer = False
+        try:
+            is_order_buyer = bool(user_id) and order.buyer_id is not None and int(user_id) == order.buyer_id
+        except (TypeError, ValueError):
+            is_order_buyer = False
+        order_review_url = None
+        if (token_valid or is_order_buyer) and review_block_reason(order) is None:
+            order_review_url = review_url(order.id)
+        resume = {
+            "payment_method": order.payment_method,
+            "escrow_status": escrow_status,
+            "total_payable": round(float(order.total_amount or 0) + float(order.logistics_fee or 0), 2),
+            "cancel_at": cancel_at.isoformat() if cancel_at else None,
+            "is_guest_order": order.buyer_id is None,
+            "review_url": order_review_url,
+        }
+
         return jsonify({
             "status": "success",
+            **resume,
             "order": {
+                **resume,
                 "id": order.id,
                 "status": order.status,
                 "total_amount": float(order.total_amount),
