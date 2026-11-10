@@ -1636,7 +1636,7 @@ def my_referral_stats():
             "total_referred": len(referrals),
             "pending_rewards": sum(float(r.reward_earned or 0) for r in referrals if r.status == 'PENDING'),
             "total_earned": total_earned,
-            "total_cash_earned": len(referrals) * 100.00,
+            "total_cash_earned": 0.0,  # no cash referral reward exists; never show an invented figure
             "points_balance": float(user.points_balance or 0),
             "referred_users": referred_users,
         },

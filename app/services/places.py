@@ -137,6 +137,58 @@ def split_place(text) -> tuple[str | None, str | None]:
     return _clip(text), None
 
 
+def clean_place(city, state) -> tuple[str | None, str | None]:
+    """A store's saved city/state, tidied for display and matching.
+
+    Sellers saved the same place many ways ("FCT, Nigeria", "Abuja, Nigeria",
+    "Federal Capital Territory, Nigeria", "Lagos state"). This reads them as
+    one state without rewriting what is stored. Text that names no Nigerian
+    state is kept, minus a trailing "Nigeria"; nothing is guessed.
+    """
+    def _strip(v):
+        if not isinstance(v, str):
+            return None
+        words = [o for o, n in _tokens(v) if n not in ("nigeria", "ng")]
+        return _clip(" ".join(words))
+
+    raw_city, raw_state = _strip(city), _strip(state)
+    canon = None
+    if raw_state:
+        hit = _last_match([n for _, n in _tokens(raw_state) if n not in _DROP], _STATE_ALIASES)
+        canon = hit[2] if hit else None
+    if canon is None and raw_city:
+        # No usable state: the city text may hold one ("Ikeja Lagos", "Abuja").
+        c2, s2 = split_place(raw_city)
+        if s2:
+            raw_city, canon = c2, s2
+    out_state = canon or raw_state
+    out_city = raw_city
+    if out_city and out_state and out_city.strip().lower() == out_state.strip().lower():
+        out_city = None                                  # "Lagos, Lagos" -> "Lagos"
+    if canon == "FCT" and (not out_city or out_city.lower() in ("fct", "federal capital territory")):
+        out_city = "Abuja"
+    return out_city, out_state
+
+
+def place_terms(query) -> list[str]:
+    """Search terms for a place filter. A state name (in any spelling) expands to
+    every way sellers wrote it, so "FCT" also finds "Abuja, Nigeria" and
+    "Federal Capital Territory". Anything else is used as typed."""
+    q = " ".join(str(query or "").split())
+    if not q:
+        return []
+    norms = [n for _, n in _tokens(q) if n not in _DROP]
+    hit = _last_match(norms, _STATE_ALIASES)
+    if not hit or (hit[1] - hit[0]) != len(norms):
+        return [q]                                       # a city or free text, not just a state
+    state = hit[2]
+    terms = {state}
+    for alias, value in _STATE_ALIASES.items():
+        if value == state:
+            terms.add("".join(alias) if all(len(a) == 1 for a in alias) else " ".join(alias))
+    return sorted(terms, key=lambda t: (-len(t), t))
+
+
 def place_label(city, state) -> str | None:
     """'City, State' (or whichever part exists) for product.location."""
     parts = []

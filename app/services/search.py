@@ -353,8 +353,8 @@ def product_card(p, facts: dict | None) -> dict:
         "store": {
             "name": sf.store_name if sf else None,
             "slug": sf.store_slug if sf else None,
-            "city": sf.city if sf else None,
-            "state": sf.state if sf else None,
+            "city": _place(sf)[0],
+            "state": _place(sf)[1],
         },
         "href": f"/products/{p.id}",
         "store_href": f"/{sf.store_slug}" if sf else None,
@@ -371,7 +371,7 @@ def store_card(sf, facts: dict | None) -> dict:
         "name": sf.store_name,
         "image": sf.store_logo,
         "description": (desc[:157] + "...") if len(desc) > 160 else (desc or None),
-        "store": {"name": sf.store_name, "slug": sf.store_slug, "city": sf.city, "state": sf.state},
+        "store": {"name": sf.store_name, "slug": sf.store_slug, "city": _place(sf)[0], "state": _place(sf)[1]},
         "href": f"/{sf.store_slug}",
         "store_href": f"/{sf.store_slug}",
         "labels": _labels(facts),
@@ -532,9 +532,28 @@ def ai_parse(q: str, ip: str, fallback: dict) -> tuple[dict | None, str]:
 
 
 # ── Retrieval ───────────────────────────────────────────────────────────────
+def _place(sf) -> tuple:
+    """(city, state) for buyers: one spelling per state (places.clean_place)."""
+    if not sf:
+        return None, None
+    from app.services.places import clean_place
+    return clean_place(sf.city, sf.state)
+
+
+def _place_likes(city: str) -> list[str]:
+    """LIKE patterns for a place: a state matches every way sellers spelt it."""
+    from app.services.places import place_terms
+    return [f"%{t}%" for t in (place_terms(city) or [city])]
+
+
 def _city_filter_products(city: str):
-    like = f"%{city}%"
-    return or_(Storefront.city.ilike(like), Storefront.state.ilike(like), Product.location.ilike(like))
+    return or_(*[c.ilike(like) for like in _place_likes(city)
+                 for c in (Storefront.city, Storefront.state, Product.location)])
+
+
+def _city_filter_stores(city: str):
+    return or_(*[c.ilike(like) for like in _place_likes(city)
+                 for c in (Storefront.city, Storefront.state)])
 
 
 def _product_match(terms: list[str], feats: dict):
@@ -642,8 +661,7 @@ def retrieve(intent: dict, filters: dict) -> tuple[list, list]:
                 if terms:
                     q = q.filter(_store_match(terms, fs))
                 elif city:
-                    like = f"%{city}%"
-                    q = q.filter(or_(Storefront.city.ilike(like), Storefront.state.ilike(like)))
+                    q = q.filter(_city_filter_stores(city))
                 return q.order_by(Storefront.created_at.desc(), Storefront.id.desc())
             stores = _run_with_fallback(build_s, params, feats, STORE_CANDIDATES)
     return products, stores
@@ -1120,8 +1138,7 @@ def market_stores(args: dict) -> dict:
     q = visible_stores(Storefront.query).options(contains_eager(Storefront.vendor))
     city = (args.get("city") or "").strip()[:60]
     if city:
-        like = f"%{city}%"
-        q = q.filter(or_(Storefront.city.ilike(like), Storefront.state.ilike(like)))
+        q = q.filter(_city_filter_stores(city))
         applied["city"] = city
     if str(args.get("verified") or "").lower() in ("1", "true", "yes", "on"):
         q = q.filter(Storefront.vendor_id.in_(list(verified_vendor_ids()) or [-1]))

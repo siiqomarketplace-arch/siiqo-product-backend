@@ -139,6 +139,12 @@ def _storefront_trust(sf, with_label=True) -> dict:
     return storefront_trust(sf, with_label=with_label)
 
 
+def _public_place(city, state):
+    """City/state as buyers see them: one spelling per state."""
+    from app.services.places import clean_place
+    return clean_place(city, state)
+
+
 class Storefront(db.Model):
     __tablename__ = 'storefronts'
 
@@ -279,9 +285,9 @@ class Storefront(db.Model):
             "store_description": self.store_description,
             "store_logo": self.store_logo,
             "banner_url": self.banner_url,
-            "city": self.city,
-            "state": self.state,
-            "address": ", ".join(filter(None, [self.address, self.city, self.state])) or None,
+            "city": _public_place(self.city, self.state)[0],
+            "state": _public_place(self.city, self.state)[1],
+            "address": ", ".join(filter(None, [self.address, *_public_place(self.city, self.state)])) or None,
             "phone": self.phone,
             "website": self.website,
             "social_links": self.social_links or {},

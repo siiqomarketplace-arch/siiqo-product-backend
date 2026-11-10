@@ -547,3 +547,50 @@ def test_guest_question_rate_limit(client, make_vendor, make_product, emails, ev
         limiter.reset()
         limiter.enabled = False
     assert codes[:5] == [201] * 5 and codes[5] == 429
+
+
+# ── One spelling per state (Near me + display) ─────────────────────────────
+
+@pytest.mark.parametrize("saved, expected", [
+    ((None, "FCT, Nigeria"), ("Abuja", "FCT")),
+    ((None, "Abuja, Nigeria"), ("Abuja", "FCT")),
+    ((None, "Federal Capital Territory, Nigeria"), ("Abuja", "FCT")),
+    (("Wuse 2", "Nigeria, FCT"), ("Wuse 2", "FCT")),
+    (("Lagos", "Lagos, Nigeria"), (None, "Lagos")),
+    ((None, "Cross river state, Nigeria"), (None, "Cross River")),
+    (("Ikeja Lagos", None), ("Ikeja", "Lagos")),
+    ((None, "England, Nigeria"), (None, "England")),   # not a Nigerian state: kept, not guessed
+    (("Garki", None), ("Garki", None)),
+    ((None, None), (None, None)),
+])
+def test_clean_place_reads_every_spelling_as_one_state(saved, expected):
+    assert places.clean_place(*saved) == expected
+
+
+def test_place_terms_expand_a_state_only():
+    assert {"abuja", "fct", "federal capital territory"} <= {t.lower() for t in places.place_terms("FCT")}
+    assert {t.lower() for t in places.place_terms("Abuja")} == {t.lower() for t in places.place_terms("FCT")}
+    assert places.place_terms("Ikeja") == ["Ikeja"]
+    assert places.place_terms("") == []
+
+
+def test_near_me_finds_every_spelling_of_a_state(client, make_vendor, make_product):
+    spellings = ["FCT, Nigeria", "Abuja, Nigeria", "Federal Capital Territory, Nigeria"]
+    stores = []
+    for state in spellings:
+        _, store = make_vendor()
+        store.state, store.is_published, store.is_verified = state, True, True
+        make_product(store)
+        stores.append(store)
+    _, lagos = make_vendor()
+    lagos.state, lagos.is_published, lagos.is_verified = "Lagos, Nigeria", True, True
+    make_product(lagos)
+    db.session.commit()
+
+    for query in ("FCT", "Abuja"):
+        got = client.get(f"/api/market/stores?city={query}").get_json()["stores"]
+        ids = {s["store_id"] for s in got}
+        assert {s.id for s in stores} <= ids and lagos.id not in ids
+        assert {(s["store"]["city"], s["store"]["state"]) for s in got if s["store_id"] in {x.id for x in stores}} == {("Abuja", "FCT")}
+    products = client.get("/api/market/products?city=FCT").get_json()["products"]
+    assert {p["store"]["slug"] for p in products} == {s.store_slug for s in stores}

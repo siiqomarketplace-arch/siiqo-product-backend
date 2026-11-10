@@ -3,6 +3,7 @@ import logging
 public.py — Public marketplace routes (no auth required)
 """
 from flask import Blueprint, request, jsonify
+from app.services.places import clean_place as _clean_place
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 from app.extensions import db, limiter
@@ -129,8 +130,8 @@ def get_products():
             # â”€â”€ contact details â”€â”€
             "vendor_phone": sf.phone if sf else None,
             "whatsapp_link": (f"https://wa.me/{sf.phone}" if sf and sf.phone else None),
-            "city": sf.city if sf else None,
-            "state": sf.state if sf else None,
+            "city": _clean_place(sf.city, sf.state)[0] if sf else None,
+            "state": _clean_place(sf.city, sf.state)[1] if sf else None,
             "category_id": p.category_id,
             "category": p.category.name if p.category else "General",
             "is_negotiable": p.is_negotiable,
@@ -224,8 +225,8 @@ def get_product_details(product_id):
             "name": p.storefront.store_name,
             "slug": p.storefront.store_slug,
             "logo": p.storefront.store_logo,
-            "city": p.storefront.city,
-            "state": p.storefront.state,
+            "city": _clean_place(p.storefront.city, p.storefront.state)[0],
+            "state": _clean_place(p.storefront.city, p.storefront.state)[1],
             "phone": p.storefront.phone,
             "social_links": p.storefront.social_links or {},
             # Same trust as the Market card and Check a seller (B2).
