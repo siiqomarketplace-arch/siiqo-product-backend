@@ -132,6 +132,7 @@ def get_settings():
             "banner_url": sf.banner_url,
             "theme_color": sf.theme_color or "#0b1b3b",
             "is_published": sf.is_published,
+            "is_closed": sf.is_closed,
             "is_verified": sf.is_verified,
             "is_live": sf.is_live,
             "is_pro_verified": bool(sf.is_pro_active or sf.is_pro_verified),
@@ -638,6 +639,14 @@ def update_settings():
     # Publish flag — vendor can set to True, but it only goes live after admin approval
     if 'is_published' in data:
         want_published = str(data['is_published']).lower() in ('true', '1', 'yes')
+        if want_published and sf.closed_at is not None:
+            # Closed by Siiqo: only an admin can reopen it.
+            db.session.rollback()
+            return jsonify({
+                "code": "STORE_CLOSED",
+                "message": "Your store was closed by Siiqo, so you can't publish it. "
+                           "Contact support if you think this is a mistake.",
+            }), 403
         if want_published and not sf.is_published:
             # Mandatory verification (D11); never blocks with the flag at none.
             from app.services import verification_requirement

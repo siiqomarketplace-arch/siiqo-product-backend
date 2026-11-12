@@ -7,10 +7,25 @@ stay, so buyers keep their order history and the trust record can't be
 erased by deleting an account.
 """
 import secrets
+from datetime import datetime, timezone
 
 from app.extensions import db
 
 OPEN_ESCROW_STATUSES = ("IN_ESCROW", "SHIPPED", "DELIVERED", "DISPUTED")
+
+# An anonymised user's email is deleted-<id>@deleted.siiqo.invalid.
+DELETED_EMAIL_PREFIX = "deleted-"
+DELETED_EMAIL_DOMAIN = "@deleted.siiqo.invalid"
+DELETED_EMAIL_LIKE = f"{DELETED_EMAIL_PREFIX}%{DELETED_EMAIL_DOMAIN}"
+
+
+def is_deleted_email(email):
+    email = email or ""
+    return email.startswith(DELETED_EMAIL_PREFIX) and email.endswith(DELETED_EMAIL_DOMAIN)
+
+
+def is_deleted_user(user):
+    return is_deleted_email(getattr(user, "email", None))
 
 
 class AccountDeletionBlocked(Exception):
@@ -26,12 +41,37 @@ def open_orders_count(user_id):
             .count())
 
 
-def anonymise_user(user, *, force=False):
+def _remove_bank_accounts(uid):
+    """Payout history points at the bank account it was paid to
+    (withdrawals.bank_account_id, NOT NULL). An account with payout history
+    is kept as a scrubbed row so that history stays valid; the rest are
+    deleted. Deleting a referenced row fails on Postgres."""
+    from app.models.withdrawal import VendorBankAccount, Withdrawal
+    for account in VendorBankAccount.query.filter_by(vendor_id=uid).all():
+        has_history = db.session.query(Withdrawal.id).filter_by(bank_account_id=account.id).first()
+        if has_history is None:
+            db.session.delete(account)
+            continue
+        digits = "".join(ch for ch in (account.account_number or "") if ch.isdigit())
+        account.account_number = f"******{digits[-4:]}" if len(digits) >= 4 else "deleted"
+        account.account_name = "Deleted user"
+        # Gateway handles for this person's account; bank name and code stay.
+        account.recipient_code = None
+        account.paystack_subaccount_code = None
+        account.flw_subaccount_id = None
+        account.is_verified = False
+        account.is_default = False
+
+
+def anonymise_user(user, *, force=False, commit=True):
     """Scrub personal data and disable the login. Refuses while orders are
-    still open (in escrow, shipped, delivered or disputed) unless `force`."""
+    still open (in escrow, shipped, delivered or disputed) unless `force`.
+
+    With commit=False nothing is committed, so the caller can commit this
+    together with its own rows (the admin route's audit log)."""
     from app.models.communication import Message, Notification
     from app.models.order import Order
-    from app.models.withdrawal import VendorBankAccount, VendorCryptoWallet
+    from app.models.withdrawal import VendorCryptoWallet
 
     if not force and open_orders_count(user.id):
         raise AccountDeletionBlocked("Finish or cancel your open orders before deleting your account.")
@@ -55,6 +95,8 @@ def anonymise_user(user, *, force=False):
     if sf is not None:
         # The store URL stays reserved so old links never lead to someone else's store.
         sf.is_published = False
+        if sf.closed_at is None:
+            sf.closed_at = datetime.now(timezone.utc)
         sf.store_name = "Closed store"
         sf.store_description = None
         sf.store_logo = sf.banner_url = None
@@ -68,7 +110,9 @@ def anonymise_user(user, *, force=False):
         sf.nin_document_url = sf.cac_document_url = None
         sf.meta_pixel_id = sf.tiktok_pixel_id = sf.ga4_measurement_id = None
 
-    VendorBankAccount.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
+    # Nothing references crypto wallets, notifications or messages, so those
+    # rows can go. Bank accounts are referenced by withdrawals.
+    _remove_bank_accounts(uid)
     VendorCryptoWallet.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
     Notification.query.filter_by(user_id=uid).delete(synchronize_session=False)
     Message.query.filter((Message.sender_id == uid) | (Message.receiver_id == uid)).delete(
@@ -81,4 +125,7 @@ def anonymise_user(user, *, force=False):
         order.buyer_phone = None
         order.delivery_name = order.delivery_phone = None
         order.delivery_address = order.delivery_city = order.delivery_state = None
-    db.session.commit()
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()

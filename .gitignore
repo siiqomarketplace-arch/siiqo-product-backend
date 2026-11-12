@@ -80,3 +80,13 @@ update_*.py
 .env
 .env
 .env
+
+# One-off maintenance scripts: never deploy these to the server (they act on
+# the live database). Keep them on your own machine only.
+/scratch_*.py
+/delete_test_users_now.py
+/cleanup_test_users.py
+/audit_and_cleanup_test_data.py
+/run_cleanup.bat
+/run_delete.bat
+/deploy_package.zip

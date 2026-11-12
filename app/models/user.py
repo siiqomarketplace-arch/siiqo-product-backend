@@ -184,6 +184,9 @@ class Storefront(db.Model):
     is_published = db.Column(db.Boolean, default=False)  # vendor published
     is_pro_verified = db.Column(db.Boolean, default=False)  # Pro Verified badge subscription (₦2,500/yr)
     pro_verified_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Set when Siiqo closes the store (admin close, or the owner's account was
+    # deleted). A closed store is unpublished and the seller can't republish it.
+    closed_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     # Analytics & Onboarding
     view_count = db.Column(db.Integer, default=0)
@@ -224,6 +227,10 @@ class Storefront(db.Model):
         """True when vendor has published their storefront and account is active."""
         vendor_active = self.vendor.is_active if self.vendor else True
         return bool(self.is_published and vendor_active)
+
+    @property
+    def is_closed(self) -> bool:
+        return self.closed_at is not None
 
     @property
     def is_pro_active(self) -> bool:

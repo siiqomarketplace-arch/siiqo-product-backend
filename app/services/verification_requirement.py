@@ -326,9 +326,10 @@ def release_for(vendor_id, now=None, force=False):
         if hold.kind == "store":
             sf = db.session.get(Storefront, hold.storefront_id) if hold.storefront_id else \
                 Storefront.query.filter_by(vendor_id=vendor_id).first()
-            if sf is not None:
+            closed = sf is not None and sf.closed_at is not None
+            if sf is not None and not closed:  # a store closed by Siiqo stays closed
                 sf.is_published = True
-            hold.status, hold.released_at, hold.release_result = "released", now, "published"
+            hold.status, hold.released_at, hold.release_result = "released", now, ("closed" if closed else "published")
             db.session.commit()
             out["stores"] += 1
             continue

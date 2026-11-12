@@ -108,6 +108,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source VARCHAR(40)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign VARCHAR(100)",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS delivery_settings JSON",
+                # Admin close/reopen a store (NULL = not closed).
+                "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS buyer_reminded_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE passport_api_clients ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
                 "CREATE INDEX IF NOT EXISTS ix_passport_api_clients_owner_user_id ON passport_api_clients (owner_user_id)",
@@ -549,7 +551,13 @@ def create_app(config_name: str | None = None) -> Flask:
 
     @app.errorhandler(429)
     def rate_limit_exceeded(error):
-        return jsonify({"message": "Too many requests. Please slow down."}), 429
+        # A route can set its own plain message with
+        # @limiter.limit(..., error_message="...").
+        custom = getattr(getattr(error, "limit", None), "error_message", None)
+        if callable(custom):
+            custom = custom()
+        return jsonify({"code": "RATE_LIMITED",
+                        "message": custom or "Too many requests. Please slow down."}), 429
 
     @app.errorhandler(500)
     def internal_error(error):

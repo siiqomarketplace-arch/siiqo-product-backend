@@ -19,9 +19,9 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, abort, make_response, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
-from sqlalchemy import update, or_
+from sqlalchemy import update, or_, func
 
-from app.extensions import db
+from app.extensions import db, limiter as _app_limiter
 from app.models.admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription
 from app.models.user import User, Storefront
 from app.models.escrow import EscrowTransaction, EscrowStatus
@@ -78,7 +78,7 @@ def _require_superadmin(admin_id) -> AdminUser | None:
     # (which use _get_admin), but no superadmin-only action until enrolled.
     if _admin_2fa_enforced() and not admin.totp_enabled:
         abort(make_response(jsonify({
-            "message": "Two-factor authentication must be enabled for this action",
+            "message": "Turn on two-factor login for your admin account to do this.",
             "code": "2FA_REQUIRED",
         }), 403))
     return admin
@@ -594,28 +594,179 @@ def _parse_admin_id(identity: str) -> int:
 # Users
 # ---------------------------------------------------------------------------
 
+def _page_args(default_per_page=50, max_per_page=200):
+    """page (default 1) and per_page (default 50, max 200) from the query string."""
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(request.args.get('per_page', default_per_page))
+    except (TypeError, ValueError):
+        per_page = default_per_page
+    return page, max(1, min(per_page, max_per_page))
+
+
+def _like(term: str) -> str:
+    """A contains-pattern for ILIKE with the wildcards in `term` escaped."""
+    escaped = term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return f"%{escaped}%"
+
+
+def _truthy(value) -> bool:
+    return str(value or '').strip().lower() in ('true', '1', 'yes')
+
+
+def _user_status_filters():
+    """The per-user status the list shows, as SQL conditions (needs the
+    storefronts outer join). Same order of checks as _user_status()."""
+    from sqlalchemy import and_, not_
+    from app.services.accounts import DELETED_EMAIL_LIKE
+    sf_status = func.coalesce(Storefront.verification_status, '')
+    deleted = User.email.like(DELETED_EMAIL_LIKE)
+    active = and_(not_(deleted), User.is_active.is_(True))
+    pending = and_(active, sf_status == 'PENDING_VERIFY_SUB')
+    verified = and_(active, sf_status != 'PENDING_VERIFY_SUB',
+                    or_(sf_status == 'VERIFIED', User.is_verified.is_(True)))
+    return {
+        'deleted': deleted,
+        'active': active,
+        # is_active NULL counts as suspended, as in the per-user check.
+        'suspended': and_(not_(deleted), or_(User.is_active.is_(False), User.is_active.is_(None))),
+        'pending': pending,
+        'verified': verified,
+        'unverified': and_(active, not_(pending), not_(verified)),
+        'rejected': and_(not_(deleted), sf_status == 'REJECTED'),
+    }
+
+
+def _user_status(u, sf, is_deleted) -> str:
+    if is_deleted:
+        return 'deleted'
+    if not u.is_active:
+        return 'suspended'
+    if sf and sf.verification_status == 'PENDING_VERIFY_SUB':
+        return 'pending'
+    if sf and sf.verification_status == 'VERIFIED':
+        return 'verified'
+    if u.is_active and u.is_verified:
+        return 'verified'
+    return 'unverified'
+
+
 @admin_bp.route('/users/all', methods=['GET'])
 @jwt_required()
 def get_all_users():
+    """
+    Paged, searchable user list.
+
+    Query string:
+      page             default 1
+      per_page         default 50, max 200
+      q                matches email, first/last name, phone, store name or
+                       store slug (case-insensitive); a number also matches
+                       that exact user id
+      status           all (default) | active | suspended | pending | verified |
+                       unverified | rejected | deleted
+      role             vendor | buyer | partner | rider | admin
+      include_deleted  default false
+
+    Deleted users are anonymised rows (email deleted-<id>@deleted.siiqo.invalid).
+    They are left out unless include_deleted=true or status=deleted; each
+    user carries is_deleted, and a deleted user's status is "deleted".
+
+    Response: users (the page), total (users matching the filters), page,
+    per_page, pages, count (rows on this page) and counts. counts is worked
+    out over the whole table, not the page, and ignores q/status/role:
+    all/active/suspended/pending/verified/vendors/buyers leave deleted users
+    out; deleted counts only them.
+
+    Old clients: a request with no page param gets page 1 with per_page 50
+    (it used to get the newest 500 in one go) plus the new fields.
+    """
     admin_id = get_jwt_identity()
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
-    users = User.query.order_by(User.created_at.desc()).limit(500).all()
+    from sqlalchemy import and_, case, not_
+    from sqlalchemy.orm import contains_eager
+    from app.models.product import Product
+    from app.services.accounts import is_deleted_email
+
+    page, per_page = _page_args()
+    q = (request.args.get('q') or '').strip()
+    status = (request.args.get('status') or 'all').strip().lower()
+    role = (request.args.get('role') or '').strip().upper()
+    include_deleted = _truthy(request.args.get('include_deleted'))
+
+    conds = _user_status_filters()
+    if status not in conds and status != 'all':
+        return jsonify({"message": "Unknown status filter.", "code": "BAD_STATUS",
+                        "allowed": ['all'] + sorted(conds)}), 400
+
+    # One storefront per user (storefronts.vendor_id is unique), so the outer
+    # join never duplicates a user and LIMIT/OFFSET page correctly.
+    base = User.query.outerjoin(Storefront, Storefront.vendor_id == User.id)
+
+    filters = []
+    if status != 'all':
+        filters.append(conds[status])
+    if status != 'deleted' and not include_deleted:
+        filters.append(not_(conds['deleted']))
+    if role and role != 'ALL':
+        filters.append(func.upper(User.role) == role)
+    if q:
+        pattern = _like(q)
+        full_name = func.coalesce(User.first_name, '') + ' ' + func.coalesce(User.last_name, '')
+        matches = [
+            User.email.ilike(pattern, escape='\\'),
+            User.first_name.ilike(pattern, escape='\\'),
+            User.last_name.ilike(pattern, escape='\\'),
+            full_name.ilike(pattern, escape='\\'),
+            User.phone.ilike(pattern, escape='\\'),
+            Storefront.store_name.ilike(pattern, escape='\\'),
+            Storefront.store_slug.ilike(pattern, escape='\\'),
+        ]
+        if q.isdigit() and len(q) <= 9:
+            matches.append(User.id == int(q))
+        filters.append(or_(*matches))
+
+    filtered = base.filter(*filters)
+    total = filtered.with_entities(func.count(User.id)).scalar() or 0
+    pages = (total + per_page - 1) // per_page
+
+    users = (filtered.options(contains_eager(User.storefront))
+             .order_by(User.created_at.desc(), User.id.desc())
+             .offset((page - 1) * per_page).limit(per_page).all())
+
+    # Product counts for this page's stores in one query.
+    store_ids = [u.storefront.id for u in users if u.storefront]
+    product_counts = {}
+    if store_ids:
+        product_counts = dict(
+            db.session.query(Product.storefront_id, func.count(Product.id))
+            .filter(Product.storefront_id.in_(store_ids))
+            .group_by(Product.storefront_id).all())
+
+    def _n(cond):
+        return func.coalesce(func.sum(case((cond, 1), else_=0)), 0)
+
+    live = not_(conds['deleted'])
+    row = (db.session.query(
+        _n(live), _n(conds['active']), _n(conds['suspended']), _n(conds['pending']),
+        _n(conds['verified']),
+        _n(and_(live, func.upper(User.role) == 'VENDOR')),
+        _n(and_(live, func.upper(User.role) == 'BUYER')),
+        _n(conds['deleted']))
+        .select_from(User).outerjoin(Storefront, Storefront.vendor_id == User.id).one())
+    counts = dict(zip(
+        ('all', 'active', 'suspended', 'pending', 'verified', 'vendors', 'buyers', 'deleted'),
+        (int(v) for v in row)))
+
     user_list = []
     for u in users:
-        if not u.is_active:
-            status = 'suspended'
-        elif u.storefront and u.storefront.verification_status == 'PENDING_VERIFY_SUB':
-            status = 'pending'
-        elif u.storefront and u.storefront.verification_status == 'VERIFIED':
-            status = 'verified'
-        elif u.is_active and u.is_verified:
-            status = 'verified'
-        else:
-            status = 'unverified'
-
         sf = u.storefront
+        is_deleted = is_deleted_email(u.email)
         user_list.append({
             "id": u.id,
             "email": u.email,
@@ -624,7 +775,8 @@ def get_all_users():
             "role": u.role,
             "is_verified": u.is_verified,
             "is_active": u.is_active,
-            "status": status,
+            "is_deleted": is_deleted,
+            "status": _user_status(u, sf, is_deleted),
             "joined_at": u.created_at.isoformat() if u.created_at else None,
             "has_storefront": sf is not None,
             # KYC / Verification fields
@@ -635,18 +787,28 @@ def get_all_users():
             "nin_document_url": sf.nin_document_url if sf else None,
             "cac_document_url": sf.cac_document_url if sf else None,
             # Storefront basics
+            "storefront_id": sf.id if sf else None,
             "store_name": sf.store_name if sf else None,
             "store_logo": sf.store_logo if sf else None,
             "store_slug": sf.store_slug if sf else None,
             "market_presence": {
                 "storefront_link": sf.store_slug if sf else None,
                 "is_published": sf.is_published if sf else False,
-                "product_count": len(sf.products) if sf and sf.products else 0,
+                "is_closed": sf.is_closed,
+                "product_count": product_counts.get(sf.id, 0),
                 "website": sf.website if sf else None,
             } if sf else None,
         })
 
-    return jsonify({"users": user_list, "count": len(user_list)}), 200
+    return jsonify({
+        "users": user_list,
+        "count": len(user_list),
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "counts": counts,
+    }), 200
 
 
 @admin_bp.route('/users/<int:user_id>', methods=['GET'])
@@ -828,37 +990,62 @@ def update_user_status(user_id):
 
 @admin_bp.route('/users/<int:user_id>', methods=['DELETE'])
 @jwt_required()
-@limiter.limit("10 per hour")  # Strict rate limit on destructive operations
+# The app-wide limiter (app.extensions), which is the one attached to the app.
+@_app_limiter.limit("60 per hour",
+                    error_message="Too many deletions in a short time. Wait a while and try again.")
 @detect_anomalies
 def delete_user_admin(user_id):
     """
-    Delete user and all associated data.
-    Security: Strict rate limiting, anomaly detection, comprehensive audit logging.
+    Delete a user by anonymising them: personal details go and the login is
+    disabled; orders, payouts and trust records stay (app/services/accounts.py).
+    ?force=true skips the open-orders check (e.g. a fraud takedown).
+
+    Super Admin only (with two-factor login when it is required), limited to
+    60 an hour, audit-logged. The change and its audit row are committed
+    together, so a failure leaves nothing changed.
+
+    200 {message, user_id}
+    403 {code: SUPERADMIN_REQUIRED | 2FA_REQUIRED, message}
+    404 {code: USER_NOT_FOUND, message}
+    409 {code: OPEN_ORDERS, message, open_orders} | {code: ALREADY_DELETED, message}
+    429 {code: RATE_LIMITED, message}
+    500 {code: DELETE_FAILED, message}
     """
     admin_id = get_jwt_identity()
     admin = _require_superadmin(_parse_admin_id(admin_id))
     if not admin:
-        return jsonify({"message": "SuperAdmin required"}), 403
+        return jsonify({"code": "SUPERADMIN_REQUIRED",
+                        "message": "Only a Super Admin can delete users."}), 403
 
     user = db.session.get(User, user_id)
     if not user:
-        return jsonify({"message": "User not found"}), 404
+        return jsonify({"code": "USER_NOT_FOUND", "message": "User not found"}), 404
 
-    # Anonymise instead of hard-deleting: personal details go; orders, escrow,
-    # ledger, reviews and trust evidence stay (app/services/accounts.py).
-    # ?force=true overrides the open-orders check (e.g. fraud takedown).
-    from app.services.accounts import AccountDeletionBlocked, anonymise_user
+    from app.services.accounts import (
+        AccountDeletionBlocked, anonymise_user, is_deleted_user, open_orders_count,
+    )
+    if is_deleted_user(user):
+        return jsonify({"code": "ALREADY_DELETED",
+                        "message": "This user was already deleted."}), 409
+
+    force = request.args.get('force') == 'true'
     try:
-        user_email = user.email
+        open_orders = open_orders_count(user.id)
+        if open_orders and not force:
+            raise AccountDeletionBlocked()
+
         user_data_summary = {
             'email': user.email,
             'role': user.role,
             'storefront_id': user.storefront.id if user.storefront else None,
             'storefront_name': user.storefront.store_name if user.storefront else None,
             'anonymised': True,
+            'forced': force,
+            'open_orders': open_orders,
         }
-        anonymise_user(user, force=request.args.get('force') == 'true')
+        anonymise_user(user, force=force, commit=False)
 
+        # log_action commits: the anonymisation and its audit row land together.
         AdminAuditLog.log_action(
             admin=admin,
             action='USER_DELETE',
@@ -866,15 +1053,25 @@ def delete_user_admin(user_id):
             resource_id=user_id,
             details=user_data_summary
         )
-        logging.warning(f"[ADMIN CRITICAL] User {user_email} anonymised by {admin.email}")
-        
-        return jsonify({"message": f"User {user_email} deleted. Personal details were removed; orders and trust records are kept."}), 200
-    except AccountDeletionBlocked as e:
-        return jsonify({"message": f"{e} Add ?force=true to override.", "code": "OPEN_ORDERS"}), 409
+        logging.warning(f"[ADMIN CRITICAL] User #{user_id} anonymised by {admin.email}")
+
+        return jsonify({
+            "message": "User deleted. Their personal details are removed and their login is disabled. "
+                       "Orders, payouts and trust records are kept.",
+            "user_id": user_id,
+        }), 200
+    except AccountDeletionBlocked:
+        db.session.rollback()
+        return jsonify({
+            "code": "OPEN_ORDERS",
+            "message": "This user has open orders. Finish or cancel them first, or delete anyway.",
+            "open_orders": open_orders,
+        }), 409
     except Exception:
         db.session.rollback()
         logging.exception("[ADMIN] User deletion failed")
-        return jsonify({"message": "Failed to delete user."}), 500
+        return jsonify({"code": "DELETE_FAILED",
+                        "message": "We couldn't delete this user. Nothing was changed."}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -884,27 +1081,67 @@ def delete_user_admin(user_id):
 @admin_bp.route('/storefronts', methods=['GET'])
 @jwt_required()
 def get_all_storefronts():
+    """
+    Paged, searchable store list.
+
+    Query string:
+      page      default 1
+      per_page  default 50, max 200
+      q         matches store name, slug, owner email, city or state
+                (case-insensitive)
+      status    exact verification_status, as before
+
+    Response: storefronts (the page, each with is_closed and closed_at),
+    count (the true total matching the filters), page, per_page, pages.
+
+    Old clients: a request with no page param gets page 1 with per_page 50
+    (it used to get the newest 500 in one go), and count is now the total
+    rather than the number of rows returned.
+    """
     admin_id = get_jwt_identity()
     if not _get_admin(_parse_admin_id(admin_id)):
         return jsonify({"message": "Unauthorized"}), 403
 
-    status = request.args.get('status')
-    query = Storefront.query
-    if status:
-        query = query.filter_by(verification_status=status)
+    from sqlalchemy.orm import contains_eager
 
-    storefronts = query.order_by(Storefront.created_at.desc()).limit(500).all()
+    page, per_page = _page_args()
+    status = request.args.get('status')
+    q = (request.args.get('q') or '').strip()
+
+    # One owner per store, so the outer join never duplicates a store.
+    query = Storefront.query.outerjoin(User, User.id == Storefront.vendor_id)
+    if status:
+        query = query.filter(Storefront.verification_status == status)
+    if q:
+        pattern = _like(q)
+        query = query.filter(or_(
+            Storefront.store_name.ilike(pattern, escape='\\'),
+            Storefront.store_slug.ilike(pattern, escape='\\'),
+            User.email.ilike(pattern, escape='\\'),
+            Storefront.city.ilike(pattern, escape='\\'),
+            Storefront.state.ilike(pattern, escape='\\'),
+        ))
+
+    total = query.with_entities(func.count(Storefront.id)).scalar() or 0
+    pages = (total + per_page - 1) // per_page
+    storefronts = (query.options(contains_eager(Storefront.vendor))
+                   .order_by(Storefront.created_at.desc(), Storefront.id.desc())
+                   .offset((page - 1) * per_page).limit(per_page).all())
+
     return jsonify({
         "storefronts": [{
             "id": s.id,
             "business_name": s.store_name,
             "store_slug": s.store_slug,
+            "vendor_id": s.vendor_id,
             "vendor_name": s.vendor.full_name if s.vendor else "Unknown",
             "vendor_email": s.vendor.email if s.vendor else "",
             "phone": s.phone or (s.vendor.phone if s.vendor else None),
             "is_verified": s.is_verified,
             "is_published": s.is_published,
             "is_live": s.is_live,
+            "is_closed": s.is_closed,
+            "closed_at": s.closed_at.isoformat() if s.closed_at else None,
             "vendor_status": "Approved" if s.is_verified else "Pending",
             "city": s.city,
             "state": s.state,
@@ -917,7 +1154,155 @@ def get_all_storefronts():
             "cac_document_url": s.cac_document_url,
             "verification_status": s.verification_status,
         } for s in storefronts],
-        "count": len(storefronts),
+        "count": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# Close / reopen a store. There is no store delete: closing keeps the link
+# reserved and leaves products, orders and payouts untouched.
+# ---------------------------------------------------------------------------
+
+_STORE_CLOSE_ACTION = 'STOREFRONT_CLOSE'
+
+
+@admin_bp.route('/storefronts/<int:storefront_id>/close', methods=['POST'])
+@jwt_required()
+def admin_close_storefront(storefront_id):
+    """
+    Close a store. Any admin (same as verify-pro); audit-logged.
+
+    A closed store is unpublished (is_published False) and carries closed_at,
+    so everything that hides an unpublished store hides it the same way: the
+    Market, search and the public store page (which answers "offline"). The
+    slug stays reserved; products and orders are not touched. The seller gets
+    an in-app notice and cannot publish the store again; only /reopen can.
+
+    Body: {reason?}
+    200 {message, storefront_id, is_closed: true}
+    404 {code: STORE_NOT_FOUND, message} | 409 {code: ALREADY_CLOSED, message}
+    """
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Admin authorization required"}), 403
+
+    sf = db.session.get(Storefront, storefront_id)
+    if not sf:
+        return jsonify({"code": "STORE_NOT_FOUND", "message": "Store not found"}), 404
+    if sf.closed_at is not None:
+        return jsonify({"code": "ALREADY_CLOSED", "message": "This store is already closed.",
+                        "storefront_id": sf.id, "is_closed": True}), 409
+
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '').strip()[:500] or None
+    was_published = bool(sf.is_published)
+
+    try:
+        sf.is_published = False
+        sf.closed_at = _utcnow()
+        db.session.add(Notification(
+            user_id=sf.vendor_id,
+            title="Your store was closed",
+            message="Your store was closed by Siiqo. Contact support if you think this is a mistake.",
+            type="SYSTEM",
+        ))
+        # log_action commits: the close and its audit row land together.
+        # was_published is read back by /reopen.
+        AdminAuditLog.log_action(
+            admin=admin,
+            action=_STORE_CLOSE_ACTION,
+            resource_type='Storefront',
+            resource_id=sf.id,
+            details={'store_slug': sf.store_slug, 'vendor_id': sf.vendor_id,
+                     'was_published': was_published, 'reason': reason},
+        )
+    except Exception:
+        db.session.rollback()
+        logging.exception("[ADMIN] Store close failed")
+        return jsonify({"code": "CLOSE_FAILED",
+                        "message": "We couldn't close this store. Nothing was changed."}), 500
+
+    logging.warning(f"[ADMIN] Storefront #{storefront_id} closed by {admin.email}")
+    return jsonify({
+        "message": "Store closed. It is hidden from buyers and the seller can't publish it again. "
+                   "Its link stays reserved; products and orders are kept.",
+        "storefront_id": storefront_id,
+        "is_closed": True,
+    }), 200
+
+
+@admin_bp.route('/storefronts/<int:storefront_id>/reopen', methods=['POST'])
+@jwt_required()
+def admin_reopen_storefront(storefront_id):
+    """
+    Reopen a closed store. Any admin; audit-logged.
+
+    Clears closed_at. The store goes back to how it was: published again
+    only if it was published when it was closed (was_published on the close
+    audit row); otherwise it stays unpublished and the seller can publish it.
+    A store closed because its owner's account was deleted can't be reopened.
+
+    200 {message, storefront_id, is_closed: false, is_published}
+    404 {code: STORE_NOT_FOUND, message}
+    409 {code: NOT_CLOSED | OWNER_DELETED, message}
+    """
+    admin = _get_admin(get_jwt_identity())
+    if not admin:
+        return jsonify({"message": "Admin authorization required"}), 403
+
+    sf = db.session.get(Storefront, storefront_id)
+    if not sf:
+        return jsonify({"code": "STORE_NOT_FOUND", "message": "Store not found"}), 404
+    if sf.closed_at is None:
+        return jsonify({"code": "NOT_CLOSED", "message": "This store is not closed.",
+                        "storefront_id": sf.id, "is_closed": False}), 409
+
+    from app.services.accounts import is_deleted_user
+    if sf.vendor is None or is_deleted_user(sf.vendor):
+        return jsonify({"code": "OWNER_DELETED",
+                        "message": "This store's owner was deleted, so it can't be reopened.",
+                        "storefront_id": sf.id, "is_closed": True}), 409
+
+    closed = (AdminAuditLog.query
+              .filter_by(action=_STORE_CLOSE_ACTION, resource_type='Storefront', resource_id=str(sf.id))
+              .order_by(AdminAuditLog.id.desc()).first())
+    republish = bool(closed and (closed.details or {}).get('was_published'))
+
+    try:
+        sf.closed_at = None
+        if republish:
+            sf.is_published = True
+        db.session.add(Notification(
+            user_id=sf.vendor_id,
+            title="Your store was reopened",
+            message=("Your store was reopened by Siiqo and is visible to buyers again." if republish else
+                     "Your store was reopened by Siiqo. It is not published yet; you can publish it from your dashboard."),
+            type="SYSTEM",
+        ))
+        AdminAuditLog.log_action(
+            admin=admin,
+            action='STOREFRONT_REOPEN',
+            resource_type='Storefront',
+            resource_id=sf.id,
+            details={'store_slug': sf.store_slug, 'vendor_id': sf.vendor_id, 'republished': republish},
+        )
+    except Exception:
+        db.session.rollback()
+        logging.exception("[ADMIN] Store reopen failed")
+        return jsonify({"code": "REOPEN_FAILED",
+                        "message": "We couldn't reopen this store. Nothing was changed."}), 500
+
+    logging.warning(f"[ADMIN] Storefront #{storefront_id} reopened by {admin.email}")
+    return jsonify({
+        "message": ("Store reopened. It is published again." if republish else
+                    "Store reopened. It was not published before it was closed, so it stays unpublished "
+                    "until the seller publishes it."),
+        "storefront_id": storefront_id,
+        "is_closed": False,
+        "is_published": bool(sf.is_published),
     }), 200
 
 
@@ -3395,7 +3780,8 @@ def publish_all_approved_storefronts():
     pro_expiry = now + _td(days=365)
 
     # Find all admin-approved storefronts
-    approved = Storefront.query.filter_by(is_verified=True).all()
+    # Stores closed by Siiqo stay closed.
+    approved = Storefront.query.filter_by(is_verified=True).filter(Storefront.closed_at.is_(None)).all()
 
     published_count = 0
     already_live_count = 0
@@ -3945,6 +4331,7 @@ def admin_storefront_detail(storefront_id):
                 "store_name":     sf.store_name,
                 "store_slug":     sf.store_slug or sf.storefront_link,
                 "is_published":   sf.is_published,
+                "is_closed":      sf.is_closed,
                 "is_verified":    sf.is_verified,
                 "is_pro_verified":getattr(sf, 'is_pro_verified', False),
                 "created_at":     sf.created_at.isoformat() if sf.created_at else None,
