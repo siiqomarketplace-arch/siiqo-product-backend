@@ -518,7 +518,7 @@ def test_mark_paid_and_reverse_need_a_superadmin(client, make_user, make_vendor,
 
     boss = _admin()
     res = client.post("/api/admin/marketing/earnings/mark-paid", json={"ids": ids, "reference": "TRF-1"}, headers=boss)
-    assert res.get_json() == {"paid": 1, "amount": 200.0}            # only the PAYABLE row
+    assert res.get_json() == {"paid": 1, "amount": 200.0, "warnings": []}   # only the PAYABLE row
     assert client.post(f"/api/admin/marketing/earnings/{ids[1]}/reverse", json={"reason": "x"},
                        headers=plain_admin).status_code == 403
     res = client.post(f"/api/admin/marketing/earnings/{ids[1]}/reverse", json={"reason": "Fake store"}, headers=boss)

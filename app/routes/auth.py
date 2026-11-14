@@ -163,7 +163,10 @@ def register():
     existing_user = User.query.filter_by(email=email).first()
     if existing_user:
         if existing_user.is_verified:
-            return jsonify({"message": "An account with this email already exists"}), 409
+            return jsonify({
+                "code": "EMAIL_EXISTS",
+                "message": "You already have a Siiqo account with this email. Log in to continue.",
+            }), 409
         else:
             # User exists but hasn't verified email yet. Resend OTP and return 201 so frontend proceeds.
             otp = str(random.randint(100000, 999999))

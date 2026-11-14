@@ -117,6 +117,14 @@ def create_app(config_name: str | None = None) -> Flask:
                 "WHERE order_id IS NOT NULL",
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_earning_sale_slot ON agent_earnings "
                 "(seller_user_id, sale_number) WHERE kind = 'sale' AND status <> 'REVERSED'",
+                # Agent teams, team leads and logistics companies (docs/AGENT_ACCOUNTS_PLAN.md).
+                # agent_teams itself is made by db.create_all() above.
+                "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS team_id INTEGER REFERENCES agent_teams(id)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_profiles_team_id ON agent_profiles (team_id)",
+                "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS state VARCHAR(40)",
+                "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS company_name VARCHAR(160)",
+                "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS cac_number VARCHAR(30)",
+                "ALTER TABLE marketing_codes ADD COLUMN IF NOT EXISTS contact_phone VARCHAR(20)",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS delivery_settings JSON",
                 # Admin close/reopen a store (NULL = not closed).
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE",

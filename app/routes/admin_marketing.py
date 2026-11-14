@@ -12,6 +12,8 @@ a superadmin. Every write is audit-logged.
     POST       /api/admin/marketing/earnings/mark-paid  (superadmin)
     POST       /api/admin/marketing/earnings/<id>/reverse (superadmin)
     GET        /api/admin/marketing/flags
+    GET/POST   /api/admin/marketing/teams               PATCH /api/admin/marketing/teams/<id>
+    POST       /api/admin/agents/<id>/make-lead {team_id}   POST /api/admin/agents/<id>/remove-lead
 """
 import logging
 from datetime import datetime, timezone
@@ -23,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db, limiter
 from app.models.audit import AdminAuditLog
-from app.models.marketing import (AgentEarning, AgentProfile, MarketingCampaign, MarketingCode,
+from app.models.marketing import (AgentEarning, AgentProfile, AgentTeam, MarketingCampaign, MarketingCode,
                                   SellerAcquisition)
 from app.models.user import Storefront, User
 from app.routes.admin import _client_ip, _get_admin, _parse_admin_id, _require_superadmin, admin_bp
@@ -281,13 +283,17 @@ def admin_marketing_board():
 
 # ── agents ───────────────────────────────────────────────────────────────────
 
-def _agent_summary(p):
+def _agent_summary(p, index=None):
     acqs = SellerAcquisition.query.filter_by(agent_user_id=p.user_id)
+    checks = svc.approval_checks(p, index)
     totals = svc.earning_totals(AgentEarning.query.filter(AgentEarning.agent_user_id == p.user_id))
     flags_count = sum(len(a.flags or []) for a in acqs.all())
     return {
         "id": p.id, "user_id": p.user_id, "full_name": p.full_name, "phone": p.phone, "city": p.city,
-        "agent_type": p.agent_type, "team": p.team, "status": p.status,
+        "agent_type": p.agent_type, "team": svc.team_label(p), "team_id": p.team_id, "state": p.state,
+        "company_name": p.company_name, "cac_number": p.cac_number, "status": p.status,
+        "lead_of": [{"id": t.id, "name": t.name} for t in AgentTeam.query.filter_by(lead_user_id=p.user_id).all()],
+        "checks_ok": svc.checks_ok(checks),
         "code": p.code.code if p.code_id and p.code else None,
         "signups": acqs.count(),
         "setups": acqs.filter(SellerAcquisition.setup_at.isnot(None)).count(),
@@ -315,7 +321,8 @@ def admin_list_agents():
     total = q.count()
     rows = q.order_by(AgentProfile.created_at.desc(), AgentProfile.id.desc()) \
         .offset((page - 1) * per_page).limit(per_page).all()
-    return jsonify({"agents": [_agent_summary(p) for p in rows], "total": total}), 200
+    index = svc._check_index()
+    return jsonify({"agents": [_agent_summary(p, index) for p in rows], "total": total}), 200
 
 
 @admin_bp.route("/agents/<int:agent_id>", methods=["GET"])
@@ -338,6 +345,7 @@ def admin_get_agent(agent_id):
         "account_name": p.account_name, "agreed_conduct_at": svc._iso(p.agreed_conduct_at),
         "approved_at": svc._iso(p.approved_at), "approved_by_admin_id": p.approved_by_admin_id,
         "link": svc.code_link(p.code.code) if p.code_id and p.code else None,
+        "checks": svc.approval_checks(p),
     }
     sellers = [svc.seller_row(a) for a in acqs]
     flags = [{"acquisition_id": a.id, "seller_id": a.seller_user_id, "flags": list(a.flags or [])}
@@ -350,9 +358,9 @@ _AGENT_MESSAGES = {
     "approve": ("You are now a Siiqo agent",
                 "Your agent application was approved. Open your agent page to see your code and link."),
     "reject": ("Your agent application", "Your agent application was not approved this time."),
-    "pause": ("Your agent account is paused",
-              "Your agent account is paused. New sellers will not earn you rewards until it is resumed."),
-    "resume": ("Your agent account is active again", "Your agent account is active again. Keep going."),
+    "pause": ("Your agent work is paused",
+              "Your agent work is paused. New sellers will not earn you rewards until it is resumed."),
+    "resume": ("You are an active agent again", "Your agent work is active again. Keep going."),
 }
 
 
@@ -402,6 +410,121 @@ def admin_agent_action(agent_id, action):
     except svc.MarketingError as e:
         return _err(e)
     return jsonify({"agent": _agent_summary(p)}), 200
+
+
+# ── teams and team leads ─────────────────────────────────────────────────────
+
+@admin_bp.route("/marketing/teams", methods=["GET"])
+@jwt_required()
+def admin_list_teams():
+    if not _admin():
+        return _forbidden()
+    q = AgentTeam.query
+    state = svc.canonical_state(request.args.get("state"))
+    if state:
+        q = q.filter(AgentTeam.state == state)
+    rows = q.order_by(AgentTeam.state, AgentTeam.city, AgentTeam.name).limit(1000).all()
+    return jsonify({"teams": [svc.team_dict(t, with_counts=True) for t in rows], "total": len(rows)}), 200
+
+
+@admin_bp.route("/marketing/teams", methods=["POST"])
+@jwt_required()
+@limiter.limit("120 per hour")
+def admin_create_team():
+    admin = _admin()
+    if not admin:
+        return _forbidden()
+    try:
+        changes = svc.team_fields(_body())
+        team = AgentTeam(created_at=datetime.now(timezone.utc), **{"active": True, **changes})
+        db.session.add(team)
+        db.session.flush()
+        _audit(admin, "AGENT_TEAM_CREATE", "AgentTeam", team.id, {k: str(v) for k, v in changes.items()})
+        db.session.commit()
+    except svc.MarketingError as e:
+        return _err(e)
+    return jsonify({"team": svc.team_dict(team, with_counts=True)}), 201
+
+
+@admin_bp.route("/marketing/teams/<int:team_id>", methods=["PATCH"])
+@jwt_required()
+@limiter.limit("240 per hour")
+def admin_update_team(team_id):
+    admin = _admin()
+    if not admin:
+        return _forbidden()
+    team = db.session.get(AgentTeam, team_id)
+    if team is None:
+        return _not_found("Team")
+    try:
+        changes = svc.team_fields(_body(), team)
+    except svc.MarketingError as e:
+        return _err(e)
+    before = {k: str(getattr(team, k)) for k in changes}
+    for k, v in changes.items():
+        setattr(team, k, v)
+    _audit(admin, "AGENT_TEAM_UPDATE", "AgentTeam", team.id,
+           {"before": before, "after": {k: str(v) for k, v in changes.items()}})
+    db.session.commit()
+    return jsonify({"team": svc.team_dict(team, with_counts=True)}), 200
+
+
+@admin_bp.route("/agents/<int:agent_id>/make-lead", methods=["POST"])
+@jwt_required()
+@limiter.limit("120 per hour")
+def admin_make_team_lead(agent_id):
+    admin = _admin()
+    if not admin:
+        return _forbidden()
+    p = db.session.get(AgentProfile, agent_id)
+    if p is None:
+        return _not_found("Agent")
+    if p.status != "APPROVED":
+        return jsonify({"code": "NOT_APPROVED", "message": "Only an approved agent can lead a team.",
+                        "status": p.status}), 409
+    team_id = _body().get("team_id")
+    if team_id in (None, "") and p.team_id:
+        team_id = p.team_id
+    try:
+        team = db.session.get(AgentTeam, int(team_id))
+    except (TypeError, ValueError):
+        team = None
+    if team is None:
+        return jsonify({"code": "VALIDATION_ERROR", "message": "Pick the team they will lead.",
+                        "field": "team_id"}), 400
+    before = team.lead_user_id
+    team.lead_user_id = p.user_id
+    _audit(admin, "AGENT_TEAM_LEAD_SET", "AgentTeam", team.id,
+           {"agent_id": p.id, "user_id": p.user_id, "previous_lead_user_id": before})
+    svc.notify(p.user_id, "You are now a team lead",
+               f"You can now see how your team, {team.name}, is doing on your agent page.")
+    db.session.commit()
+    return jsonify({"team": svc.team_dict(team, with_counts=True)}), 200
+
+
+@admin_bp.route("/agents/<int:agent_id>/remove-lead", methods=["POST"])
+@jwt_required()
+@limiter.limit("120 per hour")
+def admin_remove_team_lead(agent_id):
+    admin = _admin()
+    if not admin:
+        return _forbidden()
+    p = db.session.get(AgentProfile, agent_id)
+    if p is None:
+        return _not_found("Agent")
+    q = AgentTeam.query.filter_by(lead_user_id=p.user_id)
+    team_id = _body().get("team_id")
+    if team_id not in (None, ""):
+        try:
+            q = q.filter(AgentTeam.id == int(team_id))
+        except (TypeError, ValueError):
+            return jsonify({"code": "VALIDATION_ERROR", "message": "Pick a team.", "field": "team_id"}), 400
+    teams = q.all()
+    for t in teams:
+        t.lead_user_id = None
+    _audit(admin, "AGENT_TEAM_LEAD_REMOVE", "AgentProfile", p.id, {"team_ids": [t.id for t in teams]})
+    db.session.commit()
+    return jsonify({"removed": len(teams), "teams": [svc.team_dict(t, with_counts=True) for t in teams]}), 200
 
 
 # ── earnings ─────────────────────────────────────────────────────────────────
@@ -457,7 +580,16 @@ def admin_mark_earnings_paid():
            {"ids": [e.id for e in rows], "skipped": sorted(set(ids) - {e.id for e in rows}),
             "reference": reference, "amount": amount})
     db.session.commit()
-    return jsonify({"paid": len(rows), "amount": amount}), 200
+    # Never blocks: a bank account name that doesn't match the agent is flagged.
+    warnings = []
+    for agent_user_id in sorted({e.agent_user_id for e in rows}):
+        profile = AgentProfile.query.filter_by(user_id=agent_user_id).first()
+        if profile is not None and svc.bank_name_matches(profile) == "no":
+            warnings.append({"code": "BANK_NAME_MISMATCH", "agent_user_id": agent_user_id,
+                             "message": f"The bank account name ({profile.account_name}) doesn't match "
+                                        f"{profile.company_name or profile.full_name}. Check the money went "
+                                        f"to the agent's own account."})
+    return jsonify({"paid": len(rows), "amount": amount, "warnings": warnings}), 200
 
 
 @admin_bp.route("/marketing/earnings/<int:earning_id>/reverse", methods=["POST"])

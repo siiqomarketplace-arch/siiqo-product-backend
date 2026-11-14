@@ -36,7 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.extensions import db
-from app.models.marketing import (AgentEarning, AgentProfile, MarketingCampaign, MarketingCode,
+from app.models.marketing import (AgentEarning, AgentProfile, AgentTeam, MarketingCampaign, MarketingCode,
                                   MarketingScan, SellerAcquisition)
 
 logger = logging.getLogger(__name__)
@@ -838,6 +838,97 @@ def _clean_str(data, key, max_len, required=True, label=None):
     return value or None
 
 
+def canonical_state(raw):
+    """One of the 36 states or FCT (case-insensitive; "Abuja" means FCT), else None."""
+    from app.services.places import NIGERIAN_STATES
+    value = raw.strip().lower() if isinstance(raw, str) else ""
+    if not value:
+        return None
+    if value in ("abuja", "f.c.t", "f.c.t.", "federal capital territory"):
+        return "FCT"
+    value = re.sub(r"\s+state$", "", value)
+    for state in NIGERIAN_STATES:
+        if state.lower() == value:
+            return state
+    return None
+
+
+def mask_account(number):
+    digits = _digits(number)
+    return f"••••{digits[-4:]}" if len(digits) >= 4 else None
+
+
+def store_payout_source(user_id):
+    """The seller's default payout account: (bank_name, bank_code, account_number, account_name) or None."""
+    from app.models.withdrawal import VendorBankAccount
+    rows = VendorBankAccount.query.filter_by(vendor_id=user_id).order_by(
+        VendorBankAccount.is_default.desc(), VendorBankAccount.id.desc()).all()
+    for a in rows:
+        if len(_digits(a.account_number)) == 10:
+            return a.bank_name, a.bank_code, _digits(a.account_number), a.account_name
+    sf = _store(user_id)
+    if sf is not None and len(_digits(sf.account_number)) == 10:
+        return None, sf.bank_code, _digits(sf.account_number), sf.account_name
+    return None
+
+
+def partner_payout_source(user_id):
+    """A rider or logistics partner's payout account, from their partner application."""
+    from app.models.partnerships import PartnerApplication
+    rows = PartnerApplication.query.filter_by(user_id=user_id).order_by(PartnerApplication.id.desc()).all()
+    rows.sort(key=lambda a: 0 if (a.status or "").upper() == "APPROVED" else 1)
+    for a in rows:
+        if len(_digits(a.account_number)) == 10:
+            return None, a.bank_code, _digits(a.account_number), a.account_name
+    return None
+
+
+def _payout_view(source):
+    if source is None:
+        return None
+    bank_name, bank_code, number, account_name = source
+    return {"bank_name": bank_name, "bank_code": bank_code, "account_number_masked": mask_account(number),
+            "account_name": account_name}
+
+
+def prefill(user):
+    """What we already know, for the agent form. Bank numbers are masked."""
+    sf = _store(user.id)
+    city, state = (user.city or "").strip() or None, canonical_state(user.state)
+    if sf is not None:
+        city = city or (sf.city or "").strip() or None
+        state = state or canonical_state(sf.state)
+    return {
+        "full_name": (user.full_name or "").strip() or None,
+        "phone": user.phone or (sf.phone if sf is not None else None),
+        "email": user.email,
+        "state": state,
+        "city": city,
+        "store_payout": _payout_view(store_payout_source(user.id)),
+        "partner_payout": _payout_view(partner_payout_source(user.id)),
+        "telegram_linked": bool(user.telegram_id),
+    }
+
+
+MAX_RIDER_CODES = 500
+
+
+def _phone_owners(phone, exclude_user_id):
+    norm = _norm_phone(phone)
+    if not norm:
+        return []
+    rows = db.session.query(AgentProfile.id, AgentProfile.user_id, AgentProfile.phone).all()
+    return [pid for pid, uid, ph in rows if uid != exclude_user_id and _norm_phone(ph) == norm]
+
+
+def _bank_owners(account_number, exclude_user_id):
+    digits = _digits(account_number)
+    if len(digits) < 6:
+        return []
+    return [pid for (pid,) in db.session.query(AgentProfile.id).filter(
+        AgentProfile.account_number == digits, AgentProfile.user_id != exclude_user_id).all()]
+
+
 def apply(user, data):
     data = data if isinstance(data, dict) else {}
     existing = AgentProfile.query.filter_by(user_id=user.id).first()
@@ -847,26 +938,84 @@ def apply(user, data):
     phone_raw = _clean_str(data, "phone", 20, label="phone number")
     if not _norm_phone(phone_raw):
         raise MarketingError(400, "VALIDATION_ERROR", "Please enter a valid phone number.", field="phone")
-    city = _clean_str(data, "city", 100)
     agent_type = (data.get("agent_type") or "").strip().lower() if isinstance(data.get("agent_type"), str) else ""
     if agent_type not in AgentProfile.TYPES:
         raise MarketingError(400, "VALIDATION_ERROR", "Pick the kind of agent you are.", field="agent_type")
+
+    # Where they work: a team from the list, or "somewhere else" (free text).
+    team_obj = None
+    if data.get("team_id") not in (None, ""):
+        try:
+            team_obj = db.session.get(AgentTeam, int(data.get("team_id")))
+        except (TypeError, ValueError):
+            team_obj = None
+        if team_obj is None or not team_obj.active:
+            raise MarketingError(400, "VALIDATION_ERROR", "Pick a team from the list, or choose somewhere else.",
+                                 field="team_id")
+    state = None
+    if data.get("state") not in (None, ""):
+        state = canonical_state(data.get("state"))
+        if state is None:
+            raise MarketingError(400, "VALIDATION_ERROR", "Pick your state from the list.", field="state")
+    if team_obj is not None:
+        state = state or team_obj.state
+    typed_city = data.get("city").strip() if isinstance(data.get("city"), str) else ""
+    if team_obj is not None and not typed_city and team_obj.city:
+        city = team_obj.city
+    else:
+        city = _clean_str(data, "city", 100)
     team = _clean_str(data, "team", 60, required=False)
-    bank_name = _clean_str(data, "bank_name", 100, label="bank name")
-    bank_code = _clean_str(data, "bank_code", 10, required=False, label="bank code")
-    account_number = _digits(data.get("account_number"))
-    if len(account_number) != 10:
-        raise MarketingError(400, "VALIDATION_ERROR", "Your account number should be 10 digits.",
-                             field="account_number")
-    account_name = _clean_str(data, "account_name", 255, label="account name")
+    if team_obj is not None:
+        team = team_obj.name[:60]
+
+    company_name = cac_number = None
+    if agent_type == "logistics_company":
+        company_name = _clean_str(data, "company_name", 160, label="company name")
+        cac_raw = data.get("cac_number")
+        cac_number = re.sub(r"[^A-Za-z0-9]", "", cac_raw).upper()[:30] if isinstance(cac_raw, str) else ""
+        cac_number = cac_number or None
+
+    # Bank: the store's or partner payout account (copied here, never sent to
+    # the browser), or the one they typed.
+    use_payout = (data.get("use_payout") or "").strip().lower() if isinstance(data.get("use_payout"), str) else ""
+    if use_payout in ("store", "partner"):
+        source = store_payout_source(user.id) if use_payout == "store" else partner_payout_source(user.id)
+        if source is None:
+            raise MarketingError(400, "NO_PAYOUT_ACCOUNT", "We couldn't find that payout account. "
+                                 "Please type your bank details.", field="use_payout")
+        src_bank_name, bank_code, account_number, account_name = source
+        typed_name = data.get("bank_name").strip()[:100] if isinstance(data.get("bank_name"), str) else ""
+        bank_name = src_bank_name or typed_name or (f"Bank code {bank_code}" if bank_code else "Bank")
+        account_name = (account_name or "").strip() or _clean_str(data, "account_name", 255, label="account name")
+    elif use_payout:
+        raise MarketingError(400, "VALIDATION_ERROR", "Pick a payout account.", field="use_payout")
+    else:
+        bank_name = _clean_str(data, "bank_name", 100, label="bank name")
+        bank_code = _clean_str(data, "bank_code", 10, required=False, label="bank code")
+        account_number = _digits(data.get("account_number"))
+        if len(account_number) != 10:
+            raise MarketingError(400, "VALIDATION_ERROR", "Your account number should be 10 digits.",
+                                 field="account_number")
+        account_name = _clean_str(data, "account_name", 255, label="account name")
     if data.get("agree_conduct") is not True:
         raise MarketingError(400, "VALIDATION_ERROR", "Please agree to the agent code of conduct.",
                              field="agree_conduct")
+
+    # One person, one agent: the phone and the bank account can't be on another agent.
+    if _phone_owners(phone_raw, user.id):
+        raise MarketingError(409, "PHONE_IN_USE", "This phone number is already used by another agent. "
+                             "Use your own number, or contact Siiqo support.", field="phone")
+    if _bank_owners(account_number, user.id):
+        raise MarketingError(409, "BANK_IN_USE", "This bank account is already used by another agent. "
+                             "Use an account in your own name.", field="account_number")
+
     now = _now()
     profile = existing or AgentProfile(user_id=user.id, created_at=now)
     profile.status = "PENDING"
-    profile.full_name, profile.phone, profile.city = full_name, phone_raw, city
+    profile.full_name, profile.phone, profile.city, profile.state = full_name, phone_raw, city, state
     profile.agent_type, profile.team = agent_type, team
+    profile.team_id = team_obj.id if team_obj is not None else None
+    profile.company_name, profile.cac_number = company_name, cac_number
     profile.bank_name, profile.bank_code = bank_name, bank_code
     profile.account_number, profile.account_name = account_number, account_name
     profile.agreed_conduct_at = now
@@ -875,6 +1024,203 @@ def apply(user, data):
     db.session.add(profile)
     db.session.commit()
     return profile
+
+
+# ── approval checklist (admins) ───────────────────────────────────────────────
+
+_NAME_NOISE = {"ltd", "limited", "plc", "nig", "nigeria", "co", "company", "enterprise", "enterprises",
+               "ventures", "and", "the", "services", "global", "intl", "international", "mr", "mrs", "miss"}
+
+
+def _name_tokens(name):
+    words = re.findall(r"[a-z]+", (name or "").lower())
+    return {w for w in words if w not in _NAME_NOISE and len(w) > 1}
+
+
+def names_match(account_name, *names):
+    """"yes" / "no" / "unknown": does the bank account name belong to one of
+    these names? Order doesn't matter ("OBI AMAKA C." matches "Amaka Obi"):
+    at least two shared words, or every word when a name has only one."""
+    acct = _name_tokens(account_name)
+    candidates = [t for t in (_name_tokens(n) for n in names) if t]
+    if not acct or not candidates:
+        return "unknown"
+    for tokens in candidates:
+        if len(acct & tokens) >= min(2, len(tokens), len(acct)):
+            return "yes"
+    return "no"
+
+
+def bank_name_matches(profile):
+    return names_match(profile.account_name, profile.full_name, profile.company_name)
+
+
+def _check_index():
+    """Normalised phone -> profile ids, and account number -> profile ids, for every agent."""
+    phones, banks = {}, {}
+    for pid, ph, acct in db.session.query(AgentProfile.id, AgentProfile.phone, AgentProfile.account_number).all():
+        norm = _norm_phone(ph)
+        if norm:
+            phones.setdefault(norm, []).append(pid)
+        digits = _digits(acct)
+        if len(digits) >= 6:
+            banks.setdefault(digits, []).append(pid)
+    return phones, banks
+
+
+def approval_checks(profile, index=None):
+    from app.models.user import User
+    phones, banks = index or _check_index()
+    user = db.session.get(User, profile.user_id)
+    norm = _norm_phone(profile.phone)
+    return {
+        "email_verified": bool(user and user.is_verified),
+        "telegram_linked": bool(user and user.telegram_id),
+        "phone_present": bool(norm),
+        "bank_name_matches": bank_name_matches(profile),
+        "duplicate_phone_agents": sorted(i for i in phones.get(norm, []) if i != profile.id) if norm else [],
+        "duplicate_bank_agents": sorted(i for i in banks.get(_digits(profile.account_number), [])
+                                        if i != profile.id),
+    }
+
+
+def checks_ok(checks):
+    return bool((checks["email_verified"] or checks["telegram_linked"]) and checks["phone_present"]
+                and checks["bank_name_matches"] == "yes" and not checks["duplicate_phone_agents"]
+                and not checks["duplicate_bank_agents"])
+
+
+# ── teams and team leads ──────────────────────────────────────────────────────
+
+def team_label(profile):
+    if profile.team_id and profile.team_ref is not None:
+        return profile.team_ref.name
+    return profile.team
+
+
+def team_dict(t, with_counts=False):
+    from app.models.user import User
+    out = {"id": t.id, "name": t.name, "kind": t.kind, "state": t.state, "city": t.city, "active": bool(t.active)}
+    if with_counts:
+        lead = None
+        if t.lead_user_id:
+            p = AgentProfile.query.filter_by(user_id=t.lead_user_id).first()
+            u = db.session.get(User, t.lead_user_id)
+            lead = {"user_id": t.lead_user_id, "agent_id": p.id if p else None,
+                    "name": p.full_name if p else (u.full_name if u else None)}
+        out.update({"lead": lead, "members": AgentProfile.query.filter_by(team_id=t.id).count(),
+                    "created_at": _iso(t.created_at)})
+    return out
+
+
+def team_fields(data, team=None):
+    """Validated changes for a team (create when team is None)."""
+    changes = {}
+    if "name" in data or team is None:
+        name = data.get("name").strip() if isinstance(data.get("name"), str) else ""
+        if not name or len(name) > 120:
+            raise MarketingError(400, "VALIDATION_ERROR", "Give the team a name (up to 120 letters).", field="name")
+        changes["name"] = name
+    if "kind" in data or team is None:
+        kind = data.get("kind").strip().lower() if isinstance(data.get("kind"), str) else ""
+        if kind not in AgentTeam.KINDS:
+            raise MarketingError(400, "VALIDATION_ERROR", "Kind is market, campus, area or company.", field="kind")
+        changes["kind"] = kind
+    if "state" in data or team is None:
+        state = canonical_state(data.get("state"))
+        if state is None:
+            raise MarketingError(400, "VALIDATION_ERROR", "Pick a state.", field="state")
+        changes["state"] = state
+    if "city" in data:
+        city = data.get("city")
+        changes["city"] = (city.strip()[:100] or None) if isinstance(city, str) else None
+    if "active" in data:
+        if not isinstance(data.get("active"), bool):
+            raise MarketingError(400, "VALIDATION_ERROR", "active is true or false.", field="active")
+        changes["active"] = data["active"]
+    return changes
+
+
+def led_teams(user_id):
+    """Teams this user leads, only while they are an APPROVED agent."""
+    profile = AgentProfile.query.filter_by(user_id=user_id).first()
+    if profile is None or profile.status != "APPROVED":
+        return []
+    return AgentTeam.query.filter_by(lead_user_id=user_id).order_by(AgentTeam.id).all()
+
+
+def team_view(team):
+    """Read-only results for a team lead."""
+    members = (AgentProfile.query.filter_by(team_id=team.id)
+               .order_by(AgentProfile.full_name, AgentProfile.id).all())
+    rows = []
+    totals = {"members": 0, "approved": 0, "signups": 0, "setups": 0, "first_sales": 0, "rewarded_sales": 0}
+    for p in members:
+        s = stats_for_agent(p)
+        rows.append({"name": short_name(p.full_name), "status": p.status, "agent_type": p.agent_type,
+                     "is_lead": p.user_id == team.lead_user_id, "signups": s["signups"], "setups": s["setups"],
+                     "first_sales": s["first_sales"], "rewarded_sales": s["rewarded_sales"]})
+        totals["members"] += 1
+        totals["approved"] += int(p.status == "APPROVED")
+        for k in ("signups", "setups", "first_sales", "rewarded_sales"):
+            totals[k] += s[k]
+    return {"team": team_dict(team), "members": rows, "totals": totals, "sellers": totals["signups"]}
+
+
+# ── logistics companies: rider codes ──────────────────────────────────────────
+
+def rider_codes_query(profile):
+    q = MarketingCode.query.filter(MarketingCode.owner_user_id == profile.user_id, MarketingCode.kind == "agent")
+    if profile.code_id:
+        q = q.filter(MarketingCode.id != profile.code_id)
+    return q
+
+
+def rider_row(profile, code):
+    acqs = SellerAcquisition.query.filter_by(code_id=code.id)
+    seller_ids = [a.seller_user_id for a in acqs.all()]
+    rewarded = 0
+    if seller_ids:
+        rewarded = live_sale_earnings().filter(AgentEarning.agent_user_id == profile.user_id,
+                                               AgentEarning.seller_user_id.in_(seller_ids)).count()
+    return {"code_id": code.id, "code": code.code, "link": code_link(code.code), "name": code.label,
+            "phone": code.contact_phone, "active": bool(code.active), "scans": code.scan_count or 0,
+            "signups": len(seller_ids),
+            "first_sales": acqs.filter(SellerAcquisition.first_paid_order_at.isnot(None)).count(),
+            "rewarded_sales": rewarded, "created_at": _iso(code.created_at)}
+
+
+def create_rider_code(profile, data):
+    data = data if isinstance(data, dict) else {}
+    name = _clean_str(data, "name", 120, label="rider's name")
+    phone = data.get("phone").strip() if isinstance(data.get("phone"), str) else ""
+    if phone and not _norm_phone(phone):
+        raise MarketingError(400, "VALIDATION_ERROR", "That phone number doesn't look right.", field="phone")
+    if rider_codes_query(profile).count() >= MAX_RIDER_CODES:
+        raise MarketingError(409, "RIDER_LIMIT", f"You can have up to {MAX_RIDER_CODES} rider codes. "
+                             "Pause one you no longer use, or contact Siiqo.")
+    code = create_code("agent", "/sell", label=name, owner_user_id=profile.user_id,
+                       prefix=_first_name_prefix(name))
+    code.contact_phone = phone[:20] or None
+    db.session.commit()
+    return code
+
+
+def update_rider_code(code, data):
+    data = data if isinstance(data, dict) else {}
+    if "name" in data:
+        code.label = _clean_str(data, "name", 120, label="rider's name")
+    if "active" in data:
+        if not isinstance(data.get("active"), bool):
+            raise MarketingError(400, "VALIDATION_ERROR", "active is true or false.", field="active")
+        code.active = data["active"]
+    if "phone" in data:
+        phone = data.get("phone").strip() if isinstance(data.get("phone"), str) else ""
+        if phone and not _norm_phone(phone):
+            raise MarketingError(400, "VALIDATION_ERROR", "That phone number doesn't look right.", field="phone")
+        code.contact_phone = phone[:20] or None
+    db.session.commit()
+    return code
 
 
 def _first_name_prefix(full_name):
@@ -904,7 +1250,12 @@ def notify(user_id, title, message):
 
 def stats_for_agent(profile, since=None):
     agent_id = profile.user_id
-    scans_q = MarketingScan.query.filter(MarketingScan.code_id == profile.code_id) if profile.code_id else None
+    # Every agent code the agent owns (a logistics company's rider codes too).
+    code_ids = [cid for (cid,) in db.session.query(MarketingCode.id).filter(
+        MarketingCode.owner_user_id == agent_id, MarketingCode.kind == "agent").all()]
+    if profile.code_id and profile.code_id not in code_ids:
+        code_ids.append(profile.code_id)
+    scans_q = MarketingScan.query.filter(MarketingScan.code_id.in_(code_ids)) if code_ids else None
     acq_q = SellerAcquisition.query.filter(SellerAcquisition.agent_user_id == agent_id)
 
     def count(col):
@@ -943,9 +1294,11 @@ def agent_me(profile):
     code = profile.code.code if profile.code_id and profile.code else None
     approved = profile.status == "APPROVED"
     return {
-        "profile": {"status": profile.status, "agent_type": profile.agent_type, "team": profile.team,
-                    "full_name": profile.full_name, "code": code,
-                    "link": code_link(code) if approved and code else None},
+        "profile": {"status": profile.status, "agent_type": profile.agent_type, "team": team_label(profile),
+                    "team_id": profile.team_id, "state": profile.state, "city": profile.city,
+                    "company_name": profile.company_name, "full_name": profile.full_name, "code": code,
+                    "link": code_link(code) if approved and code else None,
+                    "is_team_lead": bool(led_teams(profile.user_id))},
         "rates": {"per_sale": sale_reward(), "rewarded_sales": rewarded_sales(),
                   "max_per_seller": max_per_seller(), "hold_days": hold_days(), "min_products": min_products()},
         "today": stats_for_agent(profile, period_start("day", now)),
@@ -1023,6 +1376,7 @@ def earning_row(e, with_agent=False):
             "bank_code": profile.bank_code if profile else None,
             "account_number": profile.account_number if profile else None,
             "account_name": profile.account_name if profile else None,
+            "bank_name_matches": bank_name_matches(profile) if profile else "unknown",
         }
     return row
 
@@ -1034,12 +1388,13 @@ def leaderboard(viewer_user_id, period):
     teams = {}
     for p in profiles:
         s = stats_for_agent(p, since)
-        if p.team:
-            t = teams.setdefault(p.team, {"team": p.team, "setups": 0, "first_sales": 0})
+        label = team_label(p)
+        if label:
+            t = teams.setdefault(label, {"team": label, "setups": 0, "first_sales": 0})
             t["setups"] += s["setups"]
             t["first_sales"] += s["first_sales"]
         if s["setups"] or s["first_sales"]:
-            rows.append({"name": short_name(p.full_name), "team": p.team, "setups": s["setups"],
+            rows.append({"name": short_name(p.full_name), "team": label, "setups": s["setups"],
                          "first_sales": s["first_sales"], "is_me": p.user_id == viewer_user_id,
                          "_created": p.created_at or since})
     rows.sort(key=lambda r: (-r["first_sales"], -r["setups"], _aware(r["_created"])))
@@ -1277,7 +1632,7 @@ def board(date_from=None, date_to=None):
         s["rewarded_sales"] = live_sale_earnings().filter(
             AgentEarning.agent_user_id == p.user_id, AgentEarning.earned_at >= start,
             AgentEarning.earned_at < end).count()
-        agent_rows.append({"agent_user_id": p.user_id, "name": p.full_name, "team": p.team,
+        agent_rows.append({"agent_user_id": p.user_id, "name": p.full_name, "team": team_label(p),
                            "agent_type": p.agent_type, **s, "earned_ngn": _money(earned)})
 
     last_day = (end - timedelta(seconds=1)).astimezone(LAGOS).date().isoformat()

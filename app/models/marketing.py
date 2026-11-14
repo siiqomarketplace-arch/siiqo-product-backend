@@ -92,6 +92,8 @@ class MarketingCode(db.Model):
     owner_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
     active = db.Column(db.Boolean, nullable=False, default=True)
     scan_count = db.Column(db.Integer, nullable=False, default=0)
+    # Rider codes (kind "agent", owned by a logistics company): the rider's phone, optional.
+    contact_phone = db.Column(db.String(20), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
 
     campaign = db.relationship('MarketingCampaign')
@@ -110,20 +112,44 @@ class MarketingScan(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
+class AgentTeam(db.Model):
+    """A place agents work from: a market, a campus, an area or a logistics
+    company. Admins add them city by city; an admin may make one APPROVED
+    agent the team lead, who can only view the team's results."""
+    __tablename__ = 'agent_teams'
+
+    KINDS = ('market', 'campus', 'area', 'company')
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    kind = db.Column(db.String(12), nullable=False, default='area')
+    state = db.Column(db.String(40), nullable=False, index=True)   # one of places.NIGERIAN_STATES
+    city = db.Column(db.String(100), nullable=True)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    lead_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class AgentProfile(db.Model):
     __tablename__ = 'agent_profiles'
 
     STATUSES = ('PENDING', 'APPROVED', 'PAUSED', 'REJECTED')
-    TYPES = ('field', 'rider', 'campus', 'influencer', 'market')
+    # "field" is shown as "Community agent". A logistics company is paid as one
+    # agent and makes rider codes under itself.
+    TYPES = ('field', 'rider', 'campus', 'influencer', 'market', 'logistics_company')
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False)
     status = db.Column(db.String(10), nullable=False, default='PENDING', index=True)
     agent_type = db.Column(db.String(20), nullable=False, default='field')
-    team = db.Column(db.String(60), nullable=True)
+    team = db.Column(db.String(60), nullable=True)        # free text ("somewhere else", old rows)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), nullable=True, index=True)
     full_name = db.Column(db.String(120), nullable=False)
     phone = db.Column(db.String(20), nullable=False)
+    state = db.Column(db.String(40), nullable=True)
     city = db.Column(db.String(100), nullable=False)
+    company_name = db.Column(db.String(160), nullable=True)  # logistics_company only
+    cac_number = db.Column(db.String(30), nullable=True)     # logistics_company, optional
     bank_name = db.Column(db.String(100), nullable=False)
     bank_code = db.Column(db.String(10), nullable=True)
     account_number = db.Column(db.String(20), nullable=False)
@@ -136,6 +162,7 @@ class AgentProfile(db.Model):
 
     user = db.relationship('User', foreign_keys=[user_id])
     code = db.relationship('MarketingCode', foreign_keys=[code_id])
+    team_ref = db.relationship('AgentTeam', foreign_keys=[team_id])
 
 
 class SellerAcquisition(db.Model):
