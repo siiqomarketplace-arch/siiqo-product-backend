@@ -82,6 +82,8 @@ class Order(db.Model):
     # pay_link / telegram / whatsapp / market / store / direct, and utm_campaign.
     source = db.Column(db.String(40), nullable=True)
     campaign = db.Column(db.String(100), nullable=True)
+    # The marketing code the buyer came through (attribution.ref, upper-case).
+    ref_code = db.Column(db.String(24), nullable=True, index=True)
 
     # When the unpaid-order reminder went out (one per order), and how many
     # "please ship" reminders the seller has had (0, 1 or 2).

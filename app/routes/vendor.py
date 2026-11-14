@@ -533,6 +533,9 @@ def onboard_vendor():
     db.session.flush()
     if verify_step is not None:
         verification_requirement.record_new_store_hold(user.id, storefront.id)
+    # Marketing code the seller came through, if not credited at signup.
+    from app.services.marketing import credit_signup
+    credit_signup(user, data)
     db.session.commit()
 
     # ── Paystack subaccount (for Split Payments on digital/service checkouts) ──

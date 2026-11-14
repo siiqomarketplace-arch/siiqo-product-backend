@@ -107,6 +107,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMP WITH TIME ZONE",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS source VARCHAR(40)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign VARCHAR(100)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ref_code VARCHAR(24)",
+                "CREATE INDEX IF NOT EXISTS ix_orders_ref_code ON orders (ref_code)",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS delivery_settings JSON",
                 # Admin close/reopen a store (NULL = not closed).
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE",
@@ -656,6 +658,11 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(passport_bp, url_prefix='/api/passport')
     from app.routes.product_questions import product_questions_bp
     app.register_blueprint(product_questions_bp, url_prefix='/api/public')
+    # Marketing system: short codes, agents, seller growth kit
+    from app.routes.marketing import agents_bp, growth_kit_bp, marketing_public_bp
+    app.register_blueprint(marketing_public_bp, url_prefix='/api/public')
+    app.register_blueprint(agents_bp, url_prefix='/api/agents')
+    app.register_blueprint(growth_kit_bp, url_prefix='/api/vendor')
     from app.routes.check import check_bp
     app.register_blueprint(check_bp, url_prefix='/api/check')
     from app.routes.trust_report import trust_report_bp
@@ -965,6 +972,20 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as address_err:
                 logger.warning(f"Address verification task registration skipped: {address_err}")
+
+            # Marketing: catch missed seller milestones, release held agent
+            # rewards after the hold or reverse them on a refund. Hourly.
+            try:
+                from app.services.marketing import run_marketing_sweep
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_marketing_sweep),
+                    trigger=IntervalTrigger(hours=1),
+                    id='marketing_sweep',
+                    name='Marketing: seller milestones and agent reward hold',
+                    replace_existing=True,
+                )
+            except Exception as marketing_err:
+                logger.warning(f"Marketing task registration skipped: {marketing_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")

@@ -530,4 +530,8 @@ def register():
         return
     event.listen(Session, "before_flush", _before_flush)
     event.listen(Session, "after_flush", _after_flush)
+    # Marketing milestones (store set up, first Pay Link, first paid order,
+    # including funnel.paid) are recomputed in the same transaction.
+    from app.services.marketing import register_hooks as _register_marketing_hooks
+    _register_marketing_hooks()
     _REGISTERED = True

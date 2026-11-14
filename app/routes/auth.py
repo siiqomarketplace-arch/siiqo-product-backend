@@ -227,6 +227,10 @@ def register():
                 reward_earned=0.0,
             ))
 
+    # Marketing code this person came through (siiqo.com/r/<CODE>), if any.
+    from app.services.marketing import credit_signup
+    credit_signup(new_user, data)
+
     # Generate OTP
     otp = str(random.randint(100000, 999999))
     new_user.reset_otp = otp
@@ -776,7 +780,9 @@ def telegram_login():
     # Verify hash using the official Telegram widget authentication algorithm
     check_fields = []
     for k, v in sorted(data.items()):
-        if k not in ('hash', 'create_new') and v is not None:
+        # ref_code / attribution / ref_at are added by the website (marketing
+        # credit), not by Telegram, so they are not part of the signed data.
+        if k not in ('hash', 'create_new', 'ref_code', 'attribution', 'ref_at') and v is not None:
             check_fields.append(f"{k}={str(v)}")
     data_check_string = "\n".join(check_fields)
     
@@ -836,6 +842,8 @@ def telegram_login():
             db.session.add(user)
             db.session.flush()
             user.generate_referral_code()
+            from app.services.marketing import credit_signup
+            credit_signup(user, data)
             db.session.commit()
         else:
             return jsonify({
@@ -1146,6 +1154,9 @@ def telegram_webapp_create():
                                           link.get('ph') or '')
     except tgw.InitDataError as err:
         return _tg_error(err)
+    from app.services.marketing import credit_signup
+    if credit_signup(user, data) is not None:
+        db.session.commit()
     return _tg_login_response(user)
 
 

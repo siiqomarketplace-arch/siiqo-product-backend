@@ -4,7 +4,8 @@ from .order import Cart, CartItem, Order, OrderItem
 from .escrow import EscrowTransaction, LogisticsAssignment, EscrowStatus, DeliveryConfirmationCode
 from .finance import Invoice, Receipt, Ledger, InventoryItem, StockMovement, Expense, BrandingSettings
 from .crm import CustomerProfile
-from .marketing import Coupon, Campaign
+from .marketing import (Coupon, Campaign, MarketingCampaign, MarketingCode, MarketingScan,
+                        AgentProfile, SellerAcquisition, AgentEarning)
 from .community import Article, Comment, Review, BlogAuthor
 from .partnerships import PartnerApplication, Referral, PartnerStaff
 from .admin import AdminUser, PlatformSetting, SubscriptionPlan, VendorSubscription, SponsoredListing, Favorite

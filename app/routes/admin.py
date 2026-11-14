@@ -4370,3 +4370,6 @@ def admin_storefront_detail(storefront_id):
 
 # Dispute review routes (/api/admin/disputes/...), Phase 2 item 2-5.
 from app.routes import admin_disputes as _admin_dispute_routes  # noqa: E402,F401
+# Marketing system: campaigns, codes, board, agents, earnings
+# (/api/admin/marketing/..., /api/admin/agents/...).
+from app.routes import admin_marketing as _admin_marketing_routes  # noqa: E402,F401

@@ -289,6 +289,8 @@ def accept(req: PayRequest, user, body: dict | None = None) -> dict:
             raise PayRequestError(e.status, e.code, e.message, **e.extra)
         storefront = op._new_store(user, name, slug, bank)
         created_store = True
+        from app.services.marketing import credit_signup
+        credit_signup(user, body)
 
     title = (req.item or f"Order from {storefront.store_name}")[:100]
     link = PaymentLink(

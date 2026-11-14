@@ -272,6 +272,9 @@ def publish(session: OnboardingSession, user: User, body: dict) -> tuple[dict, b
             storefront = db.session.get(Storefront, result["storefront_id"])
             storefront.is_published = False
             verification_requirement.record_new_store_hold(user.id, storefront.id)
+        # Marketing code the seller came through, if not credited at signup.
+        from app.services.marketing import credit_signup
+        credit_signup(user, body)
         db.session.commit()
     except IntegrityError as exc:
         db.session.rollback()

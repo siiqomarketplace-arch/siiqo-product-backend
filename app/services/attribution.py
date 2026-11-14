@@ -85,4 +85,7 @@ def apply_to_order(order, payload, headers=None, *, pay_link: bool = False) -> d
     attribution = clean_attribution((payload or {}).get("attribution") if isinstance(payload, dict) else None)
     order.source = order_source(attribution, headers, pay_link=pay_link)
     order.campaign = attribution.get("campaign")
+    # The marketing code (siiqo.com/r/<CODE>) the buyer came through, if any.
+    ref = re.sub(r"[^A-Z0-9\-]", "", (attribution.get("ref") or "").upper())
+    order.ref_code = ref if 3 <= len(ref) <= 24 else None
     return {k: v for k, v in attribution.items() if k != "landing"}
