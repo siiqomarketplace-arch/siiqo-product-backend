@@ -9,12 +9,17 @@ This module:
 - records the seller's milestones (store set up, first Pay Link, first paid
   order from a separate buyer), idempotently, from session hooks and an
   hourly sweep;
-- writes agent earnings to a ledger. Nothing is paid out by the system: an
-  admin pays by hand and marks the rows PAID with a reference.
+- writes agent earnings to a ledger. Agents earn nothing for a signup or a
+  store being set up: they earn a fixed amount for each of the first few
+  qualifying sales of a seller they brought (paid, not free, from a separate
+  buyer; by default each from a different buyer). A reward is HELD for the
+  hold period, then PAYABLE; if its order is refunded, cancelled or disputed
+  while HELD it is REVERSED and the slot is free for a later sale. Nothing is
+  paid out by the system: an admin pays by hand and marks the rows PAID.
 
-Settings (env): AGENT_SETUP_REWARD_NGN (1000), AGENT_FIRST_SALE_REWARD_NGN
-(2000), AGENT_REWARD_HOLD_DAYS (7), SETUP_MIN_PRODUCTS (5),
-ATTRIBUTION_WINDOW_DAYS (30).
+Settings (env): AGENT_SALE_REWARD_NGN (200), AGENT_REWARDED_SALES (5),
+AGENT_SALES_DISTINCT_BUYERS (true), AGENT_REWARD_HOLD_DAYS (7),
+SETUP_MIN_PRODUCTS (5), ATTRIBUTION_WINDOW_DAYS (30).
 """
 from __future__ import annotations
 
@@ -73,12 +78,25 @@ def _int_env(name, default):
         return default
 
 
-def setup_reward():
-    return _int_env("AGENT_SETUP_REWARD_NGN", 1000)
+def sale_reward():
+    return max(0, _int_env("AGENT_SALE_REWARD_NGN", 200))
 
 
-def first_sale_reward():
-    return _int_env("AGENT_FIRST_SALE_REWARD_NGN", 2000)
+def rewarded_sales():
+    """How many sales of each seller earn the agent a reward."""
+    return max(0, _int_env("AGENT_REWARDED_SALES", 5))
+
+
+def sales_distinct_buyers():
+    """Each rewarded sale must come from a different buyer (default on)."""
+    raw = os.environ.get("AGENT_SALES_DISTINCT_BUYERS")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def max_per_seller():
+    return sale_reward() * rewarded_sales()
 
 
 def hold_days():
@@ -468,6 +486,18 @@ def qualifying_orders(acq):
     return good, bad
 
 
+def buyer_key(order):
+    """Who bought: user id if any, else normalised email, else phone. None
+    when the buyer can't be told apart from anyone."""
+    if order.buyer_id:
+        return f"u:{order.buyer_id}"
+    email = _norm_email(order.buyer_email)
+    if email:
+        return f"e:{email}"
+    phone = _norm_phone(order.buyer_phone) or _norm_phone(order.delivery_phone)
+    return f"p:{phone}" if phone else None
+
+
 def _add_flag(acq, flag):
     flags = list(acq.flags or [])
     if flag not in flags:
@@ -480,7 +510,7 @@ def _rewarded_identities(seller_user_id):
     from app.models.user import User
     other_ids = [r[0] for r in db.session.query(AgentEarning.seller_user_id).filter(
         AgentEarning.seller_user_id.isnot(None), AgentEarning.seller_user_id != seller_user_id,
-        AgentEarning.kind.in_(("setup", "first_sale"))).distinct().all()]
+        AgentEarning.kind.in_(("sale", "setup", "first_sale"))).distinct().all()]
     phones, banks = set(), set()
     for uid in other_ids:
         user = db.session.get(User, uid)
@@ -500,58 +530,125 @@ def _seller_identities(seller_user_id):
     return phones, bank_accounts(seller_user_id, sf)
 
 
-def _award(acq, kind, amount, now):
-    """One setup and one first-sale reward per seller, ever, and only for an
-    APPROVED agent. Duplicate phones/bank accounts get a flag instead."""
+BLOCKING_FLAGS = ("duplicate_phone", "duplicate_bank", "shared_bank_with_agent")
+
+
+def _may_reward(acq):
+    """Only an APPROVED agent earns, and never for a seller whose phone or
+    bank account matches another rewarded seller or the agent's own bank."""
     if not acq.agent_user_id:
-        return None
+        return False
     profile = AgentProfile.query.filter_by(user_id=acq.agent_user_id).first()
     if profile is None or profile.status != "APPROVED":
-        return None
-    if AgentEarning.query.filter_by(seller_user_id=acq.seller_user_id, kind=kind).first() is not None:
-        return None
+        return False
     phones, banks = _seller_identities(acq.seller_user_id)
     rewarded_phones, rewarded_banks = _rewarded_identities(acq.seller_user_id)
-    blocked = False
     if phones & rewarded_phones:
         _add_flag(acq, "duplicate_phone")
-        blocked = True
     if banks & rewarded_banks:
         _add_flag(acq, "duplicate_bank")
-        blocked = True
-    if blocked:
-        return None
-    earning = AgentEarning(agent_user_id=acq.agent_user_id, seller_user_id=acq.seller_user_id, kind=kind,
-                           amount_ngn=Decimal(amount), status="HELD", earned_at=now,
-                           payable_at=now + timedelta(days=hold_days()), created_at=now)
-    try:
-        with db.session.begin_nested():
-            db.session.add(earning)
-            db.session.flush()
-    except IntegrityError:
-        return None
-    return earning
+    return not set(acq.flags or []) & set(BLOCKING_FLAGS)
+
+
+def _reverse_bad_sale_earnings(acq, earnings):
+    """A HELD sale reward whose order went bad is reversed (its slot frees
+    up). One that already cleared the hold is left for an admin, flagged."""
+    changed = False
+    for e in earnings:
+        if e.status == "REVERSED" or not e.order_id:
+            continue
+        reason = order_went_bad(e.order_id)
+        if not reason:
+            continue
+        if e.status == "HELD":
+            e.status = "REVERSED"
+            e.reversed_reason = reason[:255]
+            changed = True
+        elif e.status == "PAYABLE":
+            _add_flag(acq, "payable_then_refunded")
+        elif e.status == "PAID":
+            _add_flag(acq, "paid_then_refunded")
+    if changed:
+        db.session.flush()
+
+
+def _award_sales(acq, now):
+    """Make sure the first AGENT_REWARDED_SALES qualifying sales of this seller
+    (oldest paid first, skipping bad orders and, by default, repeat buyers)
+    each have a "sale" reward. Idempotent."""
+    from app.models.order import Order
+    earnings = (AgentEarning.query.filter_by(seller_user_id=acq.seller_user_id, kind="sale")
+                .order_by(AgentEarning.id).all())
+    _reverse_bad_sale_earnings(acq, earnings)
+    limit = rewarded_sales()
+    live = [e for e in earnings if e.status != "REVERSED"]
+    if len(live) >= limit:
+        return []
+    rewarded_order_ids = {e.order_id for e in earnings if e.order_id}
+    used_slots = {e.sale_number for e in live if e.sale_number}
+    distinct = sales_distinct_buyers()
+    used_buyers = set()
+    if distinct:
+        for e in live:
+            order = db.session.get(Order, e.order_id) if e.order_id else None
+            key = buyer_key(order) if order is not None else None
+            if key:
+                used_buyers.add(key)
+    people = _people(acq.seller_user_id, acq.agent_user_id)
+    made = []
+    allowed = None  # checked at the first candidate sale (it reads every rewarded seller)
+    for order in paid_orders_query(acq.seller_user_id).order_by(Order.paid_at, Order.id).all():
+        if len(live) + len(made) >= limit:
+            break
+        if order.id in rewarded_order_ids or not _separate_buyer(order, people) or order_went_bad(order.id):
+            continue
+        key = buyer_key(order)
+        if distinct:
+            if key is None or key in used_buyers:
+                continue
+            used_buyers.add(key)
+        free = [n for n in range(1, limit + 1) if n not in used_slots]
+        if not free:
+            break
+        if allowed is None:
+            allowed = _may_reward(acq)
+        if not allowed:
+            break
+        earning = AgentEarning(agent_user_id=acq.agent_user_id, seller_user_id=acq.seller_user_id, kind="sale",
+                               order_id=order.id, sale_number=free[0], amount_ngn=Decimal(sale_reward()),
+                               status="HELD", earned_at=now, payable_at=now + timedelta(days=hold_days()),
+                               created_at=now)
+        try:
+            with db.session.begin_nested():
+                db.session.add(earning)
+                db.session.flush()
+        except IntegrityError:
+            continue  # rewarded at the same moment elsewhere
+        used_slots.add(free[0])
+        made.append(earning)
+    return made
 
 
 def recompute_for(seller_user_id, now=None):
-    """Record any milestones this seller has reached. Idempotent; never
-    moves a milestone that is already set. Caller commits."""
+    """Record any milestones this seller has reached and bring the agent's
+    sale rewards up to date. Idempotent; never moves a milestone that is
+    already set. Caller commits."""
     acq = SellerAcquisition.query.filter_by(seller_user_id=seller_user_id).first()
     if acq is None:
         return None
     now = now or _now()
 
-    # Shared bank with the agent: a review flag only.
+    # Shared bank with the agent: flagged, and no rewards for this seller.
     if acq.agent_user_id:
         profile = AgentProfile.query.filter_by(user_id=acq.agent_user_id).first()
         if profile is not None and _digits(profile.account_number) in bank_accounts(seller_user_id):
             _add_flag(acq, "shared_bank_with_agent")
 
+    # Set-up is still tracked (stats, the agent's checklist) but earns nothing.
     if acq.setup_at is None:
         steps = setup_steps(seller_user_id)
         if steps["published"] and steps["products"] >= min_products() and steps["place"] and steps["bank"]:
             acq.setup_at = now
-            _award(acq, "setup", setup_reward(), now)
 
     if acq.pay_link_at is None:
         from app.models.payment_link import PaymentLink
@@ -567,7 +664,9 @@ def recompute_for(seller_user_id, now=None):
         if good:
             acq.first_paid_order_at = _aware(good[0].paid_at) or now
             acq.first_paid_order_id = good[0].id
-            _award(acq, "first_sale", first_sale_reward(), now)
+
+    if acq.agent_user_id:
+        _award_sales(acq, now)
     return acq
 
 
@@ -579,6 +678,8 @@ _HOOKS_REGISTERED = False
 
 def _after_flush(session, flush_context):
     try:
+        from app.models.dispute import DisputeCase
+        from app.models.escrow import EscrowTransaction
         from app.models.order import Order
         from app.models.payment_link import PaymentLink
         from app.models.product import Product
@@ -586,6 +687,7 @@ def _after_flush(session, flush_context):
         from app.models.withdrawal import VendorBankAccount
         sellers = session.info.setdefault("_mkt_sellers", set())
         stores = session.info.setdefault("_mkt_stores", set())
+        orders = session.info.setdefault("_mkt_orders", set())
         for obj in list(session.new) + list(session.dirty):
             if isinstance(obj, (Storefront, VendorBankAccount, PaymentLink)):
                 if obj.vendor_id:
@@ -595,6 +697,10 @@ def _after_flush(session, flush_context):
                     stores.add(obj.storefront_id)
             elif isinstance(obj, Order) and obj.paid_at is not None and obj.vendor_id:
                 sellers.add(obj.vendor_id)
+            elif isinstance(obj, DisputeCase) and obj.vendor_id:
+                sellers.add(obj.vendor_id)
+            elif isinstance(obj, EscrowTransaction) and obj.order_id:
+                orders.add(obj.order_id)
     except Exception as e:
         logger.warning(f"[MARKETING] after_flush skipped: {e}")
 
@@ -607,14 +713,16 @@ def _before_commit(session):
             return
     except Exception:
         return
-    if not session.info.get("_mkt_sellers") and not session.info.get("_mkt_stores"):
+    if not (session.info.get("_mkt_sellers") or session.info.get("_mkt_stores")
+            or session.info.get("_mkt_orders")):
         # Pending objects are only seen once flushed.
         if not (session.new or session.dirty):
             return
     session.flush()
     sellers = set(session.info.pop("_mkt_sellers", set()) or ())
     stores = session.info.pop("_mkt_stores", set()) or set()
-    if not sellers and not stores:
+    orders = session.info.pop("_mkt_orders", set()) or set()
+    if not sellers and not stores and not orders:
         return
     session.info["_mkt_busy"] = True
     try:
@@ -623,6 +731,10 @@ def _before_commit(session):
                 from app.models.user import Storefront
                 sellers |= {r[0] for r in session.query(Storefront.vendor_id)
                             .filter(Storefront.id.in_(list(stores))).all()}
+            if orders:
+                from app.models.order import Order
+                sellers |= {r[0] for r in session.query(Order.vendor_id)
+                            .filter(Order.id.in_(list(orders))).all() if r[0]}
             ids = [r[0] for r in session.query(SellerAcquisition.seller_user_id)
                    .filter(SellerAcquisition.seller_user_id.in_(list(sellers))).all()]
             for seller_id in ids:
@@ -634,11 +746,13 @@ def _before_commit(session):
         session.info.pop("_mkt_busy", None)
         session.info.pop("_mkt_sellers", None)
         session.info.pop("_mkt_stores", None)
+        session.info.pop("_mkt_orders", None)
 
 
 def _clear(session, *args):
     session.info.pop("_mkt_sellers", None)
     session.info.pop("_mkt_stores", None)
+    session.info.pop("_mkt_orders", None)
 
 
 def register_hooks():
@@ -653,6 +767,9 @@ def register_hooks():
 
 # ── hourly sweep ─────────────────────────────────────────────────────────────
 
+_BAD_REASONS = {"REFUNDED": "Order refunded", "CANCELLED": "Order cancelled", "DISPUTED": "Order disputed"}
+
+
 def order_went_bad(order_id):
     """Reason text when an order was refunded, cancelled or disputed, else None."""
     from app.models.dispute import DisputeCase
@@ -660,26 +777,26 @@ def order_went_bad(order_id):
     from app.models.order import Order
     order = db.session.get(Order, order_id) if order_id else None
     if order is None:
-        return "The first-sale order no longer exists."
+        return "Order no longer exists"
     status = (order.status or "").upper()
     if status in BAD_ORDER_STATUSES:
-        return f"The first-sale order was {status.lower()}."
+        return _BAD_REASONS[status]
     escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
     if escrow is not None and (escrow.status or "").upper() in BAD_ESCROW_STATUSES:
-        return f"The first-sale payment was {escrow.status.lower()}."
+        return _BAD_REASONS[(escrow.status or "").upper()]
     if DisputeCase.query.filter_by(order_id=order.id).first() is not None:
-        return "The first-sale order was disputed."
+        return "Order disputed"
     return None
 
 
 def run_marketing_sweep(now=None):
-    """Hourly: catch any missed milestones, then release or reverse held
-    rewards. Idempotent."""
+    """Hourly: catch any missed milestones and sale rewards, then release or
+    reverse held rewards. Idempotent."""
     now = now or _now()
     recomputed = 0
     open_rows = SellerAcquisition.query.filter(
         db.or_(SellerAcquisition.setup_at.is_(None), SellerAcquisition.pay_link_at.is_(None),
-               SellerAcquisition.first_paid_order_at.is_(None)),
+               SellerAcquisition.first_paid_order_at.is_(None), SellerAcquisition.agent_user_id.isnot(None)),
         SellerAcquisition.signed_up_at >= now - timedelta(days=365)).all()
     for acq in open_rows:
         try:
@@ -692,7 +809,9 @@ def run_marketing_sweep(now=None):
     released = reversed_count = 0
     for earning in AgentEarning.query.filter_by(status="HELD").all():
         reason = None
-        if earning.kind == "first_sale" and earning.seller_user_id:
+        if earning.kind == "sale" and earning.order_id:
+            reason = order_went_bad(earning.order_id)
+        elif earning.kind == "first_sale" and earning.seller_user_id:  # old rows
             acq = SellerAcquisition.query.filter_by(seller_user_id=earning.seller_user_id).first()
             reason = order_went_bad(acq.first_paid_order_id if acq else None)
         if reason:
@@ -795,8 +914,17 @@ def stats_for_agent(profile, since=None):
     scans = 0
     if scans_q is not None:
         scans = (scans_q.filter(MarketingScan.created_at >= since) if since is not None else scans_q).count()
+    sales_q = live_sale_earnings().filter(AgentEarning.agent_user_id == agent_id)
+    if since is not None:
+        sales_q = sales_q.filter(AgentEarning.earned_at >= since)
     return {"scans": scans, "signups": count(SellerAcquisition.signed_up_at),
-            "setups": count(SellerAcquisition.setup_at), "first_sales": count(SellerAcquisition.first_paid_order_at)}
+            "setups": count(SellerAcquisition.setup_at), "first_sales": count(SellerAcquisition.first_paid_order_at),
+            "rewarded_sales": sales_q.count()}
+
+
+def live_sale_earnings():
+    """Sale rewards that still stand (not reversed)."""
+    return AgentEarning.query.filter(AgentEarning.kind == "sale", AgentEarning.status != "REVERSED")
 
 
 def earning_totals(query):
@@ -818,8 +946,8 @@ def agent_me(profile):
         "profile": {"status": profile.status, "agent_type": profile.agent_type, "team": profile.team,
                     "full_name": profile.full_name, "code": code,
                     "link": code_link(code) if approved and code else None},
-        "rates": {"setup": setup_reward(), "first_sale": first_sale_reward(), "hold_days": hold_days(),
-                  "min_products": min_products()},
+        "rates": {"per_sale": sale_reward(), "rewarded_sales": rewarded_sales(),
+                  "max_per_seller": max_per_seller(), "hold_days": hold_days(), "min_products": min_products()},
         "today": stats_for_agent(profile, period_start("day", now)),
         "week": stats_for_agent(profile, period_start("week", now)),
         "totals": stats_for_agent(profile),
@@ -847,6 +975,13 @@ def seller_row(acq):
         whatsapp = _norm_phone(social.get("whatsapp")) or _norm_phone(sf.phone)
     if whatsapp is None and acq.seller is not None:
         whatsapp = _norm_phone(acq.seller.phone)
+    rewarded, earned = 0, 0.0
+    if acq.agent_user_id:
+        mine = AgentEarning.query.filter(AgentEarning.seller_user_id == acq.seller_user_id,
+                                         AgentEarning.agent_user_id == acq.agent_user_id,
+                                         AgentEarning.status != "REVERSED")
+        rewarded = mine.filter(AgentEarning.kind == "sale").count()
+        earned = _money(mine.with_entities(func.coalesce(func.sum(AgentEarning.amount_ngn), 0)).scalar())
     return {
         "seller_id": acq.seller_user_id,
         "store_name": sf.store_name if sf else None,
@@ -862,6 +997,9 @@ def seller_row(acq):
             "first_sale": acq.first_paid_order_at is not None,
         },
         "status": seller_status(acq),
+        "rewarded_sales": rewarded,
+        "rewarded_sales_max": rewarded_sales(),
+        "earned": earned,
         "whatsapp": whatsapp,
         "flags": list(acq.flags or []),
     }
@@ -870,7 +1008,8 @@ def seller_row(acq):
 def earning_row(e, with_agent=False):
     from app.models.user import User
     sf = _store(e.seller_user_id) if e.seller_user_id else None
-    row = {"id": e.id, "kind": e.kind, "amount": _money(e.amount_ngn), "status": e.status,
+    row = {"id": e.id, "kind": e.kind, "sale_number": e.sale_number, "order_id": e.order_id,
+           "amount": _money(e.amount_ngn), "status": e.status,
            "store_name": sf.store_name if sf else None, "seller_id": e.seller_user_id,
            "earned_at": _iso(e.earned_at), "payable_at": _iso(e.payable_at), "paid_at": _iso(e.paid_at),
            "reference": e.paid_reference, "reversed_reason": e.reversed_reason}
@@ -1135,6 +1274,9 @@ def board(date_from=None, date_to=None):
         earned = (db.session.query(func.coalesce(func.sum(AgentEarning.amount_ngn), 0))
                   .filter(AgentEarning.agent_user_id == p.user_id, AgentEarning.status != "REVERSED",
                           AgentEarning.earned_at >= start, AgentEarning.earned_at < end).scalar())
+        s["rewarded_sales"] = live_sale_earnings().filter(
+            AgentEarning.agent_user_id == p.user_id, AgentEarning.earned_at >= start,
+            AgentEarning.earned_at < end).count()
         agent_rows.append({"agent_user_id": p.user_id, "name": p.full_name, "team": p.team,
                            "agent_type": p.agent_type, **s, "earned_ngn": _money(earned)})
 

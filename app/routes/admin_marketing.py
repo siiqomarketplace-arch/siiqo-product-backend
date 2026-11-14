@@ -292,6 +292,7 @@ def _agent_summary(p):
         "signups": acqs.count(),
         "setups": acqs.filter(SellerAcquisition.setup_at.isnot(None)).count(),
         "first_sales": acqs.filter(SellerAcquisition.first_paid_order_at.isnot(None)).count(),
+        "rewarded_sales": svc.live_sale_earnings().filter(AgentEarning.agent_user_id == p.user_id).count(),
         **totals, "flags_count": flags_count, "created_at": svc._iso(p.created_at),
     }
 

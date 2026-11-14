@@ -121,8 +121,8 @@ def agent_earnings():
     earnings = []
     for e in rows:
         row = svc.earning_row(e)
-        earnings.append({k: row[k] for k in ("id", "kind", "amount", "status", "store_name", "earned_at",
-                                             "payable_at", "paid_at", "reference")})
+        earnings.append({k: row[k] for k in ("id", "kind", "sale_number", "order_id", "amount", "status",
+                                             "store_name", "earned_at", "payable_at", "paid_at", "reference")})
     return jsonify({"earnings": earnings, "totals": totals, "total": total, "page": page,
                     "pages": svc.pages(total, per_page)}), 200
 

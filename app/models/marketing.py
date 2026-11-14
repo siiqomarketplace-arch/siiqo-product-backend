@@ -161,16 +161,30 @@ class SellerAcquisition(db.Model):
 
 class AgentEarning(db.Model):
     """A ledger row. The system pays nothing out: an admin pays the agent by
-    hand and marks the row PAID with a reference."""
+    hand and marks the row PAID with a reference.
+
+    Agents earn per sale: kind "sale", one row per qualifying order
+    (order_id), numbered 1..AGENT_REWARDED_SALES per seller (sale_number).
+    A REVERSED row frees its number for a later sale."""
     __tablename__ = 'agent_earnings'
     __table_args__ = (
-        # One setup reward and one first-sale reward per agent and seller.
+        # Legacy (setup / first_sale rewards, no longer created). Partial, so it
+        # never touches "sale" rows.
         db.Index('uq_agent_earning_once', 'agent_user_id', 'seller_user_id', 'kind', unique=True,
                  postgresql_where=db.text("kind IN ('setup', 'first_sale')"),
                  sqlite_where=db.text("kind IN ('setup', 'first_sale')")),
+        # One earning per order, ever (a reversed order is never rewarded again).
+        db.Index('uq_agent_earning_order', 'order_id', unique=True,
+                 postgresql_where=db.text("order_id IS NOT NULL"),
+                 sqlite_where=db.text("order_id IS NOT NULL")),
+        # Each sale number is used once per seller among rows still standing,
+        # so a seller can never have more live sale rewards than numbers.
+        db.Index('uq_agent_earning_sale_slot', 'seller_user_id', 'sale_number', unique=True,
+                 postgresql_where=db.text("kind = 'sale' AND status <> 'REVERSED'"),
+                 sqlite_where=db.text("kind = 'sale' AND status <> 'REVERSED'")),
     )
 
-    KINDS = ('setup', 'first_sale', 'bonus')
+    KINDS = ('sale', 'bonus', 'setup', 'first_sale')  # setup / first_sale: old rows only
     STATUSES = ('HELD', 'PAYABLE', 'PAID', 'REVERSED')
 
     id = db.Column(db.Integer, primary_key=True)
@@ -179,6 +193,8 @@ class AgentEarning(db.Model):
     kind = db.Column(db.String(12), nullable=False)
     amount_ngn = db.Column(db.Numeric(12, 2), nullable=False)
     status = db.Column(db.String(10), nullable=False, default='HELD', index=True)
+    order_id = db.Column(db.Integer, nullable=True)       # the sale this rewards ("sale" rows)
+    sale_number = db.Column(db.Integer, nullable=True)    # 1..AGENT_REWARDED_SALES ("sale" rows)
     earned_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
     payable_at = db.Column(db.DateTime(timezone=True), nullable=True)
     paid_at = db.Column(db.DateTime(timezone=True), nullable=True)

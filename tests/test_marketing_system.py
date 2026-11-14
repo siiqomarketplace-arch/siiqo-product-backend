@@ -1,5 +1,5 @@
 """Marketing system (docs/MARKETING_SYSTEM_PLAN.md): short codes and scans,
-crediting new sellers, milestones, agent earnings with the hold, fraud flags,
+crediting new sellers, milestones, per-sale agent earnings with the hold, fraud flags,
 the agent portal, the admin board and the seller growth kit."""
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -228,42 +228,57 @@ def test_store_setup_paths_accept_ref_code(make_user, make_vendor, agent):
 
 # ── 3. milestones and earnings ──────────────────────────────────────────────
 
-def test_milestones_in_order_earnings_once_with_hold(make_user, make_vendor, make_product, make_order, agent):
+def _credited(agent, make_vendor):
     agent_user, _, agent_code = agent()
     vendor, store = make_vendor()
     svc.credit_signup(vendor, {"ref_code": agent_code.code})
     db.session.commit()
+    return agent_user, vendor, store
+
+
+def _sales():
+    db.session.expire_all()
+    return AgentEarning.query.filter_by(kind="sale").order_by(AgentEarning.id).all()
+
+
+def _live():
+    return [e for e in _sales() if e.status != "REVERSED"]
+
+
+def test_no_reward_for_signup_or_setup_then_200_for_each_of_5_sales(make_user, make_vendor, make_product,
+                                                                     make_order, agent):
+    agent_user, vendor, store = _credited(agent, make_vendor)
+    assert AgentEarning.query.count() == 0                                # signup: nothing
 
     _set_up(vendor, store, make_product, products=4)
-    acq = _acq(vendor)
-    assert acq.setup_at is None and AgentEarning.query.count() == 0      # 4 of 5 products
-
+    assert _acq(vendor).setup_at is None
     make_product(store)                                                   # 5th product: set up
     acq = _acq(vendor)
-    assert acq.setup_at is not None and acq.pay_link_at is None and acq.first_paid_order_at is None
-    setup = AgentEarning.query.filter_by(kind="setup").one()
-    assert setup.agent_user_id == agent_user.id and setup.status == "HELD" and float(setup.amount_ngn) == 1000
-    hold = svc._aware(setup.payable_at) - svc._aware(setup.earned_at)
-    assert hold == timedelta(days=7)
+    assert acq.setup_at is not None and acq.first_paid_order_at is None
+    assert AgentEarning.query.count() == 0                                # set-up: nothing
 
     db.session.add(PaymentLink(vendor_id=vendor.id, title="Ankara", slug=f"pl-{uuid.uuid4().hex[:6]}"))
     db.session.commit()
-    assert _acq(vendor).pay_link_at is not None
+    assert _acq(vendor).pay_link_at is not None and AgentEarning.query.count() == 0
 
-    # The seller buying from themselves is skipped and flagged.
+    # The seller buying from themselves never earns, and is flagged.
     _pay(make_order(vendor, buyer=vendor))
     acq = _acq(vendor)
     assert acq.first_paid_order_at is None and "self_purchase" in acq.flags
-    # So is a guest order using the agent's phone number.
+    # Nor does a guest order using the agent's phone number, or a free order.
     _pay(make_order(vendor, buyer=None, buyer_phone="+234 803 123 4567"))
-    assert _acq(vendor).first_paid_order_at is None
+    _pay(make_order(vendor, buyer=make_user(), payment_method="FREE"))
+    assert _acq(vendor).first_paid_order_at is None and AgentEarning.query.count() == 0
 
-    buyer = make_user()
-    order = _pay(make_order(vendor, buyer=buyer))
+    orders = [_pay(make_order(vendor, buyer=make_user())) for _ in range(6)]
     acq = _acq(vendor)
-    assert acq.first_paid_order_id == order.id and acq.first_paid_order_at is not None
-    first_sale = AgentEarning.query.filter_by(kind="first_sale").one()
-    assert first_sale.status == "HELD" and float(first_sale.amount_ngn) == 2000
+    assert acq.first_paid_order_id == orders[0].id and acq.first_paid_order_at is not None
+    sales = _sales()
+    assert [e.sale_number for e in sales] == [1, 2, 3, 4, 5]               # nothing for the 6th
+    assert [e.order_id for e in sales] == [o.id for o in orders[:5]]
+    assert all(e.status == "HELD" and float(e.amount_ngn) == 200 and e.agent_user_id == agent_user.id
+               for e in sales)
+    assert svc._aware(sales[0].payable_at) - svc._aware(sales[0].earned_at) == timedelta(days=7)
 
     # Idempotent: more orders and recomputes add nothing and move nothing.
     stamped = (acq.setup_at, acq.pay_link_at, acq.first_paid_order_at)
@@ -272,45 +287,103 @@ def test_milestones_in_order_earnings_once_with_hold(make_user, make_vendor, mak
     db.session.commit()
     acq = _acq(vendor)
     assert (acq.setup_at, acq.pay_link_at, acq.first_paid_order_at) == stamped
-    assert AgentEarning.query.count() == 2
+    assert AgentEarning.query.count() == 5
 
     # HELD -> PAYABLE only after the hold.
     svc.run_marketing_sweep()
-    assert {e.status for e in AgentEarning.query.all()} == {"HELD"}
+    assert {e.status for e in _sales()} == {"HELD"}
     result = svc.run_marketing_sweep(now=datetime.now(timezone.utc) + timedelta(days=8))
-    assert result["payable"] == 2
-    db.session.expire_all()
-    assert {e.status for e in AgentEarning.query.all()} == {"PAYABLE"}
+    assert result["payable"] == 5
+    assert {e.status for e in _sales()} == {"PAYABLE"}
 
 
-def test_first_sale_reward_reversed_on_refund(make_user, make_vendor, make_product, make_order, agent):
-    _, _, agent_code = agent()
-    vendor, store = make_vendor()
-    svc.credit_signup(vendor, {"ref_code": agent_code.code})
+def test_each_rewarded_sale_needs_a_different_buyer(monkeypatch, make_user, make_vendor, make_order, agent):
+    _, vendor, _ = _credited(agent, make_vendor)
+    buyer = make_user()
+    _pay(make_order(vendor, buyer=buyer))
+    _pay(make_order(vendor, buyer=buyer))                                 # same buyer again
+    assert len(_sales()) == 1
+    # Guests are told apart by email.
+    for email in ("ada@example.com", "ADA@example.com "):
+        guest_order = make_order(vendor, buyer=None)
+        guest_order.buyer_email = email
+        _pay(guest_order)
+    assert len(_sales()) == 2
+
+    monkeypatch.setenv("AGENT_SALES_DISTINCT_BUYERS", "false")
+    svc.recompute_for(vendor.id)
     db.session.commit()
+    assert [e.sale_number for e in _sales()] == [1, 2, 3, 4]               # repeat orders now count
+
+
+def test_refund_before_payout_reverses_and_a_later_sale_fills_the_slot(make_user, make_vendor, make_order, agent):
+    _, vendor, _ = _credited(agent, make_vendor)
+    orders = [_pay(make_order(vendor, buyer=make_user())) for _ in range(5)]
+    assert len(_live()) == 5
+
+    orders[1].status = "REFUNDED"
+    orders[3].status = "DISPUTED"
+    db.session.commit()
+    sales = {e.order_id: e for e in _sales()}
+    assert sales[orders[1].id].status == "REVERSED" and sales[orders[1].id].reversed_reason == "Order refunded"
+    assert sales[orders[3].id].status == "REVERSED" and sales[orders[3].id].reversed_reason == "Order disputed"
+    assert len(_live()) == 3
+
+    # Later sales from new buyers take the free slots, never more than 5 standing.
+    later = [_pay(make_order(vendor, buyer=make_user())) for _ in range(3)]
+    live = _live()
+    assert len(live) == 5 and sorted(e.sale_number for e in live) == [1, 2, 3, 4, 5]
+    assert {e.order_id for e in live} == {orders[0].id, orders[2].id, orders[4].id, later[0].id, later[1].id}
+    assert len(_sales()) == 7                                             # reversed rows stay as history
+
+    # A cancelled order found by the hourly job is reversed too.
+    later[0].status = "CANCELLED"
+    db.session.commit()
+    svc.run_marketing_sweep(now=datetime.now(timezone.utc) + timedelta(days=8))
+    reversed_row = next(e for e in _sales() if e.order_id == later[0].id)
+    assert reversed_row.status == "REVERSED" and reversed_row.reversed_reason == "Order cancelled"
+    live = _live()
+    assert len(live) == 5 and later[2].id in {e.order_id for e in live}
+
+
+def test_paid_reward_then_refund_is_flagged_not_reversed(make_user, make_vendor, make_order, agent):
+    _, vendor, _ = _credited(agent, make_vendor)
     order = _pay(make_order(vendor, buyer=make_user()))
-    earning = AgentEarning.query.filter_by(kind="first_sale").one()
+    earning = _sales()[0]
+    earning.status = "PAID"
+    earning.paid_reference = "TRF-9"
+    db.session.commit()
 
     order.status = "REFUNDED"
     db.session.commit()
     svc.run_marketing_sweep(now=datetime.now(timezone.utc) + timedelta(days=8))
-    db.session.expire_all()
-    earning = db.session.get(AgentEarning, earning.id)
-    assert earning.status == "REVERSED" and "refunded" in earning.reversed_reason
+    assert _sales()[0].status == "PAID"
+    assert "paid_then_refunded" in _acq(vendor).flags
 
 
-def test_duplicate_bank_or_phone_stops_the_reward(client, make_vendor, make_product, agent):
+def test_paused_agent_accrues_nothing_new(client, make_user, make_vendor, make_order, agent):
+    _, vendor, _ = _credited(agent, make_vendor)
+    _pay(make_order(vendor, buyer=make_user()))
+    profile = AgentProfile.query.filter_by(user_id=_acq(vendor).agent_user_id).first()
+    assert client.post(f"/api/admin/agents/{profile.id}/pause", headers=_admin()).status_code == 200
+    _pay(make_order(vendor, buyer=make_user()))
+    assert len(_sales()) == 1
+
+
+def test_duplicate_bank_or_phone_stops_the_reward(client, make_user, make_vendor, make_product, make_order, agent):
     _, _, agent_code = agent()
     first, first_store = make_vendor()
     svc.credit_signup(first, {"ref_code": agent_code.code})
     db.session.commit()
     _set_up(first, first_store, make_product, account_number="1112223334", phone="08051112222")
+    _pay(make_order(first, buyer=make_user()))
     assert AgentEarning.query.count() == 1
 
     again, again_store = make_vendor()                        # same bank account
     svc.credit_signup(again, {"ref_code": agent_code.code})
     db.session.commit()
     _set_up(again, again_store, make_product, account_number="1112223334")
+    _pay(make_order(again, buyer=make_user()))
     acq = _acq(again)
     assert acq.setup_at is not None and "duplicate_bank" in acq.flags
     assert AgentEarning.query.count() == 1
@@ -319,6 +392,7 @@ def test_duplicate_bank_or_phone_stops_the_reward(client, make_vendor, make_prod
     svc.credit_signup(third, {"ref_code": agent_code.code})
     db.session.commit()
     _set_up(third, third_store, make_product, account_number="5556667778", phone="+2348051112222")
+    _pay(make_order(third, buyer=make_user()))
     assert "duplicate_phone" in _acq(third).flags
     assert AgentEarning.query.count() == 1
 
@@ -326,7 +400,9 @@ def test_duplicate_bank_or_phone_stops_the_reward(client, make_vendor, make_prod
     svc.credit_signup(shared, {"ref_code": agent_code.code})
     db.session.commit()
     _set_up(shared, shared_store, make_product, account_number="0123456789")
+    _pay(make_order(shared, buyer=make_user()))
     assert "shared_bank_with_agent" in _acq(shared).flags
+    assert AgentEarning.query.count() == 1
 
     res_flags = {f["acquisition_id"] for f in
                  client.get("/api/admin/marketing/flags", headers=_admin()).get_json()["flags"]}
@@ -350,7 +426,8 @@ def test_agent_apply_approve_pause_and_privacy(client, make_user, make_vendor, m
     assert again.status_code == 409 and again.get_json()["code"] == "ALREADY_APPLIED"
     me = client.get("/api/agents/me", headers=headers).get_json()
     assert me["profile"]["status"] == "PENDING" and me["profile"]["link"] is None
-    assert me["rates"] == {"setup": 1000, "first_sale": 2000, "hold_days": 7, "min_products": 5}
+    assert me["rates"] == {"per_sale": 200, "rewarded_sales": 5, "max_per_seller": 1000, "hold_days": 7,
+                           "min_products": 5}
 
     profile = AgentProfile.query.filter_by(user_id=user.id).first()
     assert client.post(f"/api/admin/agents/{profile.id}/approve", headers=auth_headers(make_user())).status_code == 403
@@ -372,21 +449,24 @@ def test_agent_apply_approve_pause_and_privacy(client, make_user, make_vendor, m
     _set_up(vendor, store, make_product)
     _pay(make_order(vendor, buyer=make_user()))
     me = client.get("/api/agents/me", headers=headers).get_json()
-    assert me["today"] == {"scans": 1, "signups": 1, "setups": 1, "first_sales": 1} == me["totals"]
-    assert me["earnings"] == {"held": 3000.0, "payable": 0.0, "paid": 0.0}
+    assert me["today"] == {"scans": 1, "signups": 1, "setups": 1, "first_sales": 1, "rewarded_sales": 1} \
+        == me["totals"]
+    assert me["earnings"] == {"held": 200.0, "payable": 0.0, "paid": 0.0}
     sellers = client.get("/api/agents/me/sellers", headers=headers).get_json()
     assert sellers["total"] == 1 and sellers["pages"] == 1
     row = sellers["sellers"][0]
     assert row["seller_id"] == vendor.id and row["status"] == "first_sale"
+    assert (row["rewarded_sales"], row["rewarded_sales_max"], row["earned"]) == (1, 5, 200.0)
     assert row["steps"] == {"signed_up": True, "products": {"have": 5, "need": 5}, "place": True, "bank": True,
                             "pay_link": False, "first_sale": True}
     _pay(make_order(vendor, buyer=make_user()))
     row = client.get("/api/agents/me/sellers", headers=headers).get_json()["sellers"][0]
-    assert row["status"] == "active"
+    assert row["status"] == "active" and row["rewarded_sales"] == 2 and row["earned"] == 400.0
     earnings = client.get("/api/agents/me/earnings", headers=headers).get_json()
-    assert earnings["total"] == 2 and earnings["totals"]["held"] == 3000.0
-    assert set(earnings["earnings"][0]) == {"id", "kind", "amount", "status", "store_name", "earned_at",
-                                            "payable_at", "paid_at", "reference"}
+    assert earnings["total"] == 2 and earnings["totals"]["held"] == 400.0
+    assert set(earnings["earnings"][0]) == {"id", "kind", "sale_number", "order_id", "amount", "status",
+                                            "store_name", "earned_at", "payable_at", "paid_at", "reference"}
+    assert [(e["kind"], e["sale_number"]) for e in earnings["earnings"]] == [("sale", 2), ("sale", 1)]
 
     # Another agent sees only their own sellers.
     other_user, _, _ = agent(full_name="Bola Musa", account_number="2223334445", phone="08070000000", team="Garki")
@@ -411,6 +491,7 @@ def test_agent_apply_approve_pause_and_privacy(client, make_user, make_vendor, m
 
     listed = client.get("/api/admin/agents?q=tolu", headers=admin).get_json()
     assert listed["total"] == 1 and listed["agents"][0]["first_sales"] == 1
+    assert listed["agents"][0]["rewarded_sales"] == 2
     detail = client.get(f"/api/admin/agents/{profile.id}", headers=admin).get_json()
     assert detail["agent"]["account_number"] == "0123456789" and len(detail["sellers"]) == 1
 
@@ -420,9 +501,9 @@ def test_mark_paid_and_reverse_need_a_superadmin(client, make_user, make_vendor,
     vendor, _ = make_vendor()
     svc.credit_signup(vendor, {"ref_code": agent_code.code})
     now = datetime.now(timezone.utc)
-    rows = [AgentEarning(agent_user_id=agent_user.id, seller_user_id=vendor.id, kind=k, amount_ngn=a,
-                         status=s, earned_at=now, payable_at=now)
-            for k, a, s in (("setup", 1000, "PAYABLE"), ("first_sale", 2000, "HELD"))]
+    rows = [AgentEarning(agent_user_id=agent_user.id, seller_user_id=vendor.id, kind="sale", amount_ngn=a,
+                         status=s, sale_number=n, earned_at=now, payable_at=now)
+            for n, a, s in ((1, 200, "PAYABLE"), (2, 200, "HELD"))]
     db.session.add_all(rows)
     db.session.commit()
     ids = [r.id for r in rows]
@@ -431,12 +512,13 @@ def test_mark_paid_and_reverse_need_a_superadmin(client, make_user, make_vendor,
     assert client.post("/api/admin/marketing/earnings/mark-paid", json={"ids": ids, "reference": "TRF-1"},
                        headers=plain_admin).status_code == 403
     listed = client.get(f"/api/admin/marketing/earnings?agent_user_id={agent_user.id}", headers=plain_admin).get_json()
-    assert listed["total"] == 2 and listed["totals"] == {"held": 2000.0, "payable": 1000.0, "paid": 0.0}
+    assert listed["total"] == 2 and listed["totals"] == {"held": 200.0, "payable": 200.0, "paid": 0.0}
+    assert {e["sale_number"] for e in listed["earnings"]} == {1, 2}
     assert listed["earnings"][0]["agent"]["account_number"] == "0123456789"
 
     boss = _admin()
     res = client.post("/api/admin/marketing/earnings/mark-paid", json={"ids": ids, "reference": "TRF-1"}, headers=boss)
-    assert res.get_json() == {"paid": 1, "amount": 1000.0}           # only the PAYABLE row
+    assert res.get_json() == {"paid": 1, "amount": 200.0}            # only the PAYABLE row
     assert client.post(f"/api/admin/marketing/earnings/{ids[1]}/reverse", json={"reason": "x"},
                        headers=plain_admin).status_code == 403
     res = client.post(f"/api/admin/marketing/earnings/{ids[1]}/reverse", json={"reason": "Fake store"}, headers=boss)
@@ -488,7 +570,8 @@ def test_board_numbers_for_a_small_scenario(client, make_user, make_vendor, make
     code_row = next(c for c in board["codes"] if c["code"] == agent_code.code)
     assert (code_row["orders"], code_row["gmv_ngn"], code_row["campaign"]) == (1, 5000.0, "Wuse Market")
     agent_row = next(a for a in board["agents"] if a["agent_user_id"] == agent_user.id)
-    assert agent_row["signups"] == 2 and agent_row["first_sales"] == 2 and agent_row["earned_ngn"] == 4000.0
+    assert agent_row["signups"] == 2 and agent_row["first_sales"] == 2
+    assert agent_row["rewarded_sales"] == 4 and agent_row["earned_ngn"] == 800.0     # 4 sales x 200
 
     old = client.get("/api/admin/marketing/board?from=2020-01-01&to=2020-01-31", headers=headers).get_json()
     assert old["range"] == {"from": "2020-01-01", "to": "2020-01-31"} and old["totals"]["signups"] == 0

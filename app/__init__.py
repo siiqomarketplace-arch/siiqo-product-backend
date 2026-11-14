@@ -109,6 +109,14 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign VARCHAR(100)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ref_code VARCHAR(24)",
                 "CREATE INDEX IF NOT EXISTS ix_orders_ref_code ON orders (ref_code)",
+                # Agents are paid per sale (app/services/marketing.py): one earning per
+                # order, numbered 1..AGENT_REWARDED_SALES per seller.
+                "ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS order_id INTEGER",
+                "ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS sale_number INTEGER",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_earning_order ON agent_earnings (order_id) "
+                "WHERE order_id IS NOT NULL",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_earning_sale_slot ON agent_earnings "
+                "(seller_user_id, sale_number) WHERE kind = 'sale' AND status <> 'REVERSED'",
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS delivery_settings JSON",
                 # Admin close/reopen a store (NULL = not closed).
                 "ALTER TABLE storefronts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE",
