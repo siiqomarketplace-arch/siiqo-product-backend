@@ -158,7 +158,7 @@ def test_initiate_records_split_flag(client, make_vendor, make_user, make_produc
     db.session.commit()
 
     class FakeProvider:
-        def initiate_transaction(self, orders, existing=None, return_url=None):
+        def initiate_transaction(self, orders, existing=None, return_url=None, **kwargs):
             return {"success": True, "payment_link": "https://pay.example/x", "transaction_number": "ORD-INIT",
                     "provider_transaction_id": "AC_1", "provider_reference": "ORD-INIT",
                     "amount": 10000, "used_split": used_split}

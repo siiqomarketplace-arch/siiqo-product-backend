@@ -1,10 +1,11 @@
 """Was the seller already paid by a gateway split at checkout?
 
-Paystack only splits a payment to the seller's subaccount when the whole
-checkout belongs to ONE seller (paystack_provider.initiate_transaction, which
+Paystack splits a payment to sellers' subaccounts when the checkout belongs
+to ONE seller, or — with MULTI_SPLIT_ENABLED and every seller having a
+subaccount — through a multi-split (paystack_provider.initiate_transaction
 returns ``used_split``). A seller having a subaccount is therefore not proof
-they were paid: in a multi-seller cart no split happens and Siiqo must send
-their share itself (or keep it in their withdrawable balance).
+they were paid: without a split Siiqo must send their share itself (or keep
+it in their withdrawable balance).
 
 ``escrow_transactions.split_settled`` records what really happened, set when
 the Paystack payment is initialised:
@@ -30,7 +31,12 @@ from app.extensions import db
 
 
 def _refs(escrow) -> set:
-    """Identifiers of the gateway payment this escrow belonged to."""
+    """Identifiers of the gateway payment this escrow belonged to.
+    payment_ref is the reliable one (set on every escrow of a payment);
+    the others cover rows made before it existed."""
+    payment_ref = getattr(escrow, "payment_ref", None)
+    if payment_ref:
+        return {str(payment_ref)}
     refs = set()
     for value in (escrow.payscrow_ref, escrow.transaction_number, escrow.payscrow_transaction_id):
         if value:
@@ -56,6 +62,7 @@ def transaction_vendor_ids(escrow, order=None) -> set:
         db.session.query(Order.vendor_id)
         .join(EscrowTransaction, EscrowTransaction.order_id == Order.id)
         .filter(or_(
+            EscrowTransaction.payment_ref.in_(refs),
             EscrowTransaction.transaction_number.in_(refs),
             EscrowTransaction.payscrow_ref.in_(refs),
             EscrowTransaction.payscrow_transaction_id.in_(refs),

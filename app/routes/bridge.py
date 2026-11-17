@@ -500,8 +500,9 @@ def buyer_order_history():
             if escrow_check and escrow_check.transaction_number:
                 try:
                     from app.services.escrow.paystack_provider import PaystackProvider
+                    from app.services.payment_refs import gateway_ref
                     verify = PaystackProvider().verify_transaction(
-                        escrow_check.transaction_number
+                        gateway_ref(escrow_check)
                     )
                     if verify.get("success"):
                         escrow_check.status = EscrowStatus.IN_ESCROW
@@ -1228,12 +1229,13 @@ def paystack_webhook():
             orders = Order.query.filter(Order.id.in_(order_ids)).all()
             processed_orders = []
 
+            # Every order of this payment, by payment_ref (older rows: by
+            # transaction_number). app/services/payment_refs.py
+            from app.services.payment_refs import escrows_for_payment
+            by_order = {e.order_id: e for e in escrows_for_payment(reference, [o.id for o in orders])}
+
             for order in orders:
-                escrow = EscrowTransaction.query.filter_by(
-                    transaction_number=reference
-                ).filter(
-                    EscrowTransaction.order_id == order.id
-                ).first()
+                escrow = by_order.get(order.id)
 
                 if not escrow:
                     # Fallback: match by order_id only

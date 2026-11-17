@@ -132,6 +132,10 @@ def create_app(config_name: str | None = None) -> Flask:
                 # True only when Paystack really split this payment to the seller
                 # at checkout (app/services/split_settlement.py). NULL = older row.
                 "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS split_settled BOOLEAN",
+                # Gateway payment reference shared by every order of one card
+                # payment (app/services/payment_refs.py). NULL = older row.
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS payment_ref VARCHAR(120)",
+                "CREATE INDEX IF NOT EXISTS ix_escrow_transactions_payment_ref ON escrow_transactions (payment_ref)",
                 "ALTER TABLE passport_api_clients ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
                 "CREATE INDEX IF NOT EXISTS ix_passport_api_clients_owner_user_id ON passport_api_clients (owner_user_id)",
                 "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_secret_enc VARCHAR(255)",

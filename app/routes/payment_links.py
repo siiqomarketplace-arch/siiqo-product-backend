@@ -609,6 +609,7 @@ def pay_payment_link(link_id):
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
             transaction_number=flw_txn_ref,
+            payment_ref=flw_txn_ref,
             status=EscrowStatus.PENDING_PAYMENT,
             amount=float(amount),
             currency=link_currency,
@@ -659,6 +660,7 @@ def pay_payment_link(link_id):
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
             transaction_number=result['transaction_number'],
+            payment_ref=result['transaction_number'],
             status=EscrowStatus.PENDING_PAYMENT,
             amount=float(amount),
             currency=link_currency,

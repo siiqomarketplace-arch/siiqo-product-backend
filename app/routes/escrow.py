@@ -664,6 +664,57 @@ def _deliver_event_tickets(order, escrow):
     logging.info(f"[EVENT] Auto-delivered and released Order #{order.id}")
     return True
 
+def _activate_paystack_escrow(escrow, ref) -> bool:
+    """Mark one escrow paid after Paystack confirmed its payment, and deliver.
+    Idempotent: only an escrow still PENDING_PAYMENT is touched."""
+    if escrow.status != EscrowStatus.PENDING_PAYMENT:
+        return False
+    escrow.status = EscrowStatus.IN_ESCROW
+    escrow.paid_at = escrow.paid_at or _utcnow()
+    escrow.payscrow_transaction_id = ref
+    order = escrow.order
+    if not order:
+        return True
+    order.status = 'PAID'
+    db.session.flush()
+    from app.services.fx import capture_for_order
+    capture_for_order(order, escrow, stage="payment")
+
+    is_event = _deliver_event_tickets(order, escrow)
+    is_digital = not is_event and _deliver_digital_products(order, escrow)
+    is_service = not is_event and not is_digital and _deliver_service_products(order, escrow)
+    if not is_event and not is_digital and not is_service and order.payment_link_id:
+        from app.models.payment_link import PaymentLink as _PL
+        link = db.session.get(_PL, order.payment_link_id)
+        link_ptype = getattr(link, 'product_type', 'service') or 'service'
+        if link_ptype in ('digital', 'service'):
+            net_amount = _vendor_net_amount(order, escrow)
+            escrow.status = EscrowStatus.RELEASED
+            escrow.released_at = _utcnow()
+            order.status = 'COMPLETED'
+            if link and link.link_type == 'INVOICE':
+                link.status = 'PAID'
+            _credit_vendor_ledger(
+                vendor_id=order.vendor_id,
+                amount=net_amount,
+                reference_id=escrow.transaction_number,
+                description=f"Paystack payout for Pay Link Order #{order.id}",
+            )
+            if _payout_unless_split(order, escrow, "paystack", "PAYLINK"):
+                _record_payout_debit(order, escrow, net_amount)
+    return True
+
+
+def _activate_paystack_payment(ref, fallback=None) -> int:
+    """Paystack confirmed payment ``ref``: activate EVERY order it covered
+    (app/services/payment_refs.py). Returns how many were activated now."""
+    from app.services.payment_refs import escrows_for_payment
+    escrows = escrows_for_payment(ref)
+    if not escrows and fallback is not None:
+        escrows = [fallback]
+    return sum(1 for e in escrows if _activate_paystack_escrow(e, ref))
+
+
 # ---------------------------------------------------------------------------
 # POST /escrow/initiate
 # ---------------------------------------------------------------------------
@@ -723,29 +774,55 @@ def initiate_escrow():
                 return jsonify({"message": f"Escrow payment is unavailable because the vendor '{v_name}' has not configured their payout bank details. Please contact the vendor to update their details or choose a different payment method."}), 400
 
     escrow_txns = EscrowTransaction.query.filter(EscrowTransaction.order_id.in_([o.id for o in orders])).all()
-    existing_txn_number = next((e.transaction_number for e in escrow_txns if e.payment_link), None)
+    # Only an unpaid order can be (re)initiated: never move a paid order
+    # back to PENDING_PAYMENT or point it at a new payment.
+    if any(e.status != EscrowStatus.PENDING_PAYMENT for e in escrow_txns):
+        return jsonify({"message": "One of these orders is already paid."}), 409
+
+    from app.services.payment_refs import escrow_txn_number, reusable_payment_ref
+    existing_txn_number = reusable_payment_ref(escrow_txns, [o.id for o in orders])
+    if existing_txn_number and existing_txn_number.startswith("FLW-"):
+        existing_txn_number = None  # a Flutterwave attempt; Paystack gets its own reference
+    # A retry reuses the earlier reference, so it is the same gateway payment.
+    # Keep its split decision: if it was not split, never attach a split now
+    # (the seller would be paid by the gateway AND by Siiqo's transfer).
+    prior_split = None
+    if existing_txn_number:
+        prior_split = all(e.split_settled is True for e in escrow_txns)
 
     # Delegate logic to Escrow Service Provider (Unified Payment)
     provider = get_escrow_provider(orders)
-    result = provider.initiate_transaction(orders, existing_txn_number)
-    
+    if prior_split is False:
+        result = provider.initiate_transaction(orders, existing_txn_number, allow_split=False)
+    else:
+        result = provider.initiate_transaction(orders, existing_txn_number)
+
     if not result.get("success"):
         return jsonify({"message": result.get("error_message") or "Escrow init failed"}), 400
 
     txn_map = {e.order_id: e for e in escrow_txns}
-    # Paystack splits only a single-seller payment; record for EVERY order in
-    # this payment whether the split was really applied (used at release).
+    # Record for EVERY order in this payment whether a split really paid its
+    # seller at checkout (single-seller split, or the multi-seller split when
+    # MULTI_SPLIT_ENABLED). Used at release (app/services/split_settlement.py).
     split_settled = bool(result.get("used_split"))
+    if prior_split is True and not split_settled:
+        # Same payment as before, which was split. Keep it marked split
+        # rather than risk paying the seller twice; logged for support.
+        logging.error(f"[ESCROW INIT] Retry of split payment {existing_txn_number} came back without a split")
+        split_settled = True
 
+    payment_ref = result['transaction_number']
     for order in orders:
         escrow_txn = txn_map.get(order.id)
+        txn_number = escrow_txn_number(payment_ref, order.id, len(orders))
         if not escrow_txn:
             # fee_amount for an individual order in a master transaction
             # the result['fee_amount'] is total, so we calculate proportional
             individual_fee = platform_fee_float(order.total_amount)
             escrow_txn = EscrowTransaction(
                 order_id=order.id,
-                transaction_number=result['transaction_number'],
+                transaction_number=txn_number,
+                payment_ref=payment_ref,
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(order.total_amount),
                 fee_percent=float(PLATFORM_FEE_PERCENT),
@@ -757,12 +834,13 @@ def initiate_escrow():
             )
             db.session.add(escrow_txn)
         else:
-            escrow_txn.transaction_number = result['transaction_number']
+            escrow_txn.transaction_number = txn_number
+            escrow_txn.payment_ref = payment_ref
             escrow_txn.payment_link = result['payment_link']
             escrow_txn.payscrow_transaction_id = result['provider_transaction_id']
             escrow_txn.payscrow_ref = result['provider_reference']
             escrow_txn.split_settled = split_settled
-            
+
     db.session.commit()
 
     return jsonify({
@@ -793,8 +871,9 @@ def escrow_status():
         escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_param)).first()
 
     # 2. Query by explicit tx_ref (Flutterwave full reference)
+    from app.services.payment_refs import escrows_for_payment
     if not escrow and tx_ref_param:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=tx_ref_param).first()
+        escrow = next(iter(escrows_for_payment(tx_ref_param)), None)
         if not escrow and str(tx_ref_param).startswith("FLW-ORD-"):
             parts = str(tx_ref_param).split("-")
             if len(parts) >= 3 and parts[2].isdigit():
@@ -806,7 +885,7 @@ def escrow_status():
 
     # 3. Query by txn_param (exact, numeric, FLW-ORD-, PL-, or prefix)
     if not escrow and txn_param:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=txn_param).first()
+        escrow = next(iter(escrows_for_payment(txn_param)), None)
         if not escrow and str(txn_param).isdigit():
             escrow = EscrowTransaction.query.filter_by(order_id=int(txn_param)).first()
         if not escrow and str(txn_param).startswith("FLW-ORD-"):
@@ -840,7 +919,7 @@ def escrow_status():
                 if flw_oid and str(flw_oid).isdigit():
                     escrow = EscrowTransaction.query.filter_by(order_id=int(flw_oid)).first()
                 if not escrow and flw_ref:
-                    escrow = EscrowTransaction.query.filter_by(transaction_number=flw_ref).first()
+                    escrow = next(iter(escrows_for_payment(flw_ref)), None)
         except Exception as _flw_err:
             logging.warning(f"[ESCROW STATUS] Flutterwave lookup fallback failed: {_flw_err}")
 
@@ -858,7 +937,8 @@ def escrow_status():
                     verif = _flw.verify_transaction(lookup_tx_id)
                     from app.routes.payments import flutterwave_verification_matches
                     if flutterwave_verification_matches(escrow, verif):
-                        _handle_flutterwave_payment_confirmed(escrow.transaction_number, str(lookup_tx_id), verif)
+                        from app.services.payment_refs import gateway_ref
+                        _handle_flutterwave_payment_confirmed(gateway_ref(escrow), str(lookup_tx_id), verif)
                         db.session.refresh(escrow)
             except Exception as _flw_err:
                 logging.warning(f"[ESCROW STATUS] Flutterwave proactive verification failed: {_flw_err}")
@@ -889,45 +969,15 @@ def escrow_status():
         else:
             try:
                 from app.services.escrow.paystack_provider import PaystackProvider
-                verification = PaystackProvider().verify_transaction(escrow.transaction_number)
+                from app.services.payment_refs import gateway_ref
+                ref = gateway_ref(escrow)
+                verification = PaystackProvider().verify_transaction(ref)
                 if verification.get("success"):
-                    escrow.status = EscrowStatus.IN_ESCROW
-                    escrow.paid_at = escrow.paid_at or _utcnow()
-                    escrow.payscrow_transaction_id = escrow.transaction_number
-                    if escrow.order:
-                        escrow.order.status = 'PAID'
-                        db.session.flush()
-                        from app.services.fx import capture_for_order
-                        capture_for_order(escrow.order, escrow, stage="payment")
-
-                        is_event = _deliver_event_tickets(escrow.order, escrow)
-                        is_digital = False
-                        if not is_event:
-                            is_digital = _deliver_digital_products(escrow.order, escrow)
-                        if not is_event and not is_digital:
-                            is_service = _deliver_service_products(escrow.order, escrow)
-                        if not is_event and not is_digital and not is_service and escrow.order.payment_link_id:
-                            from app.models.payment_link import PaymentLink as _PL
-                            link = db.session.get(_PL, escrow.order.payment_link_id)
-                            link_ptype = getattr(link, 'product_type', 'service') or 'service'
-                            if link_ptype in ('digital', 'service'):
-                                net_amount = _vendor_net_amount(escrow.order, escrow)
-                                escrow.status = EscrowStatus.RELEASED
-                                escrow.released_at = _utcnow()
-                                escrow.order.status = 'COMPLETED'
-                                if link and link.link_type == 'INVOICE':
-                                    link.status = 'PAID'
-                                _credit_vendor_ledger(
-                                    vendor_id=escrow.order.vendor_id,
-                                    amount=net_amount,
-                                    reference_id=escrow.transaction_number,
-                                    description=f"Paystack payout for Pay Link Order #{escrow.order.id}",
-                                )
-                                if _payout_unless_split(escrow.order, escrow, "paystack", "PAYLINK"):
-                                    _record_payout_debit(escrow.order, escrow, net_amount)
-
+                    # One payment can cover several orders: activate them all.
+                    _activate_paystack_payment(ref, fallback=escrow)
                     db.session.commit()
-                    logging.info(f"[ESCROW STATUS] Proactively verified & activated transaction {escrow.transaction_number}")
+                    db.session.refresh(escrow)
+                    logging.info(f"[ESCROW STATUS] Proactively verified & activated payment {ref}")
             except Exception as _sync_err:
                 logging.warning(f"[ESCROW STATUS] Paystack verification check failed: {_sync_err}")
 
@@ -938,7 +988,7 @@ def _can_see_private(escrow, *references) -> bool:
     """This endpoint is public. Private escrow fields go to the signed-in buyer
     or an admin, or to a caller holding the payment reference (the payer gets
     it from the gateway redirect). An order number alone is not enough."""
-    known = {r for r in (escrow.transaction_number, escrow.payscrow_transaction_id,
+    known = {r for r in (escrow.transaction_number, escrow.payscrow_transaction_id, escrow.payment_ref,
                          (escrow.payscrow_ref or "").replace("SPLIT:", "")) if r}
     if any(ref and ref in known for ref in references):
         return True
@@ -1391,15 +1441,16 @@ def release_escrow():
     txn_number = data.get('transactionId') or data.get('transaction_number')
     order_id = data.get('order_id')
 
+    escrow = None
     if txn_number:
         escrow = db.session.query(EscrowTransaction).filter_by(
             transaction_number=txn_number
         ).with_for_update().first()
-    elif order_id:
+    if not escrow and order_id:
         escrow = db.session.query(EscrowTransaction).filter_by(
             order_id=order_id
         ).with_for_update().first()
-    else:
+    if not txn_number and not order_id:
         return jsonify({"message": "transactionId or order_id required"}), 400
 
     # ── POD fall-through ─────────────────────────────────────────────────────
@@ -1437,10 +1488,15 @@ def release_escrow():
         # Try Paystack verify (active provider for cart checkout)
         try:
             from app.services.escrow.paystack_provider import PaystackProvider
-            result = PaystackProvider().verify_transaction(escrow.transaction_number)
+            from app.services.payment_refs import escrows_for_payment, gateway_ref
+            ref = gateway_ref(escrow)
+            result = PaystackProvider().verify_transaction(ref)
             if result.get("success"):
-                escrow.status = EscrowStatus.IN_ESCROW
-                escrow.paid_at = escrow.paid_at or _utcnow()
+                # Mark every order of this payment paid (status only, as before).
+                for e in escrows_for_payment(ref) or [escrow]:
+                    if e.status == EscrowStatus.PENDING_PAYMENT:
+                        e.status = EscrowStatus.IN_ESCROW
+                        e.paid_at = e.paid_at or _utcnow()
                 db.session.commit()
         except Exception as e:
             logging.warning(f"[RELEASE] Paystack verify fallback failed: {e}")

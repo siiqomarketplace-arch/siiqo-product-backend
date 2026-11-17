@@ -1326,6 +1326,56 @@ def initiate_pro_subscription():
 # FLUTTERWAVE PAYMENT ROUTES (Digital, Services & Events)
 # ===========================================================================
 
+def _flw_multi_subaccounts(orders):
+    """Flutterwave split across several sellers, or None (no split).
+
+    As documented at https://developer.flutterwave.com/docs/split-payments
+    ("Splitting across multiple subaccounts"): one entry per seller with
+    transaction_charge_type "flat" and transaction_charge = Siiqo's fee on
+    that seller's orders (Siiqo's commission), and transaction_split_ratio =
+    the seller's net share, so what is left after Siiqo's commissions and
+    Flutterwave's fees is shared in proportion to each seller's net.
+
+    None when MULTI_SPLIT_ENABLED is off, an order is not in naira, or any
+    seller has no Flutterwave subaccount yet (no subaccount is created here).
+    Returns [{"vendor_id", "payload"}]."""
+    import math
+    from decimal import Decimal
+    from app.models.withdrawal import VendorBankAccount
+    from app.services.fees import platform_fee
+    from app.services.payment_refs import multi_split_enabled, ngn_only, seller_net_by_vendor
+    if not multi_split_enabled() or not ngn_only(orders):
+        return None
+    nets = seller_net_by_vendor(orders)
+    fees = {}
+    for o in orders:
+        fees[o.vendor_id] = fees.get(o.vendor_id, Decimal("0")) + platform_fee(o.total_amount)
+    entries = []
+    for vendor_id in sorted(nets):
+        acc = (VendorBankAccount.query.filter_by(vendor_id=vendor_id, is_default=True).first()
+               or VendorBankAccount.query.filter_by(vendor_id=vendor_id).first())
+        sub = acc.flw_subaccount_id if acc else None
+        net_kobo = int((nets[vendor_id] * 100).to_integral_value())
+        if not sub or net_kobo <= 0:
+            logger.info("[FLW INITIATE] No multi-split: vendor %s has no Flutterwave subaccount", vendor_id)
+            return None
+        entries.append((vendor_id, sub, net_kobo, float(fees[vendor_id])))
+    if len({e[1] for e in entries}) != len(entries):
+        return None
+    divisor = 0
+    for e in entries:
+        divisor = math.gcd(divisor, e[2])
+    return [{
+        "vendor_id": vendor_id,
+        "payload": {
+            "id": sub,
+            "transaction_split_ratio": net_kobo // divisor,
+            "transaction_charge_type": "flat",
+            "transaction_charge": round(fee, 2),
+        },
+    } for vendor_id, sub, net_kobo, fee in entries]
+
+
 @payments_bp.route("/flutterwave/initiate", methods=["POST"])
 @jwt_required(optional=True)
 def flutterwave_initiate():
@@ -1377,6 +1427,15 @@ def flutterwave_initiate():
                     ),
                     "code": "FLUTTERWAVE_PHYSICAL_BLOCKED",
                 }), 400
+
+    # Only unpaid orders can be (re)initiated: never move a paid order back
+    # to PENDING_PAYMENT or point it at a new payment.
+    existing_by_order = {
+        e.order_id: e for e in
+        EscrowTransaction.query.filter(EscrowTransaction.order_id.in_([o.id for o in orders])).all()
+    }
+    if any(e.status != EscrowStatus.PENDING_PAYMENT for e in existing_by_order.values()):
+        return jsonify({"message": "One of these orders is already paid."}), 409
 
     # Calculate total listed price & Siiqo 3% fee
     total_listed_ngn = sum(float(o.total_amount) for o in orders)
@@ -1438,6 +1497,13 @@ def flutterwave_initiate():
             except Exception as _sub_err:
                 logger.warning("[FLW INITIATE] On-the-fly subaccount creation skipped: %s", _sub_err)
 
+    # Several sellers: split across their subaccounts at checkout only when
+    # MULTI_SPLIT_ENABLED and every seller already has one. Otherwise no
+    # split, and Siiqo pays each seller at release.
+    multi_subaccounts = None
+    if len(vendor_ids) > 1:
+        multi_subaccounts = _flw_multi_subaccounts(orders)
+
     site_url = os.environ.get("SITE_URL", "https://siiqo.com").rstrip("/")
     primary_id = primary_order.id
     order_ids_str = ",".join(str(oid) for oid in order_ids)
@@ -1470,38 +1536,70 @@ def flutterwave_initiate():
         redirect_url=redirect_url,
         is_international=bool(data.get("isInternational", False)),
         narration=narration,
+        subaccounts=[s["payload"] for s in multi_subaccounts] if multi_subaccounts else None,
     )
+
+    if not flw_result.get("success") and multi_subaccounts:
+        # Flutterwave refused the payment with the split: take it unsplit.
+        logger.warning("[FLW INITIATE] Split refused for ref=%s; retrying without split", tx_ref)
+        multi_subaccounts = None
+        flw_result = _flw.initiate_payment(
+            order_id=order_ids_str,
+            listed_price_ngn=total_listed_ngn,
+            siiqo_fee_ngn=siiqo_fee_total,
+            buyer_email=buyer_email,
+            buyer_name=buyer_name,
+            buyer_phone=buyer_phone,
+            flw_subaccount_id=None,
+            tx_ref=tx_ref,
+            redirect_url=redirect_url,
+            is_international=bool(data.get("isInternational", False)),
+            narration=narration,
+        )
 
     if not flw_result.get("success"):
         return jsonify({"message": flw_result.get("error_message") or "Could not initialize Flutterwave payment."}), 400
 
-    # Tag whether split was attached at checkout
-    split_tag = f"SPLIT:{flw_subaccount_id}:{tx_ref}" if flw_subaccount_id else f"DIRECT:{tx_ref}"
+    # Tag, per escrow, whether a split paid its seller at checkout
+    # (app/services/split_settlement.py reads the "SPLIT:" marker).
+    sub_by_vendor = {s["vendor_id"]: s["payload"]["id"] for s in (multi_subaccounts or [])}
 
-    # Create or update EscrowTransaction for each order
+    def _split_tag(vendor_id):
+        if flw_subaccount_id:
+            return f"SPLIT:{flw_subaccount_id}:{tx_ref}"
+        if vendor_id in sub_by_vendor:
+            return f"SPLIT:{sub_by_vendor[vendor_id]}:{tx_ref}"
+        return f"DIRECT:{tx_ref}"
+
+    # Create or update EscrowTransaction for each order: its own unique
+    # transaction_number, and the shared payment_ref (app/services/payment_refs.py).
+    from app.services.payment_refs import escrow_txn_number
     for o in orders:
         o.payment_method = "FLUTTERWAVE"
         indiv_fee = platform_fee_float(o.total_amount)
-        escrow = EscrowTransaction.query.filter_by(order_id=o.id).first()
+        txn_number = escrow_txn_number(tx_ref, o.id, len(orders))
+        escrow = existing_by_order.get(o.id)
         if not escrow:
             escrow = EscrowTransaction(
                 order_id=o.id,
-                transaction_number=tx_ref,
+                transaction_number=txn_number,
+                payment_ref=tx_ref,
                 status=EscrowStatus.PENDING_PAYMENT,
                 amount=float(o.total_amount),
                 fee_percent=float(PLATFORM_FEE_PERCENT),
                 fee_amount=indiv_fee,
                 payment_link=flw_result["payment_link"],
                 payscrow_transaction_id=tx_ref,
-                payscrow_ref=split_tag,
+                payscrow_ref=_split_tag(o.vendor_id),
             )
             db.session.add(escrow)
         else:
-            escrow.transaction_number = tx_ref
+            escrow.transaction_number = txn_number
+            escrow.payment_ref = tx_ref
             escrow.status = EscrowStatus.PENDING_PAYMENT
             escrow.payment_link = flw_result["payment_link"]
             escrow.payscrow_transaction_id = tx_ref
-            escrow.payscrow_ref = split_tag
+            escrow.payscrow_ref = _split_tag(o.vendor_id)
 
     db.session.commit()
 
@@ -1599,9 +1697,15 @@ def flutterwave_verification_matches(escrow, verif: dict) -> bool:
     flw_amount = float(verif.get("amount") or 0)
     expected_currency = (escrow.currency or "NGN").upper()
     expected_amount = float(escrow.amount or 0)
+    if escrow.payment_ref:
+        # One payment for several orders: it must cover all of them.
+        from app.services.payment_refs import escrows_for_payment
+        expected_amount = max(expected_amount, sum(
+            float(e.amount or 0) for e in escrows_for_payment(escrow.payment_ref)))
 
     ref_matches = bool(
         flw_tx_ref == escrow.transaction_number
+        or (escrow.payment_ref and flw_tx_ref == escrow.payment_ref)
         or (escrow.order_id and str(escrow.order_id) == str(verif.get("order_id")))
         or (escrow.order_id and f"ORD-{escrow.order_id}" in flw_tx_ref)
         or (escrow.order_id and f"-{escrow.order_id}-" in flw_tx_ref)
@@ -1640,8 +1744,9 @@ def flutterwave_status():
         escrow = EscrowTransaction.query.filter_by(order_id=int(order_id_str)).first()
 
     # 2. Match by tx_ref / reference / txn
+    from app.services.payment_refs import escrows_for_payment, gateway_ref
     if not escrow and tx_ref:
-        escrow = EscrowTransaction.query.filter_by(transaction_number=tx_ref).first()
+        escrow = next(iter(escrows_for_payment(tx_ref)), None)
         if not escrow and str(tx_ref).isdigit():
             escrow = EscrowTransaction.query.filter_by(order_id=int(tx_ref)).first()
         if not escrow and str(tx_ref).startswith("FLW-ORD-"):
@@ -1661,7 +1766,7 @@ def flutterwave_status():
                 if flw_oid and str(flw_oid).isdigit():
                     escrow = EscrowTransaction.query.filter_by(order_id=int(flw_oid)).first()
                 if not escrow and flw_ref:
-                    escrow = EscrowTransaction.query.filter_by(transaction_number=flw_ref).first()
+                    escrow = next(iter(escrows_for_payment(flw_ref)), None)
         except Exception as _lookup_err:
             logger.warning("[FLW STATUS] Flutterwave lookup error: %s", _lookup_err)
 
@@ -1674,7 +1779,7 @@ def flutterwave_status():
             verif = _flw.verify_transaction(tx_id)
             if flutterwave_verification_matches(escrow, verif):
                 _handle_flutterwave_payment_confirmed(
-                    tx_ref=escrow.transaction_number,
+                    tx_ref=gateway_ref(escrow),
                     tx_id=str(tx_id),
                     verification=verif,
                 )
@@ -1707,8 +1812,11 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
     logger.info("[FLW CONFIRM] Starting confirmation for ref=%s tx_id=%s", tx_ref, tx_id)
     
     try:
-        escrows = EscrowTransaction.query.filter_by(transaction_number=tx_ref).all()
-        logger.info("[FLW CONFIRM] Found %d escrows by transaction_number", len(escrows))
+        # Every order of this payment (payment_ref), or an older row whose
+        # transaction_number is the tx_ref (app/services/payment_refs.py).
+        from app.services.payment_refs import escrows_for_payment
+        escrows = escrows_for_payment(tx_ref)
+        logger.info("[FLW CONFIRM] Found %d escrows for the payment reference", len(escrows))
         
         if not escrows and tx_ref.startswith("FLW-"):
             # Try matching by order ID embedded in tx_ref: FLW-ORD-{id}-... or FLW-PL-{id}-...

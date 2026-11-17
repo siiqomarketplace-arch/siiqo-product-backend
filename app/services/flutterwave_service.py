@@ -119,6 +119,7 @@ def initiate_payment(
     is_international: bool = False,
     currency: str = "NGN",
     narration: str = "Siiqo Payment",
+    subaccounts: list | None = None,
 ) -> dict:
     """
     Initiate a Flutterwave Standard (hosted) checkout.
@@ -192,7 +193,12 @@ def initiate_payment(
     }
 
     # Attach split payment only when vendor has a subaccount
-    if flw_subaccount_id:
+    if subaccounts:
+        # Several sellers (routes/payments.py _flw_multi_subaccounts):
+        # per-seller flat commission + split ratio, as documented at
+        # https://developer.flutterwave.com/docs/split-payments
+        payload["subaccounts"] = subaccounts
+    elif flw_subaccount_id:
         payload["subaccounts"] = [
             {
                 "id": flw_subaccount_id,

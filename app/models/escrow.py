@@ -57,6 +57,12 @@ class EscrowTransaction(db.Model):
     # subaccount (single-seller payment); False when it did not; NULL for rows
     # made before this was recorded (see app/services/split_settlement.py).
     split_settled = db.Column(db.Boolean, nullable=True)
+    # The card gateway's payment reference (Paystack reference / Flutterwave
+    # tx_ref). One payment can cover several orders (a cart with several
+    # sellers): every escrow of that payment carries the same payment_ref while
+    # keeping its own unique transaction_number. NULL for older rows, which are
+    # found by transaction_number (app/services/payment_refs.py).
+    payment_ref = db.Column(db.String(120), nullable=True, index=True)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)

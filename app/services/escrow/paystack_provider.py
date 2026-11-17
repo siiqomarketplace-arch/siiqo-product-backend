@@ -78,7 +78,7 @@ class PaystackProvider(BaseEscrowProvider):
     # ------------------------------------------------------------------
     # initiate_transaction
     # ------------------------------------------------------------------
-    def initiate_transaction(self, orders, existing_txn_number=None, return_url=None):
+    def initiate_transaction(self, orders, existing_txn_number=None, return_url=None, allow_split=True):
         key = _paystack_key()
         if not key:
             return {"success": False, "error_message": "Paystack API key not configured."}
@@ -156,26 +156,20 @@ class PaystackProvider(BaseEscrowProvider):
         # For single-vendor digital/service checkouts, attach the vendor's
         # subaccount so Paystack splits the payment natively.
         vendor_subaccount_code = None
+        split_code = None
         vendor_ids = list({o.vendor_id for o in orders})
-        if len(vendor_ids) == 1:
+        if not allow_split:
+            # A retry of a payment that was not split: keep it unsplit.
+            pass
+        elif len(vendor_ids) == 1:
             # Single vendor — look up subaccount from VendorBankAccount first,
             # then fall back to Storefront (set during onboarding).
-            try:
-                from app.models.withdrawal import VendorBankAccount
-                from app.models.user import Storefront
-                bank_acc = VendorBankAccount.query.filter_by(
-                    vendor_id=vendor_ids[0], is_default=True
-                ).first() or VendorBankAccount.query.filter_by(
-                    vendor_id=vendor_ids[0]
-                ).first()
-                if bank_acc and bank_acc.paystack_subaccount_code:
-                    vendor_subaccount_code = bank_acc.paystack_subaccount_code
-                else:
-                    sf = Storefront.query.filter_by(vendor_id=vendor_ids[0]).first()
-                    if sf and sf.paystack_subaccount_code:
-                        vendor_subaccount_code = sf.paystack_subaccount_code
-            except Exception as _exc:
-                logging.warning(f"[PAYSTACK] Could not look up subaccount: {_exc}")
+            vendor_subaccount_code = vendor_paystack_subaccount(vendor_ids[0])
+        else:
+            # Several sellers: one Paystack multi-split when switched on and
+            # every seller has a subaccount; otherwise no split (Siiqo pays
+            # each seller at release).
+            split_code = multi_split_code_for(orders, txn_ref)
 
         # ── Paystack payload ────────────────────────────────────────────
         site_url = os.environ.get("SITE_URL", "https://siiqo.com")
@@ -225,9 +219,15 @@ class PaystackProvider(BaseEscrowProvider):
                 f"siiqo_fee=₦{float(siiqo_fee_total):,.2f}, "
                 f"buyer_total=₦{buyer_total_ngn:,.2f} (listed=₦{total_listed_ngn:,.2f} + psk_fee=₦{paystack_fee:,.2f})"
             )
+        elif split_code:
+            # Multi-split (https://paystack.com/docs/payments/multi-split-payments/):
+            # each seller's flat share is set on the split; the main account
+            # keeps the rest and bears Paystack's fee (bearer_type=account).
+            payload["split_code"] = split_code
+            logging.info(f"[PAYSTACK] Multi-split {split_code} attached to {txn_ref}")
         else:
             logging.warning(
-                f"[PAYSTACK] No subaccount found for vendor(s) {vendor_ids}. "
+                f"[PAYSTACK] No split for vendor(s) {vendor_ids}. "
                 "Processing as non-split transaction."
             )
 
@@ -256,6 +256,24 @@ class PaystackProvider(BaseEscrowProvider):
             logging.error(f"[PAYSTACK] Request error for {txn_ref}: {exc}")
             return {"success": False, "error_message": "Could not reach payment gateway. Please try again."}
 
+        if not data.get("status") and split_code:
+            # Paystack refused the payment with the split attached: take the
+            # payment without a split; Siiqo then pays each seller at release.
+            logging.warning(f"[PAYSTACK] Init with split {split_code} refused for {txn_ref}; retrying without split")
+            split_code = None
+            payload.pop("split_code", None)
+            try:
+                resp = requests.post(
+                    f"{PAYSTACK_BASE_URL}/transaction/initialize",
+                    json=payload,
+                    headers=headers,
+                    timeout=15,
+                )
+                data = resp.json()
+            except Exception as exc:
+                logging.error(f"[PAYSTACK] Retry error for {txn_ref}: {exc}")
+                return {"success": False, "error_message": "Could not reach payment gateway. Please try again."}
+
         if not data.get("status"):
             msg = data.get("message", "Payment gateway rejected the request.")
             logging.error(f"[PAYSTACK] Init failed for {txn_ref}: {data}")
@@ -277,7 +295,8 @@ class PaystackProvider(BaseEscrowProvider):
             "paystack_fee": paystack_fee,
             "fee_amount": float(siiqo_fee_total),
             # Flag so the webhook handler knows Paystack will settle vendor directly
-            "used_split": bool(vendor_subaccount_code),
+            "used_split": bool(vendor_subaccount_code or split_code),
+            "split_code": split_code,
             "error_message": None,
         }
 
@@ -346,6 +365,87 @@ class PaystackProvider(BaseEscrowProvider):
             }
 
         return {"handled": False, "event": event_type}
+
+
+# ---------------------------------------------------------------------------
+# Subaccount lookup and multi-seller split
+# ---------------------------------------------------------------------------
+
+def vendor_paystack_subaccount(vendor_id) -> str | None:
+    """Seller's Paystack subaccount code: default bank account, any bank
+    account, then the storefront. None when there is none."""
+    try:
+        from app.models.withdrawal import VendorBankAccount
+        from app.models.user import Storefront
+        bank_acc = VendorBankAccount.query.filter_by(
+            vendor_id=vendor_id, is_default=True
+        ).first() or VendorBankAccount.query.filter_by(vendor_id=vendor_id).first()
+        if bank_acc and bank_acc.paystack_subaccount_code:
+            return bank_acc.paystack_subaccount_code
+        sf = Storefront.query.filter_by(vendor_id=vendor_id).first()
+        if sf and sf.paystack_subaccount_code:
+            return sf.paystack_subaccount_code
+    except Exception as _exc:  # noqa: BLE001
+        logging.warning(f"[PAYSTACK] Could not look up subaccount for vendor {vendor_id}: {_exc}")
+    return None
+
+
+def create_paystack_split(name: str, subaccounts: list, currency: str = "NGN") -> dict:
+    """POST /split (https://paystack.com/docs/api/split/).
+    subaccounts: [{"subaccount": "ACCT_x", "share": <kobo>}] for a flat split.
+    bearer_type "account": Siiqo's main account bears Paystack's fee, as the
+    single-seller split does (bearer=account). Returns {success, split_code}."""
+    key = _paystack_key()
+    if not key:
+        return {"success": False, "error_message": "Paystack API key not configured."}
+    payload = {
+        "name": name,
+        "type": "flat",
+        "currency": currency,
+        "subaccounts": subaccounts,
+        "bearer_type": "account",
+    }
+    try:
+        resp = requests.post(
+            f"{PAYSTACK_BASE_URL}/split",
+            json=payload,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            timeout=15,
+        )
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logging.error(f"[PAYSTACK SPLIT] Request error for {name}: {exc}")
+        return {"success": False, "error_message": "Could not reach Paystack."}
+    split_code = (data.get("data") or {}).get("split_code") if isinstance(data, dict) else None
+    if not (isinstance(data, dict) and data.get("status") and split_code):
+        logging.error(f"[PAYSTACK SPLIT] Create failed for {name}: {data.get('message') if isinstance(data, dict) else data}")
+        return {"success": False, "error_message": "Split not created."}
+    return {"success": True, "split_code": split_code}
+
+
+def multi_split_code_for(orders, txn_ref: str) -> str | None:
+    """Split code for a payment with several sellers, or None (no split).
+    None when MULTI_SPLIT_ENABLED is off, an order is not in naira, any
+    seller lacks a subaccount or has nothing to receive, or Paystack refuses."""
+    from app.services.payment_refs import multi_split_enabled, ngn_only, seller_net_by_vendor
+    if not multi_split_enabled() or not ngn_only(orders):
+        return None
+    nets = seller_net_by_vendor(orders)
+    subaccounts = []
+    for vendor_id in sorted(nets):
+        code = vendor_paystack_subaccount(vendor_id)
+        share_kobo = int((nets[vendor_id] * 100).to_integral_value())
+        if not code or share_kobo <= 0:
+            logging.info(f"[PAYSTACK SPLIT] No multi-split for {txn_ref}: vendor {vendor_id} has no subaccount")
+            return None
+        subaccounts.append({"subaccount": code, "share": share_kobo})
+    if len({s["subaccount"] for s in subaccounts}) != len(subaccounts):
+        logging.warning(f"[PAYSTACK SPLIT] No multi-split for {txn_ref}: sellers share a subaccount")
+        return None
+    result = create_paystack_split(f"Siiqo {txn_ref}", subaccounts)
+    if not result.get("success"):
+        return None
+    return result["split_code"]
 
 
 # ---------------------------------------------------------------------------
