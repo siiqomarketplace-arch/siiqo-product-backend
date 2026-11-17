@@ -1794,15 +1794,8 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                     )
 
                     # Trigger actual bank transfer payout unless vendor used FLW split at checkout
-                    from app.routes.escrow import _flutterwave_payout_vendor as _flw_payout, _debit_vendor_ledger
-                    vendor_already_paid_via_split = bool(
-                        escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:")
-                    )
-                    payout_dispatched = False
-                    if not vendor_already_paid_via_split:
-                        payout_dispatched = _flw_payout(order, escrow)
-                    else:
-                        payout_dispatched = True
+                    from app.routes.escrow import _payout_unless_split, _debit_vendor_ledger
+                    payout_dispatched = _payout_unless_split(order, escrow, "flutterwave", "FLW CONFIRM")
 
                     if payout_dispatched:
                         _debit_vendor_ledger(

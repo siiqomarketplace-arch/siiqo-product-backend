@@ -183,6 +183,62 @@ def _record_payout_debit(order, escrow, net_amount: float):
     )
 
 
+def _payout_unless_split(order, escrow, gateway: str, tag: str) -> bool:
+    """Pay the seller's share unless the gateway already did at checkout.
+    True = the seller has been paid (split, or transfer sent); False = the
+    money stays in their Siiqo balance to withdraw. "Already paid" is decided
+    only by app/services/split_settlement.py, never by the seller merely
+    having a subaccount."""
+    from app.services.split_settlement import vendor_paid_by_split
+    if vendor_paid_by_split(order, escrow, gateway):
+        logging.info(f"[{tag}] Order #{order.id}: {gateway} split already paid the seller. No transfer.")
+        return True
+    if gateway == "paystack":
+        return bool(_paystack_payout_vendor(order, escrow))
+    if gateway == "flutterwave":
+        return bool(_flutterwave_payout_vendor(order, escrow))
+    return False
+
+
+PAYOUT_FAILED_TITLE = "Payout didn't go through"
+
+
+def _notify_payout_failed(order, amount_ngn) -> None:
+    """Tell the seller once per order that the automatic bank transfer failed
+    and the money is safe in their balance. Not for deliberate holds."""
+    try:
+        exists = Notification.query.filter_by(
+            user_id=order.vendor_id, order_id=order.id, title=PAYOUT_FAILED_TITLE
+        ).first()
+        if exists:
+            return
+        msg = (f"We couldn't send ₦{float(amount_ngn):,.2f} for Order #{order.id} to your bank "
+               "automatically. It's safe in your Siiqo balance. Withdraw it from Payouts.")
+        db.session.add(Notification(
+            user_id=order.vendor_id, title=PAYOUT_FAILED_TITLE, message=msg,
+            type="ESCROW", order_id=order.id,
+        ))
+        try:
+            from app.models.user import User
+            from app.utils.email import send_siiqo_email
+            vendor_user = db.session.get(User, order.vendor_id)
+            if vendor_user and vendor_user.email:
+                send_siiqo_email(
+                    to_email=vendor_user.email,
+                    subject=f"Your payout for Order #{order.id} is in your Siiqo balance",
+                    template_name="base_notification",
+                    first_name=vendor_user.first_name or "there",
+                    title=PAYOUT_FAILED_TITLE,
+                    message=msg,
+                    cta_text="Go to Payouts",
+                    cta_url="https://siiqo.com/vendor/escrow",
+                )
+        except Exception as _em:  # noqa: BLE001
+            logging.info(f"[PAYOUT] Failed-payout email not sent for Order #{order.id}: {_em}")
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"[PAYOUT] Could not record failed-payout notice for Order #{order.id}: {exc}")
+
+
 from app.services.escrow import get_escrow_provider
 from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
 
@@ -260,36 +316,9 @@ def _deliver_digital_products(order, escrow):
     )
     dispatched = False
     if is_paystack:
-        vendor_used_split = False
-        try:
-            bank_acc = VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id, is_default=True
-            ).first() or VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id
-            ).first()
-            if bank_acc and bank_acc.paystack_subaccount_code:
-                vendor_used_split = True
-            else:
-                from app.models.user import Storefront
-                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-                if sf and sf.paystack_subaccount_code:
-                    vendor_used_split = True
-        except Exception:
-            pass
-        if vendor_used_split:
-            logging.info(
-                f"[DIGITAL] Order #{order.id} — vendor has Paystack subaccount, "
-                "split already settled vendor. Skipping manual transfer."
-            )
-        else:
-            dispatched = _paystack_payout_vendor(order, escrow)
-        dispatched = bool(dispatched or vendor_used_split)
+        dispatched = _payout_unless_split(order, escrow, "paystack", "DIGITAL")
     elif is_flutterwave:
-        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
-        if not vendor_already_paid_via_split:
-            dispatched = _flutterwave_payout_vendor(order, escrow)
-        else:
-            dispatched = True
+        dispatched = _payout_unless_split(order, escrow, "flutterwave", "DIGITAL")
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -455,36 +484,9 @@ def _deliver_service_products(order, escrow):
     )
     dispatched = False
     if is_paystack:
-        vendor_used_split = False
-        try:
-            bank_acc = VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id, is_default=True
-            ).first() or VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id
-            ).first()
-            if bank_acc and bank_acc.paystack_subaccount_code:
-                vendor_used_split = True
-            else:
-                from app.models.user import Storefront
-                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-                if sf and sf.paystack_subaccount_code:
-                    vendor_used_split = True
-        except Exception:
-            pass
-        if vendor_used_split:
-            logging.info(
-                f"[SERVICE] Order #{order.id} — vendor has Paystack subaccount, "
-                "split already settled vendor. Skipping manual transfer."
-            )
-        else:
-            dispatched = _paystack_payout_vendor(order, escrow)
-        dispatched = bool(dispatched or vendor_used_split)
+        dispatched = _payout_unless_split(order, escrow, "paystack", "SERVICE")
     elif is_flutterwave:
-        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
-        if not vendor_already_paid_via_split:
-            dispatched = _flutterwave_payout_vendor(order, escrow)
-        else:
-            dispatched = True
+        dispatched = _payout_unless_split(order, escrow, "flutterwave", "SERVICE")
 
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
@@ -621,33 +623,9 @@ def _deliver_event_tickets(order, escrow):
     )
     dispatched = False
     if is_paystack:
-        vendor_used_split = False
-        try:
-            bank_acc = VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id, is_default=True
-            ).first() or VendorBankAccount.query.filter_by(
-                vendor_id=order.vendor_id
-            ).first()
-            if bank_acc and bank_acc.paystack_subaccount_code:
-                vendor_used_split = True
-            else:
-                from app.models.user import Storefront
-                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-                if sf and sf.paystack_subaccount_code:
-                    vendor_used_split = True
-        except Exception:
-            pass
-        if vendor_used_split:
-            logging.info(f"[EVENT] Order #{order.id} — vendor has Paystack subaccount, split already settled vendor.")
-        else:
-            dispatched = _paystack_payout_vendor(order, escrow)
-        dispatched = bool(dispatched or vendor_used_split)
+        dispatched = _payout_unless_split(order, escrow, "paystack", "EVENT")
     elif is_flutterwave:
-        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
-        if not vendor_already_paid_via_split:
-            dispatched = _flutterwave_payout_vendor(order, escrow)
-        else:
-            dispatched = True
+        dispatched = _payout_unless_split(order, escrow, "flutterwave", "EVENT")
     elif is_crypto:
         try:
             from app.routes.payments import _payout_vendor_via_daya
@@ -755,7 +733,10 @@ def initiate_escrow():
         return jsonify({"message": result.get("error_message") or "Escrow init failed"}), 400
 
     txn_map = {e.order_id: e for e in escrow_txns}
-    
+    # Paystack splits only a single-seller payment; record for EVERY order in
+    # this payment whether the split was really applied (used at release).
+    split_settled = bool(result.get("used_split"))
+
     for order in orders:
         escrow_txn = txn_map.get(order.id)
         if not escrow_txn:
@@ -772,6 +753,7 @@ def initiate_escrow():
                 payment_link=result['payment_link'],
                 payscrow_transaction_id=result['provider_transaction_id'],
                 payscrow_ref=result['provider_reference'],
+                split_settled=split_settled,
             )
             db.session.add(escrow_txn)
         else:
@@ -779,6 +761,7 @@ def initiate_escrow():
             escrow_txn.payment_link = result['payment_link']
             escrow_txn.payscrow_transaction_id = result['provider_transaction_id']
             escrow_txn.payscrow_ref = result['provider_reference']
+            escrow_txn.split_settled = split_settled
             
     db.session.commit()
 
@@ -940,23 +923,7 @@ def escrow_status():
                                     reference_id=escrow.transaction_number,
                                     description=f"Paystack payout for Pay Link Order #{escrow.order.id}",
                                 )
-                                vendor_used_split = False
-                                try:
-                                    bank_acc = VendorBankAccount.query.filter_by(
-                                        vendor_id=escrow.order.vendor_id, is_default=True
-                                    ).first() or VendorBankAccount.query.filter_by(
-                                        vendor_id=escrow.order.vendor_id
-                                    ).first()
-                                    if bank_acc and bank_acc.paystack_subaccount_code:
-                                        vendor_used_split = True
-                                    else:
-                                        from app.models.user import Storefront
-                                        sf = Storefront.query.filter_by(vendor_id=escrow.order.vendor_id).first()
-                                        if sf and sf.paystack_subaccount_code:
-                                            vendor_used_split = True
-                                except Exception:
-                                    pass
-                                if vendor_used_split or _paystack_payout_vendor(escrow.order, escrow):
+                                if _payout_unless_split(escrow.order, escrow, "paystack", "PAYLINK"):
                                     _record_payout_debit(escrow.order, escrow, net_amount)
 
                     db.session.commit()
@@ -1094,8 +1061,15 @@ def _paystack_payout_vendor(order, escrow):
                     f"[PAYSTACK TRANSFER] Failed for Order #{order.id}: "
                     f"{transfer_result.get('error_message')}"
                 )
+                _notify_payout_failed(order, net_amount)
                 return False
             return True
+        if bank_acc.account_number and bank_acc.bank_code:
+            # Bank details exist but Paystack would not set up the recipient:
+            # a gateway problem, not a missing bank account.
+            logging.error(f"[PAYSTACK TRANSFER] No recipient for Order #{order.id}; payout not attempted")
+            _notify_payout_failed(order, net_amount)
+            return False
 
     logging.warning(
         f"[RELEASE] Vendor {order.vendor_id} has no valid bank account or recipient_code. "
@@ -1243,9 +1217,11 @@ def _flutterwave_payout_vendor(order, escrow):
             return True
         else:
             logging.warning(f"[FLW PAYOUT] Flutterwave transfer failed for Order #{order.id}: {flw_tx.get('error_message')}")
+            _notify_payout_failed(order, net_amount)
             return False
     except Exception as exc:
         logging.error(f"[FLW PAYOUT] Flutterwave transfer error for Order #{order.id}: {exc}", exc_info=True)
+        _notify_payout_failed(order, net_amount)
         return False
 
 
@@ -1305,11 +1281,7 @@ def execute_order_escrow_release(order, escrow, source="admin"):
 
     payout_dispatched = False
     if is_flutterwave_order:
-        vendor_already_paid_via_split = bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
-        if not vendor_already_paid_via_split:
-            payout_dispatched = _flutterwave_payout_vendor(order, escrow)
-        else:
-            payout_dispatched = True  # Already settled directly to subaccount by FLW
+        payout_dispatched = _payout_unless_split(order, escrow, "flutterwave", "ESCROW RELEASE")
     elif is_daya_order:
         try:
             from app.routes.payments import _payout_vendor_via_daya
@@ -1318,24 +1290,7 @@ def execute_order_escrow_release(order, escrow, source="admin"):
             logging.warning(f"[ESCROW RELEASE] Daya payout error for Order #{order.id}: {_d_err}")
     else:
         # Paystack channel
-        vendor_already_paid_via_split = False
-        try:
-            bank_acc = VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first() or \
-                       VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first()
-            if bank_acc and bank_acc.paystack_subaccount_code:
-                vendor_already_paid_via_split = True
-            else:
-                from app.models.user import Storefront
-                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-                if sf and sf.paystack_subaccount_code:
-                    vendor_already_paid_via_split = True
-        except Exception as _sub_err:
-            logging.warning(f"[ESCROW RELEASE] Subaccount check warning: {_sub_err}")
-
-        if not vendor_already_paid_via_split:
-            payout_dispatched = _paystack_payout_vendor(order, escrow)
-        else:
-            payout_dispatched = True  # Already settled directly to subaccount by Paystack
+        payout_dispatched = _payout_unless_split(order, escrow, "paystack", "ESCROW RELEASE")
 
     # Write matching DEBIT to ledger if payout was settled via gateway or split,
     # preventing double-withdrawal from Siiqo corporate balance

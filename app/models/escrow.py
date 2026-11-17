@@ -53,6 +53,10 @@ class EscrowTransaction(db.Model):
     released_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # When the buyer was reminded of the Safe Pay deadline (one reminder per order).
     buyer_reminded_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Paystack: True only when the checkout really used a split to the seller's
+    # subaccount (single-seller payment); False when it did not; NULL for rows
+    # made before this was recorded (see app/services/split_settlement.py).
+    split_settled = db.Column(db.Boolean, nullable=True)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)

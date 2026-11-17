@@ -340,16 +340,68 @@ def _too_old(ref_at):
     return when < _now() - timedelta(days=attribution_window_days())
 
 
+def _agent_code_for_referral(raw):
+    """An approved agent's own marketing code, when ``raw`` is that agent's
+    personal referral code (users.referral_code, the /join?ref= link).
+    One referral system for agents: their old link credits them like a scan."""
+    from app.models.user import User
+    value = (raw or "").strip().upper() if isinstance(raw, str) else ""
+    if not value or len(value) > 40:
+        return None
+    owner = User.query.filter(func.upper(User.referral_code) == value).first()
+    if owner is None:
+        return None
+    profile = AgentProfile.query.filter_by(user_id=owner.id).first()
+    if profile is None or profile.status != "APPROVED" or not profile.code_id:
+        return None
+    return db.session.get(MarketingCode, profile.code_id)
+
+
+def _creditable_code(data):
+    """The code to credit: ref_code / attribution.ref first, then the
+    personal referral_code the signup form sends. A personal code counts only
+    when it belongs to an approved agent. Unknown codes are ignored."""
+    ref, _ = _ref_from(data)
+    getter = data.get if hasattr(data, "get") else (lambda k, d=None: d)
+    personal = getter("referral_code")
+    seen = set()
+    for raw in (ref, personal):
+        if not isinstance(raw, str) or not raw.strip() or raw.strip().upper() in seen:
+            continue
+        seen.add(raw.strip().upper())
+        code = find_code(raw) or _agent_code_for_referral(raw)
+        if code is not None and code_is_live(code) and code.kind in CREDIT_KINDS:
+            return code
+    return None
+
+
+def _seller_label(user):
+    sf = _store(user.id) if user is not None and user.id else None
+    if sf is not None and (sf.store_name or "").strip():
+        return sf.store_name.strip()
+    return (getattr(user, "first_name", None) or "").strip() or "A new seller"
+
+
+def _notify_agent(agent_user_id, title, message):
+    """In-app notice to an agent (Telegram follows through the Notification hook)."""
+    from app.models.communication import Notification
+    try:
+        with db.session.begin_nested():
+            db.session.add(Notification(user_id=agent_user_id, title=title, message=message, type="AGENT"))
+    except Exception as e:  # a notice never blocks crediting
+        logger.warning(f"[MARKETING] agent notice skipped for {agent_user_id}: {e}")
+
+
 def credit_signup(user, data):
     """Credit a new account (or a new store) to the code it came through.
     First touch wins; nothing is overwritten. Adds to the session in a
     savepoint and never raises: the caller commits. Returns the row or None."""
     try:
-        ref, ref_at = _ref_from(data)
-        if not ref or user is None or user.id is None or _too_old(ref_at):
+        _, ref_at = _ref_from(data)
+        if user is None or user.id is None or _too_old(ref_at):
             return None
-        code = find_code(ref)
-        if code is None or not code_is_live(code) or code.kind not in CREDIT_KINDS:
+        code = _creditable_code(data)
+        if code is None:
             return None
         if code.owner_user_id and code.owner_user_id == user.id:
             return None  # no self-credit
@@ -374,6 +426,11 @@ def credit_signup(user, data):
         with db.session.begin_nested():
             db.session.add(acq)
             db.session.flush()
+        if agent_user_id:
+            _notify_agent(
+                agent_user_id, "New seller with your code",
+                f"🎉 {_seller_label(user)} just joined with your code. "
+                "Help them add 5 products and send their first Pay Link.")
         return acq
     except IntegrityError:
         return None  # someone else credited this seller first
@@ -626,6 +683,13 @@ def _award_sales(acq, now):
             continue  # rewarded at the same moment elsewhere
         used_slots.add(free[0])
         made.append(earning)
+        if acq.agent_user_id:
+            from app.models.user import User
+            seller = db.session.get(User, acq.seller_user_id)
+            _notify_agent(
+                acq.agent_user_id, "Sale reward earned",
+                f"₦{int(earning.amount_ngn):,} earned: sale {earning.sale_number} of {limit} "
+                f"from {_seller_label(seller)}.")
     return made
 
 

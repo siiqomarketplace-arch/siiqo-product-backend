@@ -191,19 +191,9 @@ def seller_settled_at_checkout(order, escrow) -> bool:
     gateway = gateway_for(order, escrow)
     if gateway == "daya":
         return False
-    if gateway == "flutterwave":
-        return bool(escrow.payscrow_ref and escrow.payscrow_ref.startswith("SPLIT:"))
-    try:
-        from app.models.user import Storefront
-        from app.models.withdrawal import VendorBankAccount
-        acc = (VendorBankAccount.query.filter_by(vendor_id=order.vendor_id, is_default=True).first()
-               or VendorBankAccount.query.filter_by(vendor_id=order.vendor_id).first())
-        if acc and acc.paystack_subaccount_code:
-            return True
-        sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-        return bool(sf and sf.paystack_subaccount_code)
-    except Exception:  # noqa: BLE001
-        return False
+    from app.services.split_settlement import vendor_paid_by_split
+    # Anything that is not Flutterwave/Daya was treated as Paystack before.
+    return vendor_paid_by_split(order, escrow, "flutterwave" if gateway == "flutterwave" else "paystack")
 
 
 def refund_instructions(order, escrow, amount: Decimal, currency: str) -> str:

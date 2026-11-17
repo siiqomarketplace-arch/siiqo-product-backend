@@ -4373,3 +4373,5 @@ from app.routes import admin_disputes as _admin_dispute_routes  # noqa: E402,F40
 # Marketing system: campaigns, codes, board, agents, earnings
 # (/api/admin/marketing/..., /api/admin/agents/...).
 from app.routes import admin_marketing as _admin_marketing_routes  # noqa: E402,F401
+# Payouts wrongly recorded as paid by a split (/api/admin/payouts/split-mismatch).
+from app.routes import admin_payouts as _admin_payout_routes  # noqa: E402,F401

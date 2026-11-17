@@ -1145,26 +1145,10 @@ def paystack_webhook():
                                     reference_id=pl_escrow.transaction_number,
                                     description=f"Paystack payout for Pay Link Order #{pl_order.id}",
                                 )
-                                # Trigger Paystack bank transfer unless split payment was configured
-                                vendor_used_split = False
-                                try:
-                                    from app.models.withdrawal import VendorBankAccount
-                                    from app.models.user import Storefront
-                                    bank_acc = VendorBankAccount.query.filter_by(
-                                        vendor_id=pl_order.vendor_id, is_default=True
-                                    ).first() or VendorBankAccount.query.filter_by(
-                                        vendor_id=pl_order.vendor_id
-                                    ).first()
-                                    if bank_acc and bank_acc.paystack_subaccount_code:
-                                        vendor_used_split = True
-                                    else:
-                                        sf = Storefront.query.filter_by(vendor_id=pl_order.vendor_id).first()
-                                        if sf and sf.paystack_subaccount_code:
-                                            vendor_used_split = True
-                                except Exception:
-                                    pass
-                                from app.routes.escrow import _paystack_payout_vendor, _record_payout_debit
-                                paid_out = vendor_used_split or _paystack_payout_vendor(pl_order, pl_escrow)
+                                # Trigger Paystack bank transfer unless the payment was
+                                # really split to the seller (app/services/split_settlement.py)
+                                from app.routes.escrow import _payout_unless_split, _record_payout_debit
+                                paid_out = _payout_unless_split(pl_order, pl_escrow, "paystack", "PAYLINK")
                                 if paid_out:
                                     _record_payout_debit(pl_order, pl_escrow, net_amount)
 

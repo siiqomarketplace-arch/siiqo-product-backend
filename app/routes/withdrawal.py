@@ -21,6 +21,18 @@ from app.models.user import User
 
 withdrawal_bp = Blueprint('withdrawal', __name__)
 
+
+def min_withdrawal_ngn() -> Decimal:
+    """Smallest seller withdrawal, in naira (env MIN_WITHDRAWAL_NGN, default 500).
+    Low enough that one sale of a ₦500 or ₦1,000 digital product can be
+    withdrawn. A bad or non-positive value falls back to the default."""
+    raw = (os.environ.get("MIN_WITHDRAWAL_NGN") or "").strip()
+    try:
+        value = Decimal(raw) if raw else Decimal("500")
+    except Exception:  # noqa: BLE001
+        value = Decimal("500")
+    return value if value > 0 else Decimal("500")
+
 PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
 PAYSTACK_BASE_URL = 'https://api.paystack.co'
 
@@ -448,7 +460,7 @@ def request_withdrawal():
     # is still owed to the vendor.
     available = _get_ledger_balance(int(vendor_id))
 
-    MIN_WITHDRAWAL = Decimal('1000')  # ₦1,000 minimum
+    MIN_WITHDRAWAL = min_withdrawal_ngn()
     if available < MIN_WITHDRAWAL:
         db.session.rollback()
         return jsonify({
@@ -484,6 +496,9 @@ def request_withdrawal():
         if requested_amount <= 0 or requested_amount > available:
             db.session.rollback()
             return jsonify({'message': 'Invalid withdrawal amount.'}), 400
+        if requested_amount < MIN_WITHDRAWAL:
+            db.session.rollback()
+            return jsonify({'message': f'The smallest withdrawal is ₦{MIN_WITHDRAWAL:,.2f}.'}), 400
     else:
         requested_amount = available  # default: withdraw all
 

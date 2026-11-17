@@ -637,8 +637,14 @@ def reset_password():
         db.session.commit()
         return jsonify({"message": "Invalid or expired code"}), 400
 
-    # Success: clear failed attempts and reset password
-    db.session.delete(attempts)
+    # Success: clear failed attempts and reset password. On a first-try
+    # success the counter row was only just added (never flushed), so it is
+    # dropped from the session instead of deleted.
+    from sqlalchemy import inspect as _sa_inspect
+    if _sa_inspect(attempts).persistent:
+        db.session.delete(attempts)
+    else:
+        db.session.expunge(attempts)
     user.set_password(new_password)
     user.reset_otp = None
     user.otp_expiry = None

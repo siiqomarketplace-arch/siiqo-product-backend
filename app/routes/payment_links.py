@@ -667,6 +667,8 @@ def pay_payment_link(link_id):
             payment_link=result['payment_link'],
             payscrow_transaction_id=result['provider_transaction_id'],
             payscrow_ref=result['provider_reference'],
+            # True only when Paystack really split this payment to the seller.
+            split_settled=bool(result.get("used_split")),
         )
         db.session.add(new_escrow)
         db.session.commit()

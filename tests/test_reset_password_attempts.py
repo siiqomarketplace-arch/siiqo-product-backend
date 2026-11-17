@@ -47,3 +47,25 @@ def test_correct_code_resets_password_and_clears_count(client, make_user):
     assert _reset(client, user, "123456").status_code == 200
     assert db.session.get(PasswordResetAttempt, user.id) is None
     assert db.session.get(User, user.id).check_password("a-new-password-1")
+
+
+def test_correct_code_first_try_resets_and_can_log_in(client, make_user):
+    user = make_user()
+    user.is_verified = True
+    _issue(user, "123456")
+    res = _reset(client, user, "123456")
+    assert res.status_code == 200, res.get_json()
+    assert db.session.get(PasswordResetAttempt, user.id) is None
+    login = client.post("/api/auth/login",
+                        json={"email": user.email, "password": "a-new-password-1"})
+    assert login.status_code == 200, login.get_json()
+
+
+def test_wrong_then_right_code_resets_and_clears_row(client, make_user):
+    user = make_user()
+    _issue(user, "123456")
+    assert _reset(client, user, "999999").status_code == 400
+    assert db.session.get(PasswordResetAttempt, user.id) is not None
+    assert _reset(client, user, "123456").status_code == 200
+    db.session.expire_all()
+    assert db.session.get(PasswordResetAttempt, user.id) is None

@@ -486,7 +486,9 @@ def test_agent_apply_approve_pause_and_privacy(client, make_user, make_vendor, m
     db.session.commit()
     assert _acq(later).agent_user_id is None
     assert client.post(f"/api/admin/agents/{profile.id}/resume", headers=admin).status_code == 200
-    assert Notification.query.filter_by(user_id=user.id).count() == 3
+    # approve / pause / resume (not the join / sale-reward notices)
+    assert Notification.query.filter(Notification.user_id == user.id, Notification.title.notin_(
+        ("New seller with your code", "Sale reward earned"))).count() == 3
     assert AdminAuditLog.query.filter(AdminAuditLog.action.like("AGENT_%")).count() >= 3
 
     listed = client.get("/api/admin/agents?q=tolu", headers=admin).get_json()

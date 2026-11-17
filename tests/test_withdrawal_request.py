@@ -92,3 +92,51 @@ def test_balance_does_not_count_past_withdrawals_twice(client, vendor_owed, auth
     assert _withdraw(client, vendor_owed, auth_headers, amount=2000).status_code == 200
     res = client.get("/api/withdrawal/balance", headers=auth_headers(vendor_owed))
     assert Decimal(res.get_json()["available"]) == Decimal("3000")
+
+
+# ── B2: minimum withdrawal (MIN_WITHDRAWAL_NGN, default ₦500) ───────────────
+@pytest.fixture
+def vendor_with(make_vendor, monkeypatch):
+    monkeypatch.setenv("ACTIVE_ESCROW_PROVIDER", "paystack")
+    monkeypatch.delenv("MIN_WITHDRAWAL_NGN", raising=False)
+
+    def _make(balance):
+        vendor, _ = make_vendor()
+        db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
+                                         account_number="0000000000", account_name="Test Vendor",
+                                         recipient_code=f"RCP_{vendor.id}", is_default=True))
+        _credit_vendor_ledger(vendor.id, balance, f"SALE-{vendor.id}", "One digital sale")
+        db.session.commit()
+        return vendor
+    return _make
+
+
+def test_default_minimum_is_500(client, vendor_with, auth_headers, monkeypatch):
+    calls = _transfers(monkeypatch, {"success": True, "transfer_code": "TRF_1"})
+    vendor = vendor_with(970)  # one ₦1,000 digital sale after the 3% fee
+    assert _withdraw(client, vendor, auth_headers).status_code == 200
+    assert len(calls) == 1 and calls[0]["amount_ngn"] == 970.0
+
+
+def test_below_default_minimum_is_refused(client, vendor_with, auth_headers, monkeypatch):
+    calls = _transfers(monkeypatch, {"success": True, "transfer_code": "TRF_1"})
+    vendor = vendor_with(485)
+    res = _withdraw(client, vendor, auth_headers)
+    assert res.status_code == 400 and "₦500.00" in res.get_json()["message"]
+    assert calls == []
+
+
+def test_minimum_comes_from_env(client, vendor_with, auth_headers, monkeypatch):
+    _transfers(monkeypatch, {"success": True, "transfer_code": "TRF_1"})
+    vendor = vendor_with(970)
+    monkeypatch.setenv("MIN_WITHDRAWAL_NGN", "1000")
+    assert _withdraw(client, vendor, auth_headers).status_code == 400
+    monkeypatch.setenv("MIN_WITHDRAWAL_NGN", "nonsense")
+    assert _withdraw(client, vendor, auth_headers).status_code == 200
+
+
+def test_requested_amount_below_minimum_is_refused(client, vendor_with, auth_headers, monkeypatch):
+    calls = _transfers(monkeypatch, {"success": True, "transfer_code": "TRF_1"})
+    vendor = vendor_with(5000)
+    assert _withdraw(client, vendor, auth_headers, amount=100).status_code == 400
+    assert calls == []
