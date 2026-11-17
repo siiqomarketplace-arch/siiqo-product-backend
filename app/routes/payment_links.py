@@ -2,6 +2,7 @@ import os
 import uuid
 import re
 import logging
+from app.utils.log_mask import mask_email, mask_emails_in
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee
@@ -334,7 +335,7 @@ def pay_payment_link(link_id):
         quantity=1,
     ))
 
-    # Calculate platform fees (5% standard, 3% for verified pro)
+    # Platform fee: flat PLATFORM_FEE_PERCENT (app/services/fees.py)
     from app.models.user import User as _User
     _v_user = db.session.get(_User, new_order.vendor_id) if new_order.vendor_id else None
     _now = _utcnow()
@@ -524,7 +525,7 @@ def pay_payment_link(link_id):
                         otp=order_token[:6].upper(),
                     )
                 except Exception as email_err:
-                    logging.warning(f"[PAYLINK] Guest receipt email failed for {buyer_email}: {email_err}")
+                    logging.warning(f"[PAYLINK] Guest receipt email failed for {mask_email(buyer_email)}: {mask_emails_in(email_err)}")
 
             amount_usd = calc_amount_usd
             conf_url = f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}"

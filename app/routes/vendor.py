@@ -1882,9 +1882,9 @@ def get_vendor_dashboard_stats_legacy():
     completed_count = len(completed_orders)
     products_count = len(products)
     if sf and sf.is_pro_verified and completed_count >= 20:
-        seller_tier = {"level": 5, "name": "Elite Seller", "badge": "🏆 Elite Seller", "color": "#f59e0b", "fee_discount": "4.5% fee"}
+        seller_tier = {"level": 5, "name": "Elite Seller", "badge": "🏆 Elite Seller", "color": "#f59e0b", "fee_discount": "Standard fee"}
     elif completed_count >= 5:
-        seller_tier = {"level": 4, "name": "Trusted Seller", "badge": "💛 Trusted Seller", "color": "#10b981", "fee_discount": "5.4% fee"}
+        seller_tier = {"level": 4, "name": "Trusted Seller", "badge": "💛 Trusted Seller", "color": "#10b981", "fee_discount": "Standard fee"}
     elif completed_count >= 1:
         seller_tier = {"level": 3, "name": "Active Seller", "badge": "🔥 Active Seller", "color": "#3b82f6", "fee_discount": "Standard fee"}
     elif products_count >= 1:

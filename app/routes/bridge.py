@@ -1641,6 +1641,15 @@ def apply_for_partnership():
     fullname = (data.get('fullname') or '').strip()
     business_name = (data.get('business_name') or fullname or '').strip()
 
+    service_type = (data.get('partner_role') or data.get('service_type') or 'LOGISTICS').strip().upper()
+    # Siiqo doesn't give or arrange loans or funding, so financing partners
+    # are no longer accepted. Existing financing records are kept as they are.
+    from app.services.removed_content import REMOVED_PARTNER_TYPES
+    if service_type in REMOVED_PARTNER_TYPES:
+        return jsonify({
+            "message": "Siiqo no longer takes financing partners. Siiqo doesn't give grants, loans or funding.",
+        }), 400
+
     if not email or not password:
         return jsonify({"message": "Email and password are required"}), 400
 
@@ -1673,7 +1682,7 @@ def apply_for_partnership():
     partner_app = PartnerApplication(
         user_id=new_user.id,
         business_name=business_name,
-        service_type=(data.get('partner_role') or data.get('service_type') or 'LOGISTICS').upper(),
+        service_type=service_type,
         experience_years=exp_years,
         state_of_operation=data.get('state') or data.get('state_of_operation'),
         status='PENDING',

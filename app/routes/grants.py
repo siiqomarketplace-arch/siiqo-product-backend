@@ -14,6 +14,25 @@ from sqlalchemy import or_, and_, func
 grants_bp = Blueprint('grants', __name__, url_prefix='/api/grants')
 
 
+# ---------------------------------------------------------------------------
+# REMOVED. Siiqo doesn't give grants, loans or funding, so the Grants Hub is
+# gone. Every /api/grants route (read and admin write) answers
+# 410 {"code": "REMOVED"}. The grants table and its rows are kept untouched;
+# the handlers below are no longer reachable.
+# ---------------------------------------------------------------------------
+
+@grants_bp.before_request
+def _grants_removed():
+    from app.services.removed_content import removed_response
+    return removed_response()
+
+
+@grants_bp.route('/<path:_anything>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+def _grants_removed_any(_anything):
+    from app.services.removed_content import removed_response
+    return removed_response()
+
+
 def _parse_admin_id(identity: str) -> int:
     """Only admin tokens ("admin:<id>") are accepted. Anything else returns -1."""
     if isinstance(identity, str) and identity.startswith('admin:'):

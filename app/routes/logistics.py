@@ -86,6 +86,11 @@ def vendor_logistics_settings():
 @logistics_bp.route('/active', methods=['GET'])
 def get_active_partners():
     role_filter = (request.args.get('role') or 'LOGISTICS').upper()
+    # Financing partners are no longer shown to anyone (Siiqo doesn't give
+    # or arrange loans). Their records are kept; they are just not listed.
+    from app.services.removed_content import REMOVED_PARTNER_TYPES
+    if role_filter in REMOVED_PARTNER_TYPES:
+        return jsonify({"status": "success", "data": []}), 200
     state_filter = (request.args.get('state') or '').strip()
     # vendor_id param allows buyer-side logistics fetch without auth
     vendor_id_param = request.args.get('vendor_id')

@@ -1,4 +1,5 @@
 import logging
+from app.utils.log_mask import mask_account
 """
 withdrawal.py — Vendor Withdrawal Routes
 Handles bank accounts, withdrawal requests, and POD payments
@@ -142,7 +143,7 @@ def add_bank_account():
         if is_test_mode:
             # Paystack /bank/resolve only works with LIVE keys and real accounts.
             # In test mode we skip resolution and use the submitted bank name as the account name.
-            logging.info(f'[BANK ACCOUNT] Test mode: skipping account name resolution for {account_number}')
+            logging.info(f'[BANK ACCOUNT] Test mode: skipping account name resolution for {mask_account(account_number)}')
             account_name = bank_name  # placeholder — replaced with real name once live key is used
         else:
             # 1. Resolve account name (live mode only)
@@ -786,15 +787,25 @@ def get_banks():
         return jsonify({'status': 'success', 'banks': []}), 200
 
 
-@withdrawal_bp.route('/banks/resolve', methods=['GET'])
+@withdrawal_bp.route('/banks/resolve', methods=['GET', 'POST'])
 def resolve_bank_account():
     """
     Resolve (verify) a bank account name — public endpoint.
     Used by the partner apply form and vendor onboarding to auto-fill account name.
-    Query params: bank_code, account_number
+
+    POST (preferred): JSON body {account_number, bank_code} — keeps the account
+    number out of access logs.
+    GET (deprecated, kept for old app builds): query params bank_code, account_number.
     """
-    bank_code      = (request.args.get('bank_code') or '').strip()
-    account_number = (request.args.get('account_number') or '').strip()
+    if request.method == 'POST':
+        body = request.get_json(silent=True) or {}
+        bank_code      = str(body.get('bank_code') or '').strip()
+        account_number = str(body.get('account_number') or '').strip()
+    else:
+        logging.info('[BANKS] Deprecated GET /withdrawal/banks/resolve used '
+                     '(account number in URL); callers should POST a JSON body.')
+        bank_code      = (request.args.get('bank_code') or '').strip()
+        account_number = (request.args.get('account_number') or '').strip()
 
     if not bank_code or not account_number:
         return jsonify({'message': 'bank_code and account_number are required'}), 400
@@ -828,9 +839,12 @@ def resolve_bank_account():
         }), 200
 
     except requests.exceptions.RequestException as e:
-        return jsonify({'message': f'Verification failed: {str(e)}'}), 500
+        # The exception text can contain the provider URL with the account number.
+        logging.warning(f'[BANKS] Account resolve request failed: {type(e).__name__}')
+        return jsonify({'message': 'Verification failed. Please try again.'}), 500
     except Exception as e:
-        return jsonify({'message': f'Error: {str(e)}'}), 500
+        logging.warning(f'[BANKS] Account resolve error: {type(e).__name__}')
+        return jsonify({'message': 'Could not verify account. Please try again.'}), 500
 
 
 # ---------------------------------------------------------------------------

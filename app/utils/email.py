@@ -4,6 +4,7 @@ import smtplib
 import ssl
 import threading
 import logging
+from app.utils.log_mask import mask_email, mask_emails_in
 from email.header import Header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -34,7 +35,7 @@ def _validate_email(email: str) -> bool:
     # Block dangerous characters (header injection prevention)
     dangerous_chars = ['\n', '\r', '\0', '<', '>', '"', '\\', ',', ';']
     if any(char in email for char in dangerous_chars):
-        logger.warning(f"[SECURITY] Blocked email with dangerous characters: {email[:20]}...")
+        logger.warning(f"[SECURITY] Blocked email with dangerous characters: {mask_email(email)}")
         return False
     
     # RFC 5322 email pattern with strict validation
@@ -77,7 +78,7 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
     if not mail_server or not mail_username or not mail_password:
         logger.info("\n" + "="*60)
         logger.info("âš   SMTP CREDENTIALS NOT SET IN .env â€” EMAIL NOT SENT")
-        logger.info(f"   TO      : {to_email}")
+        logger.info(f"   TO      : {mask_email(to_email)}")
         logger.info(f"   SUBJECT : {subject}")
         if 'otp' in context:
             logger.info(f"   >>>  TEST OTP: {context['otp']}  <<<")
@@ -119,12 +120,13 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
                 server.login(mail_username, mail_password)
                 server.send_message(msg)
 
-        logger.info(f"[EMAIL OK] Sent '{subject}' to {to_email}")
+        logger.info(f"[EMAIL OK] Sent '{subject}' to {mask_email(to_email)}")
 
     except Exception as e:
         import traceback
         import logging
-        logging.error(f"[EMAIL ERROR] Failed to send email to {to_email}. Error: {str(e)}\n{traceback.format_exc()}")
+        logging.error(f"[EMAIL ERROR] Failed to send email to {mask_email(to_email)}. "
+                      f"Error: {mask_emails_in(e)}\n{mask_emails_in(traceback.format_exc())}")
 
 
 def send_siiqo_email(to_email, subject, template_name, locale=None, **context):
@@ -142,7 +144,7 @@ def send_siiqo_email(to_email, subject, template_name, locale=None, **context):
     # SECURITY: Validate email address before any processing
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     if not _validate_email(to_email):
-        logger.error(f"[EMAIL BLOCKED] Invalid or malicious email format: {to_email[:50]}")
+        logger.error(f"[EMAIL BLOCKED] Invalid or malicious email format: {mask_email(to_email) if isinstance(to_email, str) else type(to_email).__name__}")
         return False
     
     mail_server   = os.environ.get('MAIL_SERVER')

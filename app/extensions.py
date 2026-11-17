@@ -14,36 +14,17 @@ cors = CORS()
 
 def get_real_client_ip() -> str:
     """
-    Safely extract the client's real public IP address behind reverse proxies.
-    Prioritizes:
-      1. CF-Connecting-IP (Cloudflare Edge)
-      2. True-Client-IP (Cloudflare Enterprise / CDN)
-      3. First IP in X-Forwarded-For (originating client before ALB & Nginx hops)
-      4. request.remote_addr (direct socket connection fallback)
+    The client's IP for rate limits, abuse checks and audit logs.
+
+    Walks X-Forwarded-For from the right, skipping trusted proxies (private
+    ranges, AWS CloudFront, TRUSTED_PROXY_CIDRS) — never the client-chosen
+    left-most entry. Full rule and hop chain: app/utils/client_ip.py.
     """
     try:
         if not request:
             return '127.0.0.1'
-
-        # 1. Cloudflare sends the verified visitor IP
-        cf_ip = request.headers.get('CF-Connecting-IP')
-        if cf_ip and cf_ip.strip():
-            return cf_ip.strip().split(',')[0].strip()
-
-        # 2. True-Client-IP header
-        true_client = request.headers.get('True-Client-IP')
-        if true_client and true_client.strip():
-            return true_client.strip().split(',')[0].strip()
-
-        # 3. X-Forwarded-For: client, proxy1, proxy2...
-        xff = request.headers.get('X-Forwarded-For')
-        if xff and xff.strip():
-            parts = [p.strip() for p in xff.split(',') if p.strip()]
-            if parts:
-                return parts[0]
-
-        # 4. Fallback to socket remote_addr
-        return request.remote_addr or '127.0.0.1'
+        from app.utils.client_ip import client_ip_from_environ
+        return client_ip_from_environ(request.environ)
     except Exception:
         return '127.0.0.1'
 

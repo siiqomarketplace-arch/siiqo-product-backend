@@ -12,6 +12,10 @@ from app.models.user import Storefront, User
 from app.models.community import Article, Review, ArticleSlugRedirect
 from app.models.admin import SponsoredListing
 from app.services.search import has_sellable_products, storefront_trust
+from app.services.removed_content import (
+    KNOWN_REMOVED_SLUGS, is_removed_article, is_removed_slug,
+    removed_article_clause, removed_article_sql, removed_response,
+)
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -643,7 +647,9 @@ def get_articles():
     sub_category = request.args.get('sub_category')
 
     try:
-        query = Article.query.filter_by(is_published=True)
+        # Grant/funding articles are removed from the public blog (see
+        # app/services/removed_content.py for the exact rule).
+        query = Article.query.filter_by(is_published=True).filter(~removed_article_clause(Article))
         if category:
             query = query.filter_by(category=category)
         if sub_category and hasattr(Article, 'sub_category'):
@@ -709,7 +715,8 @@ def get_articles():
 
             db.session.rollback()
             offset = (page - 1) * per_page
-            sql = "SELECT id, title, slug, category, excerpt, cover_image, content, created_at FROM articles WHERE is_published = true"
+            sql = ("SELECT id, title, slug, category, excerpt, cover_image, content, created_at FROM articles "
+                   "WHERE is_published = true AND NOT " + removed_article_sql())
             params = {"per_page": per_page, "offset": offset}
             if category:
                 sql += " AND category = :category"
@@ -719,7 +726,7 @@ def get_articles():
             result = db.session.execute(text(sql), params)
             rows = result.fetchall()
 
-            count_sql = "SELECT COUNT(*) FROM articles WHERE is_published = true"
+            count_sql = "SELECT COUNT(*) FROM articles WHERE is_published = true AND NOT " + removed_article_sql()
             count_params = {}
             if category:
                 count_sql += " AND category = :category"
@@ -752,15 +759,43 @@ def get_articles():
             db.session.rollback()
             return jsonify({"articles": [], "total": 0, "pages": 1}), 200
 
+@public_bp.route('/blog-removed', methods=['GET'])
+@limiter.limit("60 per minute")
+def get_removed_blog_slugs():
+    """Slugs of removed grant/funding articles (and old slugs that pointed at
+    them), so the website can answer 410 Gone for them. Slugs only."""
+    slugs = set()
+    try:
+        rows = db.session.query(Article.id, Article.slug).filter(removed_article_clause(Article)).all()
+        ids = [r.id for r in rows]
+        slugs.update((r.slug or "").lower() for r in rows if r.slug)
+        if ids:
+            olds = db.session.query(ArticleSlugRedirect.old_slug).filter(
+                ArticleSlugRedirect.article_id.in_(ids)).all()
+            slugs.update((o.old_slug or "").lower() for o in olds if o.old_slug)
+    except Exception:
+        db.session.rollback()
+    slugs.update(KNOWN_REMOVED_SLUGS)
+    response = jsonify({"slugs": sorted(s for s in slugs if s)})
+    response.headers['Cache-Control'] = 'public, max-age=600, s-maxage=600'
+    return response, 200
+
+
 @public_bp.route('/blog/<string:slug>', methods=['GET'])
 def get_article_by_slug(slug):
     from flask import redirect as flask_redirect, request as flask_request
     clean_slug = slug.strip().lower()
+    if is_removed_slug(clean_slug):
+        return removed_response()
     try:
         a = Article.query.filter_by(slug=clean_slug, is_published=True).first()
+        if a and is_removed_article(a):
+            return removed_response()
         if not a:
             # Check 301 redirect history for old slugs
             redirect_entry = ArticleSlugRedirect.query.filter_by(old_slug=clean_slug).first()
+            if redirect_entry and redirect_entry.article and is_removed_article(redirect_entry.article):
+                return removed_response()
             if redirect_entry and redirect_entry.article and redirect_entry.article.is_published:
                 canonical_slug = redirect_entry.article.slug
                 # Preserve any query string (e.g. ?utm_source=...)
@@ -818,6 +853,8 @@ def get_article_by_slug(slug):
                     WHERE r.old_slug = :slug AND a.is_published = true
                 """
                 redir_res = db.session.execute(text(sql_redir), {"slug": clean_slug}).fetchone()
+                if redir_res and is_removed_slug(redir_res[0]):
+                    return removed_response()
                 if redir_res:
                     canonical_slug = redir_res[0]
                     qs = flask_request.query_string.decode('utf-8')
@@ -826,6 +863,10 @@ def get_article_by_slug(slug):
                         dest = f"{dest}?{qs}"
                     return flask_redirect(dest, code=301)
                 return jsonify({"message": "Article not found"}), 404
+
+            _cat = (res[2] or "").lower()
+            if "grant" in _cat or "funding" in _cat:
+                return removed_response()
 
             return jsonify({
                 "id": res[0],

@@ -1,4 +1,5 @@
 import logging
+from app.utils.log_mask import mask_email
 import time
 """
 admin.py — Admin panel routes
@@ -156,13 +157,13 @@ def admin_login():
     if not (valid_admin and valid_password):
         # Record failed attempt
         brute_force.record_failure(ip, email)
-        logging.warning(f"[SECURITY] Failed admin login attempt: {email} from {ip}")
+        logging.warning(f"[SECURITY] Failed admin login attempt: {mask_email(email)} from {ip}")
         
         # Generic error message (don't reveal if email exists)
         return jsonify({"message": "Invalid credentials"}), 401
 
     if not admin.is_active:
-        logging.warning(f"[SECURITY] Suspended admin attempted login: {email} from {ip}")
+        logging.warning(f"[SECURITY] Suspended admin attempted login: {mask_email(email)} from {ip}")
         return jsonify({"message": "Account suspended"}), 403
 
     # Password step passed - clear failed attempts
@@ -175,7 +176,7 @@ def admin_login():
         admin.totp_challenge_nonce = nonce
         admin.totp_challenge_failures = 0
         db.session.commit()
-        logging.info(f"[SECURITY] Admin password accepted, 2FA pending: {email} from {ip}")
+        logging.info(f"[SECURITY] Admin password accepted, 2FA pending: {mask_email(email)} from {ip}")
         challenge = _challenge_serializer().dumps({"aid": admin.id, "n": nonce, "p": _CHALLENGE_PURPOSE})
         return _no_store(jsonify({"requires_2fa": True, "challenge_token": challenge})), 200
 
@@ -214,7 +215,7 @@ def _complete_admin_login(admin: AdminUser, ip: str, method: str):
         ip_address=ip,
     )
 
-    logging.info(f"[SECURITY] Successful admin login: {admin.email} from {ip}")
+    logging.info(f"[SECURITY] Successful admin login: {mask_email(admin.email)} from {ip}")
 
     # Use a prefixed identity to distinguish admin tokens from user tokens
     access_token = create_access_token(identity=f"admin:{admin.id}")
@@ -983,7 +984,7 @@ def update_user_status(user_id):
         }
     )
     
-    logging.info(f"[ADMIN] User {user.email} status updated to {status} by {admin.email}")
+    logging.info(f"[ADMIN] User #{user.id} status updated to {status} by {mask_email(admin.email)}")
 
     return jsonify({"message": f"User {user.email} status updated to {status}."}), 200
 
@@ -1053,7 +1054,7 @@ def delete_user_admin(user_id):
             resource_id=user_id,
             details=user_data_summary
         )
-        logging.warning(f"[ADMIN CRITICAL] User #{user_id} anonymised by {admin.email}")
+        logging.warning(f"[ADMIN CRITICAL] User #{user_id} anonymised by {mask_email(admin.email)}")
 
         return jsonify({
             "message": "User deleted. Their personal details are removed and their login is disabled. "
@@ -1225,7 +1226,7 @@ def admin_close_storefront(storefront_id):
         return jsonify({"code": "CLOSE_FAILED",
                         "message": "We couldn't close this store. Nothing was changed."}), 500
 
-    logging.warning(f"[ADMIN] Storefront #{storefront_id} closed by {admin.email}")
+    logging.warning(f"[ADMIN] Storefront #{storefront_id} closed by {mask_email(admin.email)}")
     return jsonify({
         "message": "Store closed. It is hidden from buyers and the seller can't publish it again. "
                    "Its link stays reserved; products and orders are kept.",
@@ -1295,7 +1296,7 @@ def admin_reopen_storefront(storefront_id):
         return jsonify({"code": "REOPEN_FAILED",
                         "message": "We couldn't reopen this store. Nothing was changed."}), 500
 
-    logging.warning(f"[ADMIN] Storefront #{storefront_id} reopened by {admin.email}")
+    logging.warning(f"[ADMIN] Storefront #{storefront_id} reopened by {mask_email(admin.email)}")
     return jsonify({
         "message": ("Store reopened. It is published again." if republish else
                     "Store reopened. It was not published before it was closed, so it stays unpublished "
@@ -2023,7 +2024,7 @@ def admin_refund_buyer(order_id):
         }
     )
     
-    logging.warning(f"[ADMIN CRITICAL] Escrow refund processed for Order #{order_id} by {admin.email}")
+    logging.warning(f"[ADMIN CRITICAL] Escrow refund processed for Order #{order_id} by {mask_email(admin.email)}")
 
     # Trigger trust score recalculation on dispute lost
     try:
@@ -2654,6 +2655,10 @@ def _auto_post_blog_to_community(article):
     The credited author name/title is displayed in the post body.
     No new users are ever created in the users table by this function.
     """
+    from app.services.removed_content import is_removed_article
+    if is_removed_article(article):
+        # Grant/funding articles are not public any more; never promote them.
+        return
     try:
         from app.models.social import Post as CommunityPost
         from app.models.user import User
@@ -3736,7 +3741,7 @@ def admin_verify_pro_storefront(storefront_id):
     db.session.add(Notification(
         user_id=sf.vendor_id,
         title="Pro Verified Status Activated! ⭐",
-        message="Congratulations! Your NIN & CAC verification has been approved. You now enjoy Pro Verified Gold status and a reduced 5.4% platform fee.",
+        message="Congratulations! Your NIN & CAC verification has been approved. You now enjoy Pro Verified Gold status.",
         type="SYSTEM"
     ))
 
@@ -3878,75 +3883,13 @@ def publish_all_approved_storefronts():
 @limiter.limit("1 per hour")
 def run_grants_migration_once():
     """
-    ONE-TIME USE ONLY: Run grants table migration
-    This endpoint should be removed after successful migration
+    Removed with the Grants Hub. Answers 410 REMOVED; the grants table
+    and its rows are left untouched.
     """
-    admin_id = get_jwt_identity()
-    admin = _require_superadmin(_parse_admin_id(admin_id))
-    if not admin:
-        return jsonify({"message": "SuperAdmin required"}), 403
-    
-    try:
-        from sqlalchemy import text
-        
-        # Read SQL migration file
-        sql_file = 'migrations/create_grants_table.sql'
-        logging.info(f"[MIGRATION] Reading {sql_file}")
-        
-        with open(sql_file, 'r', encoding='utf-8') as f:
-            sql_content = f.read()
-        
-        # Execute migration
-        logging.info("[MIGRATION] Executing grants table creation...")
-        db.session.execute(text(sql_content))
-        db.session.commit()
-        
-        # Verify
-        result = db.session.execute(text("""
-            SELECT COUNT(*) as total,
-                   COUNT(*) FILTER (WHERE status = 'open') as open,
-                   COUNT(*) FILTER (WHERE featured = TRUE) as featured
-            FROM grants
-        """))
-        
-        row = result.fetchone()
-        
-        # Audit log
-        AdminAuditLog.log_action(
-            admin=admin,
-            action='DATABASE_MIGRATION',
-            resource_type='Grant',
-            resource_id=0,
-            details={
-                'migration': 'create_grants_table',
-                'total_grants': row[0],
-                'open_grants': row[1],
-                'featured_grants': row[2]
-            }
-        )
-        
-        logging.info(f"[MIGRATION SUCCESS] Grants table created with {row[0]} initial records")
-        
-        return jsonify({
-            'message': 'Grants table migration completed successfully',
-            'grants_created': row[0],
-            'open_grants': row[1],
-            'featured_grants': row[2],
-            'warning': 'Please remove this endpoint from production code'
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logging.error(f"[MIGRATION ERROR] {str(e)}")
-        return jsonify({
-            'message': 'Migration failed',
-            'error': str(e),
-            'troubleshooting': [
-                'Check if grants table already exists',
-                'Verify admin_users table exists (foreign key dependency)',
-                'Check PostgreSQL logs for details'
-            ]
-        }), 500
+    # The Grants Hub was removed: this no longer creates or seeds anything.
+    from app.services.removed_content import removed_response
+    return removed_response()
+
 
 
 # ---------------------------------------------------------------------------

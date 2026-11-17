@@ -11,6 +11,14 @@ from app.middleware.security import limiter
 grants_migration_bp = Blueprint('grants_migration', __name__)
 
 
+# REMOVED with the Grants Hub: these routes never fix, seed or show grants any
+# more. Every one answers 410 {"code": "REMOVED"}; the grants table is untouched.
+@grants_migration_bp.before_request
+def _grants_migration_removed():
+    from app.services.removed_content import removed_response
+    return removed_response()
+
+
 @grants_migration_bp.route('/fix-published-status', methods=['POST'])
 @limiter.limit("5 per hour")
 def fix_published_status():

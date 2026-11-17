@@ -3,6 +3,7 @@ events.py — Events and Ticketing Routes
 Handles: event creation, ticket types, ticket purchases, check-ins, validation
 """
 import logging
+from app.utils.log_mask import mask_email
 import re
 from datetime import datetime
 from decimal import Decimal
@@ -1003,7 +1004,7 @@ def purchase_tickets(slug):
             except Exception as email_err:
                 logger.warning(f"Vendor free ticket email failed (non-fatal): {email_err}")
             
-            logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to {buyer_email}")
+            logger.info(f"Free tickets issued: {len(tickets)} for event {event.id} to {mask_email(buyer_email)}")
             
             return jsonify({
                 'message': 'Free tickets issued successfully',
@@ -1060,7 +1061,7 @@ def purchase_tickets(slug):
             
             db.session.commit()
             
-            logger.info(f"Paid ticket order created: {order.id} for event {event.id} by {buyer_email}")
+            logger.info(f"Paid ticket order created: {order.id} for event {event.id} by {mask_email(buyer_email)}")
             
             return jsonify({
                 'message': 'Order created. Complete payment via Daya to receive tickets.',
@@ -1269,7 +1270,7 @@ def purchase_manual_tickets(slug):
         except Exception as email_err:
             logger.warning(f"Manual payment vendor email failed (non-fatal): {email_err}")
 
-        logger.info(f"Manual payment tickets submitted: {len(tickets)} for event {event.id} by {buyer_email}")
+        logger.info(f"Manual payment tickets submitted: {len(tickets)} for event {event.id} by {mask_email(buyer_email)}")
 
         return jsonify({
             'message': 'Registration submitted. Awaiting payment confirmation.',

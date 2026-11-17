@@ -4,7 +4,7 @@ paystack_provider.py — Paystack implementation of BaseEscrowProvider
 Flow for marketplace checkout (digital/service products — Split Payment):
   1. initiate_transaction()  → looks up vendor's paystack_subaccount_code,
                                calls /transaction/initialize with subaccount
-                               + transaction_charge (Siiqo's 12% fee)
+                               + transaction_charge (Siiqo's platform fee, see app/services/fees.py)
   2. Buyer pays on Paystack-hosted page
   3. Paystack automatically splits the payment:
        • vendor's share → settled to their subaccount → their bank (T+1)
@@ -31,6 +31,7 @@ import os
 import uuid
 import re
 import logging
+from app.utils.log_mask import mask_account
 import requests
 from decimal import Decimal
 
@@ -64,7 +65,7 @@ class PaystackProvider(BaseEscrowProvider):
     Split Payment model (replaces the old Custodian/Transfer model):
     - The vendor's paystack_subaccount_code is looked up at checkout time.
     - The payment payload includes `subaccount` (vendor) and
-      `transaction_charge` (Siiqo's 12% fee in kobo).
+      `transaction_charge` (Siiqo's platform fee in kobo, see app/services/fees.py).
     - Paystack splits the payment natively at transaction time:
         • vendor's portion → settled to subaccount → vendor's bank (T+1)
         • Siiqo's fee      → stays in Siiqo's main balance
@@ -641,7 +642,7 @@ def ensure_paystack_transfer_recipient(
         data = resp.json()
         if data.get("status") and data.get("data", {}).get("recipient_code"):
             recipient_code = data["data"]["recipient_code"]
-            logging.info(f"[ENSURE RECIPIENT] Created {recipient_code} for {account_number} ({paystack_bank_code})")
+            logging.info(f"[ENSURE RECIPIENT] Created {recipient_code} for {mask_account(account_number)} ({paystack_bank_code})")
             return {
                 "success": True,
                 "recipient_code": recipient_code,

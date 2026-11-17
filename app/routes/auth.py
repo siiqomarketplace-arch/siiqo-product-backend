@@ -1,4 +1,5 @@
 import logging
+from app.utils.log_mask import mask_email, mask_emails_in
 """
 auth.py — Authentication routes
 Handles: register, verify-email, login, logout, refresh, profile,
@@ -191,7 +192,7 @@ def register():
                     verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={existing_user.email}&otp={otp}"
                 )
             except Exception as e:
-                logging.warning(f"[ERROR] OTP email failed for {existing_user.email}: {e}")
+                logging.warning(f"[ERROR] OTP email failed for {mask_email(existing_user.email)}: {mask_emails_in(e)}")
                 return jsonify({
                     "status": "error",
                     "message": "Account registered, but we couldn't send your verification code. Please tap 'Resend code' or contact support@siiqo.com."
@@ -250,7 +251,7 @@ def register():
             verification_link=f"{os.environ.get('FRONTEND_URL', 'https://siiqo.com').rstrip('/')}/auth/verify-otp?email={new_user.email}&otp={otp}"
         )
     except Exception as e:
-        logging.warning(f"[ERROR] OTP email failed for {new_user.email}: {e}")
+        logging.warning(f"[ERROR] OTP email failed for {mask_email(new_user.email)}: {mask_emails_in(e)}")
         # Account is created — user can resend OTP but we tell them what went wrong
         return jsonify({
             "status": "email_error",
@@ -311,10 +312,10 @@ def verify_email():
         ).update({"buyer_id": user.id, "is_guest": False}, synchronize_session=False)
         if linked_count:
             db.session.commit()
-            logging.info("[AUTH] Linked %d past guest order(s) to new account %s", linked_count, user.email)
+            logging.info("[AUTH] Linked %d past guest order(s) to new account %s", linked_count, mask_email(user.email))
     except Exception as _link_err:
         db.session.rollback()
-        logging.warning("[AUTH] Guest order linking failed for %s: %s", user.email, _link_err)
+        logging.warning("[AUTH] Guest order linking failed for %s: %s", mask_email(user.email), _link_err)
 
     # Send welcome email now that user is verified
     try:

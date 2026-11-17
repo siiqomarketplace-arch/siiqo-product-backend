@@ -30,7 +30,6 @@ def test_ids_really_collide(colliding_accounts):
 @pytest.mark.parametrize("method,path,body", [
     ("post", "/api/admin/users/{uid}/adjust-balance", {"action": "CREDIT", "amount": 1000}),
     ("get", "/api/admin/daya/balance", None),
-    ("post", "/api/grants", {"title": "x"}),
 ])
 def test_user_token_is_refused(client, colliding_accounts, method, path, body):
     user, _ = colliding_accounts
@@ -44,7 +43,6 @@ def test_user_token_is_refused(client, colliding_accounts, method, path, body):
 @pytest.mark.parametrize("method,path,body", [
     ("post", "/api/admin/users/{uid}/adjust-balance", {}),
     ("get", "/api/admin/daya/balance", None),
-    ("post", "/api/grants", {}),
 ])
 def test_admin_token_passes_the_admin_check(client, colliding_accounts, method, path, body):
     user, admin = colliding_accounts

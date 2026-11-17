@@ -190,11 +190,21 @@ def _respond(query_type, results):
     return jsonify(body), 200
 
 
-@check_bp.route('', methods=['GET'])
-@check_bp.route('/', methods=['GET'])
+def _param(name):
+    """POST: JSON body (keeps phone/account numbers out of URLs and access logs).
+    GET: query string (public API and shared links; still supported)."""
+    if request.method == 'POST':
+        body = request.get_json(silent=True) or {}
+        value = body.get(name)
+        return '' if value is None else str(value)
+    return request.args.get(name) or ''
+
+
+@check_bp.route('', methods=['GET', 'POST'])
+@check_bp.route('/', methods=['GET', 'POST'])
 @limiter.limit(RATE_LIMIT)
 def check_seller():
-    q = (request.args.get('q') or '').strip()
+    q = _param('q').strip()
     if not q:
         return jsonify({"query_type": "empty", "found": False, "results": [],
                         "message": "Paste a phone number, @handle, store link, Pay Link or website to check."}), 400
@@ -222,11 +232,11 @@ def _directory_result(query_type, lookups, q):
                     "listing": directory.public_listing(listing), "message": directory.UNCLAIMED_MESSAGE}), 200
 
 
-@check_bp.route('/account', methods=['GET'])
+@check_bp.route('/account', methods=['GET', 'POST'])
 @limiter.limit(RATE_LIMIT)
 def check_account():
-    bank_code = (request.args.get('bank_code') or '').strip()
-    account_number = re.sub(r"\D", "", request.args.get('account_number') or '')
+    bank_code = _param('bank_code').strip()
+    account_number = re.sub(r"\D", "", _param('account_number'))
     if not bank_code or not re.fullmatch(r"[0-9A-Za-z]{2,10}", bank_code) or len(account_number) != 10:
         return jsonify({"query_type": "account", "found": False, "results": [],
                         "message": "Enter the bank and the 10-digit account number you're paying into."}), 400

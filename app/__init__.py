@@ -25,8 +25,13 @@ def create_app(config_name: str | None = None) -> Flask:
             pass
 
     app = Flask(__name__)
-    # Trust reverse proxy headers (Cloudflare & Elastic Beanstalk ALB/Nginx)
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=2, x_proto=2, x_host=1)
+    # Proxy headers. Client IP is NOT taken from ProxyFix any more (x_for=0):
+    # ClientIPMiddleware walks X-Forwarded-For from the right past trusted
+    # proxies (ALB/nginx, CloudFront, the website's SSR hop) and sets
+    # REMOTE_ADDR, so request.remote_addr and the limiter key are the same value.
+    # See app/utils/client_ip.py.
+    from app.utils.client_ip import ClientIPMiddleware
+    app.wsgi_app = ClientIPMiddleware(ProxyFix(app.wsgi_app, x_for=0, x_proto=2, x_host=1))
     app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
 
@@ -335,55 +340,9 @@ def create_app(config_name: str | None = None) -> Flask:
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] Database schema update failed: {_e}")
 
-        # ── Grants Table Auto-Initialization ─────────────────────────────────
-        # One-time grants table creation with sample data. Safe to run on every
-        # boot — checks if table exists first and skips if already populated.
-        try:
-            from sqlalchemy import text as _text
-            import logging as _log
-            
-            # Check if grants table exists
-            _result = db.session.execute(_text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'grants'
-                )
-            """))
-            _grants_table_exists = _result.scalar()
-            
-            if not _grants_table_exists:
-                _log.getLogger(__name__).info("[STARTUP] Grants table not found, creating...")
-                
-                # Read and execute SQL migration file
-                import os as _os
-                _sql_file = _os.path.join(_os.path.dirname(__file__), '..', 'migrations', 'create_grants_table.sql')
-                
-                if _os.path.exists(_sql_file):
-                    with open(_sql_file, 'r', encoding='utf-8') as _f:
-                        _sql_content = _f.read()
-                    
-                    db.session.execute(_text(_sql_content))
-                    db.session.commit()
-                    
-                    # Verify grants were created
-                    _verify = db.session.execute(_text("SELECT COUNT(*) FROM grants"))
-                    _count = _verify.scalar()
-                    _log.getLogger(__name__).info(f"[STARTUP] ✓ Grants table created with {_count} sample grants")
-                else:
-                    _log.getLogger(__name__).warning(f"[STARTUP] Grants migration SQL file not found: {_sql_file}")
-            else:
-                # Table exists, check if it has data
-                _verify = db.session.execute(_text("SELECT COUNT(*) FROM grants"))
-                _count = _verify.scalar()
-                if _count == 0:
-                    _log.getLogger(__name__).info("[STARTUP] Grants table exists but is empty (no sample data loaded)")
-                else:
-                    _log.getLogger(__name__).info(f"[STARTUP] Grants table verified ({_count} grants)")
-                    
-        except Exception as _e:
-            db.session.rollback()
-            import logging as _log
-            _log.getLogger(__name__).warning(f"[STARTUP] Grants table initialization skipped: {_e}")
+        # Grants: the Grants Hub was removed (Siiqo doesn't give grants, loans
+        # or funding). Nothing about grants runs on boot any more; the grants
+        # table and its rows are left as they are (no drop, no delete).
 
         # ── Blog Articles Auto-Initialization ─────────────────────────────────
         try:
@@ -664,11 +623,12 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(payment_links_bp, url_prefix='/api')
     # Daya crypto payments + vendor crypto wallet management
     app.register_blueprint(payments_bp,     url_prefix='/api/payments')
-    # Grants and funding opportunities
+    # Grants Hub: removed. Kept registered only so every /api/grants route
+    # answers 410 {"code": "REMOVED"} (see app/routes/grants.py).
     app.register_blueprint(grants_bp,       url_prefix='/api/grants')
     # Events and ticketing system
     app.register_blueprint(events_bp,       url_prefix='/api')
-    # Temporary grants migration endpoint
+    # Old grants migration endpoints: removed, answer 410
     app.register_blueprint(grants_migration_bp, url_prefix='/api/admin')
     # Daya admin: live balance + platform fee sweep
     app.register_blueprint(daya_admin_bp,   url_prefix='/api/admin/daya')
@@ -907,7 +867,7 @@ def create_app(config_name: str | None = None) -> Flask:
                     func=lambda: _run_in_context(app, run_platform_fee_sweep),
                     trigger=IntervalTrigger(hours=6),
                     id='platform_fee_sweep',
-                    name='Auto-sweep Siiqo platform fees (5% standard / 3% verified) to corporate bank when >= threshold',
+                    name='Auto-sweep Siiqo platform fees (sum of recorded escrow fee_amount, released, not yet swept) to corporate bank when >= threshold',
                     replace_existing=True,
                 )
             except Exception as sweep_err:

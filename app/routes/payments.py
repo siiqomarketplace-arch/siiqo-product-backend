@@ -15,6 +15,7 @@
 import hashlib
 import hmac
 import logging
+from app.utils.log_mask import mask_email
 import os
 import re
 import uuid
@@ -2024,7 +2025,7 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                             f"Log in to your Siiqo dashboard to process this order."
                         ),
                     )
-                    logger.info(f"[FLW CONFIRM] Vendor email sent to {vendor.email} for Order #{order.id}")
+                    logger.info(f"[FLW CONFIRM] Vendor email sent to {mask_email(vendor.email)} for Order #{order.id}")
             except Exception as vendor_email_err:
                 logger.warning(f"[FLW CONFIRM] Vendor email failed for Order #{order.id}: {vendor_email_err}")
 
