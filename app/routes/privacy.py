@@ -522,6 +522,13 @@ def _address_verification(user):
     return export_for(user)
 
 
+def _shop_location(user):
+    """Shop location (NIPOST postcode): the postcode, its public area names,
+    status and dates, and the history of changes. No NIPOST responses are kept."""
+    from app.services.shop_location import export_for
+    return export_for(user)
+
+
 def _passport(user):
     from app.models.passport import PassportSettings
     ps = PassportSettings.query.filter_by(vendor_id=user.id).first()
@@ -568,6 +575,7 @@ def build_export(user):
         "subscription_payments": subscription_payments,
         "verification": _verification(user),
         "address_verification": _address_verification(user),
+        "shop_location": _shop_location(user),
         "passport_settings": _passport(user),
         "consents": {
             "current": current_consents(user),

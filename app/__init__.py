@@ -211,6 +211,12 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_account_name VARCHAR(255)",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_account_number VARCHAR(50)",
                 "ALTER TABLE events ADD COLUMN IF NOT EXISTS manual_payment_instructions TEXT",
+                # ── Event venue postcode (NIPOST; POSTCODE_VERIFICATION_ENABLED) ──
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS venue_postcode VARCHAR(16)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS venue_postcode_display VARCHAR(20)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS venue_lga_name VARCHAR(120)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS venue_state_name VARCHAR(80)",
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS venue_postcode_validated_at TIMESTAMP WITH TIME ZONE",
                 # ── Ticket Purchases Guest & Custom Fields ──────────────────
                 "ALTER TABLE ticket_purchases ALTER COLUMN buyer_id DROP NOT NULL",
                 "ALTER TABLE ticket_purchases ADD COLUMN IF NOT EXISTS selected_schedule_id VARCHAR(100)",
@@ -692,6 +698,9 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(account_bp, url_prefix='/api/account')
     from app.routes.address_verification import address_verification_bp
     app.register_blueprint(address_verification_bp, url_prefix='/api/verification/address')
+    # Shop location by NIPOST postcode (off unless POSTCODE_VERIFICATION_ENABLED)
+    from app.routes.location import location_bp
+    app.register_blueprint(location_bp, url_prefix='/api/location')
     # Phase T/W: signed internal API for SiiqoBot (sessions, intent router, voice notes)
     from app.routes.bot_internal import bot_internal_bp
     app.register_blueprint(bot_internal_bp, url_prefix='/api/internal/bot')

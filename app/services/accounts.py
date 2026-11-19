@@ -113,6 +113,9 @@ def anonymise_user(user, *, force=False, commit=True):
     # Nothing references crypto wallets, notifications or messages, so those
     # rows can go. Bank accounts are referenced by withdrawals.
     _remove_bank_accounts(uid)
+    # Shop location (NIPOST postcode): the rows go; audit rows lose the postcode.
+    from app.services.shop_location import delete_for as _delete_locations
+    _delete_locations(uid)
     VendorCryptoWallet.query.filter_by(vendor_id=uid).delete(synchronize_session=False)
     Notification.query.filter_by(user_id=uid).delete(synchronize_session=False)
     Message.query.filter((Message.sender_id == uid) | (Message.receiver_id == uid)).delete(

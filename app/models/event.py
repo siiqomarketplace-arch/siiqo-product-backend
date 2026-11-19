@@ -95,6 +95,14 @@ class Event(db.Model):
     manual_payment_account_number = db.Column(db.String(50), nullable=True)
     manual_payment_instructions = db.Column(db.Text, nullable=True)
 
+    # Venue postcode (NIPOST). Venues are public places; validated with the
+    # free Validator. Columns added by the boot-time ALTER list.
+    venue_postcode = db.Column(db.String(16), nullable=True)
+    venue_postcode_display = db.Column(db.String(20), nullable=True)
+    venue_lga_name = db.Column(db.String(120), nullable=True)
+    venue_state_name = db.Column(db.String(80), nullable=True)
+    venue_postcode_validated_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -209,9 +217,14 @@ class Event(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
         
+        # Venue postcode (NIPOST): verified flag, area label and the postcode
+        # (venues are public places). All empty while the feature is off.
+        from app.services.shop_location import venue_public
+        data.update(venue_public(self))
+
         if include_ticket_types:
             data['ticket_types'] = [tt.to_dict() for tt in self.ticket_types if tt.is_active]
-        
+
         return data
 
 

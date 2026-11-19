@@ -39,6 +39,7 @@ from . import pay_request  # noqa: F401  (Safe Pay requests: buyers bring seller
 from . import seller_report  # noqa: F401  (Report this seller)
 from . import assistant  # noqa: F401  (Phase 4: store concierge and seller copilot)
 from . import verification_requirement  # noqa: F401  (Phase 4: mandatory verification holds)
+from . import location  # noqa: F401  (Shop location by NIPOST postcode)
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',

@@ -538,6 +538,38 @@ def delete_event(event_id):
 
 
 # ---------------------------------------------------------------------------
+# VENUE POSTCODE (NIPOST) — owner only; off unless POSTCODE_VERIFICATION_ENABLED
+# ---------------------------------------------------------------------------
+
+@events_bp.route('/events/<int:event_id>/venue-postcode', methods=['POST', 'DELETE'])
+@jwt_required()
+def venue_postcode(event_id):
+    from app.services import shop_location as loc
+    from app.services.postcode import PostcodeError
+
+    if not loc.is_enabled():
+        return jsonify({'code': 'FEATURE_OFF', 'message': 'Venue postcode is not available yet.'}), 404
+    identity = get_jwt_identity()
+    if not identity or not str(identity).isdigit():
+        return jsonify({'message': 'Vendor access required'}), 403
+    user = db.session.get(User, int(identity))
+    event = Event.query.filter_by(id=event_id, is_deleted=False).first()
+    if not user or not event:
+        return jsonify({'message': 'Event not found'}), 404
+    if event.vendor_id != user.id:
+        return jsonify({'message': 'Only the organiser can change the venue postcode'}), 403
+    try:
+        if request.method == 'DELETE':
+            loc.clear_venue(user, event)
+        else:
+            data = request.get_json(silent=True) or {}
+            loc.save_venue(user, event, data.get('postcode'))
+    except PostcodeError as exc:
+        return jsonify({'code': exc.code, 'message': exc.message}), exc.status
+    return jsonify({'event_id': event.id, **loc.venue_public(event)}), 200
+
+
+# ---------------------------------------------------------------------------
 # TICKET TYPE MANAGEMENT ROUTES
 # ---------------------------------------------------------------------------
 

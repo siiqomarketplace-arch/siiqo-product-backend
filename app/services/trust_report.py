@@ -192,6 +192,9 @@ def gather(sf, now=None):
         # No buyer-report table exists yet; when one does, its count goes here.
         "reports": None,
         "sells": product_mix(sf),
+        # Shop location (NIPOST postcode); present only while the feature is on.
+        "location": claims.get("location"),
+        "seller_kind": claims.get("seller_kind"),
     }
 
 
@@ -301,7 +304,7 @@ def verdict(ev):
     label, tone = VERDICTS[code]
     if code == "mixed":
         label = MIXED_LABELS[ev["sells"]]
-    return {
+    out = {
         "store_slug": ev["store_slug"],
         "store_name": ev["store_name"],
         "verdict": {"code": code, "label": label, "tone": tone},
@@ -311,6 +314,10 @@ def verdict(ev):
         "evidence_hash": evidence_hash(ev),
         "passport_url": f"/id/{ev['store_slug']}",
     }
+    if ev.get("seller_kind"):
+        out["seller_kind"] = ev["seller_kind"]
+        out["location"] = ev.get("location")
+    return out
 
 
 # ── What the AI sees (public facts only) and its hash ──────────────────────

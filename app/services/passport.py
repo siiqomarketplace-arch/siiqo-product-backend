@@ -108,6 +108,14 @@ def build_passport(sf):
     from app.services.address_verification.service import has_public_claim
     if has_public_claim(sf.vendor_id):
         claims["address_verified"] = True
+    # Shop location by NIPOST postcode: separate from identity and never part
+    # of the score. Only while POSTCODE_VERIFICATION_ENABLED is on.
+    from app.services import shop_location
+    if shop_location.is_enabled():
+        claims["seller_kind"] = shop_location.seller_kind(sf)
+        location = shop_location.public_location(sf)
+        if location:
+            claims["location"] = location
     if s is None or s.show_completed_orders:
         claims["completed_orders"] = done
     if (s is None or s.show_member_since) and vendor.created_at:
