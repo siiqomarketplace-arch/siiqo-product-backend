@@ -1063,7 +1063,8 @@ def get_order_downloads(order_id):
         return jsonify({'message': 'Order not found'}), 404
 
     # Only show downloads for completed/delivered orders
-    if order.status not in ['DELIVERED', 'COMPLETED']:
+    # ...and only once the payment is confirmed: a seller-set status is not payment.
+    if order.status not in ['DELIVERED', 'COMPLETED'] or not order.is_paid():
         return jsonify({'message': 'Order not completed yet'}), 400
 
     # Get digital products from order

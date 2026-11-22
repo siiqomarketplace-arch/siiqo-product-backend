@@ -35,7 +35,7 @@ def _digital_order(make_vendor, make_product, make_order, payscrow_ref=None):
 
 
 def _bank(vendor):
-    db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
+    db.session.add(VendorBankAccount(is_verified=True, vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
                                      account_number="0000000000", account_name="Test Vendor", is_default=True))
     db.session.commit()
 

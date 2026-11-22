@@ -400,7 +400,7 @@ def seller_summary(user: User) -> dict:
         },
         "available": is_available(user),
         "coming_soon": not is_available(user),
-        "price_ngn_per_month": 1999,
+        "price_ngn_per_month": 3000,
         "identity_verified": bool(status and status.is_identity_current()),
         "business_verified": bool(status and status.business_verified_at
                                   and status.is_identity_current()),

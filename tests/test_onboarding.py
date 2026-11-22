@@ -709,7 +709,8 @@ def test_publish_creates_everything_once(client, seller, auth_headers, paystack)
     assert store.template_options["layout_style"] == "Fashion Chic"
     assert store.template_options["sections_control"] == "spec"
     assert store.template_options["hero_heading"] == "Ada Fabrics"
-    assert (store.bank_code, store.account_number, store.account_name) == ("058", "0123456789", "ADA OKAFOR")
+    # No bank lookup answered in this test: the typed name is not saved (name pending).
+    assert (store.bank_code, store.account_number, store.account_name) == ("058", "0123456789", None)
     assert store.city == "Enugu" and store.phone == "08031234567"
     assert store.paystack_subaccount_code == "ACCT_test123"
     assert paystack == [("Ada Fabrics", "058", "0123456789")]
@@ -885,7 +886,8 @@ def test_publish_when_bank_check_unavailable_saves_unverified(client, seller, au
     s = _built(client, h)
     assert client.post(f"{API}/sessions/{s['id']}/publish", headers=h, json=BANK).status_code == 201
     row = VendorBankAccount.query.filter_by(vendor_id=seller.id).one()
-    assert row.account_name == BANK["account_name"] and row.is_verified is False
+    # Name pending: never the typed name; the hourly check asks the bank again.
+    assert row.account_name is None and row.is_verified is False
 
 
 def test_digital_seller_first_pay_link_is_a_service(client, seller, auth_headers, paystack, bank_resolve):

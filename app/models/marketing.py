@@ -209,9 +209,17 @@ class AgentEarning(db.Model):
         db.Index('uq_agent_earning_sale_slot', 'seller_user_id', 'sale_number', unique=True,
                  postgresql_where=db.text("kind = 'sale' AND status <> 'REVERSED'"),
                  sqlite_where=db.text("kind = 'sale' AND status <> 'REVERSED'")),
+        # Seller-to-seller referral: at most one standing reward per referred seller.
+        db.Index('uq_agent_earning_referral', 'seller_user_id', unique=True,
+                 postgresql_where=db.text("kind = 'referral' AND status <> 'REVERSED'"),
+                 sqlite_where=db.text("kind = 'referral' AND status <> 'REVERSED'")),
     )
 
-    KINDS = ('sale', 'bonus', 'setup', 'first_sale')  # setup / first_sale: old rows only
+    # sale: sale_number 1 is the first-sale bonus (AGENT_FIRST_SALE_BONUS_NGN),
+    # 2..AGENT_REWARDED_SALES the follow-on reward (AGENT_SALE_REWARD_NGN).
+    # referral: a seller who invited another seller (agent_user_id is the
+    # referring SELLER); credited to their seller ledger once it clears the hold.
+    KINDS = ('sale', 'bonus', 'referral', 'setup', 'first_sale')  # setup / first_sale: old rows only
     STATUSES = ('HELD', 'PAYABLE', 'PAID', 'REVERSED')
 
     id = db.Column(db.Integer, primary_key=True)
@@ -228,3 +236,54 @@ class AgentEarning(db.Model):
     paid_reference = db.Column(db.String(120), nullable=True)
     reversed_reason = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class BuyerPromoCode(db.Model):
+    """"First Order N500 Off": one code per seller, paid for by Siiqo.
+    The buyer pays less; when the order is delivered (escrow released) the
+    seller's ledger gets a top-up so they end with what full price would have
+    given them (app/services/marketing.py, promo section).
+
+    uses_reserved counts the uses still standing (an order placed with the
+    code that was not cancelled/refunded); it is raised with a conditional
+    UPDATE ... WHERE uses_reserved < cap so two buyers can't take the last use."""
+    __tablename__ = 'buyer_promo_codes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(24), unique=True, nullable=False, index=True)   # upper-case
+    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    discount_ngn = db.Column(db.Numeric(12, 2), nullable=False)
+    min_order_ngn = db.Column(db.Numeric(12, 2), nullable=False)
+    cap = db.Column(db.Integer, nullable=False)
+    uses_reserved = db.Column(db.Integer, nullable=False, default=0)
+    starts_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    ends_at = db.Column(db.DateTime(timezone=True), nullable=True)   # exclusive
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    created_by_admin_id = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class BuyerPromoUse(db.Model):
+    """One order that used a promo code.
+    RESERVED: order placed (counts toward the cap); RELEASED: cancelled,
+    refunded or never paid, the use went back to the cap; TOPPED_UP: delivered
+    and the seller's ledger credited (Ledger reference promo_topup:<promo>:<order>)."""
+    __tablename__ = 'buyer_promo_uses'
+
+    STATUSES = ('RESERVED', 'RELEASED', 'TOPPED_UP')
+
+    id = db.Column(db.Integer, primary_key=True)
+    promo_id = db.Column(db.Integer, db.ForeignKey('buyer_promo_codes.id'), nullable=False, index=True)
+    order_id = db.Column(db.Integer, nullable=False, unique=True)
+    vendor_id = db.Column(db.Integer, nullable=False, index=True)
+    buyer_key = db.Column(db.String(160), nullable=True, index=True)
+    discount_ngn = db.Column(db.Numeric(12, 2), nullable=False)
+    status = db.Column(db.String(10), nullable=False, default='RESERVED', index=True)
+    topup_ngn = db.Column(db.Numeric(12, 2), nullable=True)
+    topup_reference = db.Column(db.String(100), nullable=True)
+    released_reason = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    released_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    topped_up_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    promo = db.relationship('BuyerPromoCode')

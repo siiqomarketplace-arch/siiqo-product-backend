@@ -446,28 +446,26 @@ def test_pickup_is_free_and_needs_pickup_enabled(client, make_vendor, make_produ
     assert res.status_code == 200
 
 
-def test_partner_fee_cannot_go_below_minimum(client, make_vendor, make_product, make_user):
+def test_partner_fee_is_priced_by_server_from_coverage(client, make_vendor, make_product, make_user):
+    # The browser's fee is ignored: the buyer pays the partner's Lagos price + 10%.
     partner = make_user(role=UserRole.PARTNER)
+    partner.is_verified = True
     db.session.add(PartnerApplication(user_id=partner.id, business_name="Fast Riders", service_type="LOGISTICS",
-                                      status="APPROVED", pricing_settings={"pricing_model": "FLAT",
-                                                                           "flat_rate": 2000}))
+                                      status="APPROVED",
+                                      pricing_settings={"coverage": [{"state": "Lagos", "lgas": [], "price": 2000}]}))
     db.session.commit()
     vendor, p = _seller_with_delivery(make_vendor, make_product)
-    res = _checkout(client, p, logistics_selections=_select(vendor, f"siiqo_partner_{partner.id}", 1))
-    order = db.session.get(Order, res.get_json()["id"])
-    assert float(order.logistics_fee) == 2200.0
-
-    res = _checkout(client, p, logistics_selections=_select(vendor, f"siiqo_partner_{partner.id}", 10 ** 9))
-    assert float(db.session.get(Order, res.get_json()["id"]).logistics_fee) == 200000.0
-
-    res = _checkout(client, p, logistics_selections=_select(vendor, f"siiqo_partner_{partner.id}", 3300))
-    assert float(db.session.get(Order, res.get_json()["id"]).logistics_fee) == 3300.0
+    for sent in (1, 10 ** 9, 3300):
+        res = _checkout(client, p, logistics_selections=_select(vendor, f"siiqo_partner_{partner.id}", sent))
+        assert res.status_code == 200, res.get_json()
+        assert float(db.session.get(Order, res.get_json()["id"]).logistics_fee) == 2200.0
 
 
-def test_unknown_option_keeps_fee(client, make_vendor, make_product):
+def test_unknown_option_is_refused(client, make_vendor, make_product):
     vendor, p = _seller_with_delivery(make_vendor, make_product)
     res = _checkout(client, p, logistics_selections=_select(vendor, "mystery", 700))
-    assert float(db.session.get(Order, res.get_json()["id"]).logistics_fee) == 700.0
+    assert res.status_code == 400 and res.get_json()["code"] == "DELIVERY_OPTION_INVALID"
+    assert Order.query.count() == 0
 
 
 # ── 6. Guest question to the seller ─────────────────────────────────────────

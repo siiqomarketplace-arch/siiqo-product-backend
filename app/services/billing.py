@@ -20,7 +20,7 @@ from dateutil.relativedelta import relativedelta
 
 from app.extensions import db
 
-PLAN_PRICES_NGN = {"PRO_MONTHLY": 1999, "PRO_ANNUAL": 19990}
+PLAN_PRICES_NGN = {"PRO_MONTHLY": 3000, "PRO_ANNUAL": 19990}
 MISMATCH_LIMIT = 3          # the first check plus 2 free retries
 REMINDER_DAYS_BEFORE = 3
 PAYSTACK_BASE_URL = "https://api.paystack.co"
@@ -50,7 +50,7 @@ def _get_plan(plan_name):
     from app.models.admin import SubscriptionPlan
     plan = SubscriptionPlan.query.filter_by(name=plan_name).first()
     if not plan:
-        plan = SubscriptionPlan(name=plan_name, price_ngn=PLAN_PRICES_NGN.get(plan_name, 1999),
+        plan = SubscriptionPlan(name=plan_name, price_ngn=PLAN_PRICES_NGN.get(plan_name, 3000),
                                 features={"verified_pro": True}, is_active=True)
         db.session.add(plan)
         db.session.flush()
@@ -251,7 +251,7 @@ def send_verified_pro_notice():
         user = db.session.get(User, sub.vendor_id)
         if user and _notify_once(
                 user, "Pro is now Verified Pro",
-                "Pro is becoming Verified Pro: ₦1,999/month or ₦19,990/year. You keep everything until your "
+                "Pro is becoming Verified Pro: ₦3,000/month or ₦19,990/year. You keep everything until your "
                 "current period ends. From your next renewal you'll pay the new price, and once verification "
                 "opens you can verify your identity to show the Verified mark and keep Pay on Delivery.",
                 email_subject="Pro is now Verified Pro | Siiqo"):

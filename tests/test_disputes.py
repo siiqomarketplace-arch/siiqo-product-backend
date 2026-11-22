@@ -154,9 +154,15 @@ def test_digital_delivery_and_rider_delivery_respect_dispute(client, paid, auth_
     p = paid(status=EscrowStatus.IN_ESCROW)
     product = make_product(p.store, product_type="digital", file_url="https://example.org/f.pdf")
     db.session.add(OrderItem(order_id=p.order.id, product_id=product.id, quantity=1, price_at_purchase=10000))
+    from app.models.partnerships import PartnerApplication
+    partner = make_user(role=UserRole.PARTNER)
+    partner.is_verified = True
+    db.session.add(PartnerApplication(user_id=partner.id, business_name="Riders Ltd", service_type="LOGISTICS",
+                                      status="APPROVED"))
     rider = make_user(role=UserRole.RIDER)
     rider.phone = "08030000000"
-    db.session.add(LogisticsAssignment(order_id=p.order.id, partner_id=rider.id, rider_phone=rider.phone))
+    db.session.add(LogisticsAssignment(order_id=p.order.id, partner_id=partner.id, rider_phone=rider.phone,
+                                       rider_user_id=rider.id, status="IN_TRANSIT"))
     db.session.commit()
     assert raise_dispute(client, auth_headers, p).status_code == 201
 
@@ -165,8 +171,10 @@ def test_digital_delivery_and_rider_delivery_respect_dispute(client, paid, auth_
     assert escrow.status == EscrowStatus.DISPUTED
     db.session.commit()
 
-    res = client.post(f"/api/rider/orders/{p.order.id}/deliver", headers=auth_headers(rider), json={})
-    assert res.status_code == 200, res.get_json()
+    escrow_code = EscrowTransaction.query.filter_by(order_id=p.order.id).first().escrow_code
+    res = client.post(f"/api/rider/orders/{p.order.id}/deliver", headers=auth_headers(rider),
+                      json={"delivery_code": escrow_code})
+    assert res.status_code == 409 and res.get_json()["code"] == "DISPUTE_OPEN", res.get_json()
     db.session.expire_all()
     assert EscrowTransaction.query.filter_by(order_id=p.order.id).first().status == EscrowStatus.DISPUTED
     assert credits(p.vendor.id) == []

@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.models.user import User, Storefront, UserRole
 from app.models.product import Product, Category, Catalog
 from app.models.order import Order, OrderItem, Cart, CartItem
@@ -504,11 +504,16 @@ def buyer_order_history():
                     verify = PaystackProvider().verify_transaction(
                         gateway_ref(escrow_check)
                     )
-                    if verify.get("success"):
+                    from app.routes.escrow import lock_escrow
+                    # Only an unpaid escrow is confirmed, once (row locked).
+                    escrow_check = lock_escrow(escrow_check) if verify.get("success") else None
+                    if escrow_check is not None and escrow_check.status == EscrowStatus.PENDING_PAYMENT:
                         escrow_check.status = EscrowStatus.IN_ESCROW
                         escrow_check.paid_at = escrow_check.paid_at or datetime.now(timezone.utc)
                         o.status = 'PAID'
-                        from app.routes.escrow import _deliver_digital_products, _deliver_service_products, _deliver_event_tickets
+                        from app.routes.escrow import (_deliver_digital_products, _deliver_service_products,
+                                                       _deliver_event_tickets, record_card_rail)
+                        record_card_rail(o, 'PAYSTACK')
                         if not _deliver_digital_products(o, escrow_check):
                             if not _deliver_service_products(o, escrow_check):
                                 _deliver_event_tickets(o, escrow_check)
@@ -522,7 +527,9 @@ def buyer_order_history():
         vendor_store = vendor.storefront if vendor else None
         escrow = EscrowTransaction.query.filter_by(order_id=o.id).first()
 
-        # Build items list so the buyer UI can show product names & quantities
+        # Build items list so the buyer UI can show product names & quantities.
+        # A paid file is only shown once the order is paid (or free).
+        o_paid = o.is_paid()
         items = [{
             "name": (item.product.name if item.product else "Product"),
             "product_name": (item.product.name if item.product else "Product"),
@@ -532,7 +539,7 @@ def buyer_order_history():
             "unit_price": float(item.price_at_purchase),
             "image": (item.product.images[0] if item.product and item.product.images else None),
             "product_type": (item.product.product_type if item.product else "physical") or "physical",
-            "file_url": (item.product.file_url if item.product else None),
+            "file_url": (item.product.file_url if item.product and o_paid else None),
             "booking_link": (item.product.booking_link if item.product else None),
         } for item in (o.items or [])]
 
@@ -586,13 +593,14 @@ def get_buyer_order_detail(order_id):
     if order.buyer_id != int(user_id):
         return jsonify({"message": "Unauthorized"}), 403
 
+    order_paid = order.is_paid()  # a paid file is only shown once the order is paid (or free)
     items = [{
         "product_name": item.product.name if item.product else "Unknown",
         "quantity": item.quantity,
         "unit_price": float(item.price_at_purchase),
         "image": (item.product.images[0] if item.product and item.product.images else None),
         "product_type": (item.product.product_type if item.product else "physical") or "physical",
-        "file_url": (item.product.file_url if item.product else None),
+        "file_url": (item.product.file_url if item.product and order_paid else None),
         "booking_link": (item.product.booking_link if item.product else None),
     } for item in (order.items or [])]
 
@@ -882,8 +890,10 @@ def upload_payment_proof(order_id):
 # ===========================================================================
 
 @bridge_bp.route('/auth/partner/login', methods=['POST'])
+@limiter.limit("10 per minute")
 def partner_login():
-    data = request.get_json() or {}
+    from app.services.logistics_partners import partner_access
+    data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip().lower()
     password = data.get('password', '')
 
@@ -891,23 +901,15 @@ def partner_login():
     if not user or not user.check_password(password):
         return jsonify({"message": "Invalid credentials"}), 401
 
-    if not user.is_active:
-        return jsonify({"message": "Account suspended"}), 403
-
-    if user.role not in [UserRole.PARTNER, UserRole.ADMIN]:
-        return jsonify({
-            "message": "This account does not have partner access. Apply at siiqo.com/partners/apply"
-        }), 403
+    # Only an approved (and not suspended) partner gets a portal token.
+    # Pending applicants are told their application is being reviewed.
+    access = partner_access(user)
+    if not access.ok:
+        return access.response()
 
     access_token = create_access_token(identity=str(user.id))
-    app_record = PartnerApplication.query.filter_by(user_id=user.id, status='APPROVED').first()
-
-    # Calculate real lifetime earnings from completed deliveries
-    from sqlalchemy import func
-    from app.models.escrow import LogisticsAssignment
-    total_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter_by(
-        partner_id=user.id, status='DELIVERED'
-    ).scalar() or 0.0
+    from app.services.logistics_flow import partner_earnings
+    money = partner_earnings(user.id)
 
     return jsonify({
         "access_token": access_token,
@@ -915,9 +917,10 @@ def partner_login():
             "id": user.id,
             "email": user.email,
             "name": user.full_name,
-            "partner_role": app_record.service_type if app_record else "LOGISTICS",
+            "business_name": access.application.business_name,
+            "partner_role": access.application.service_type or "LOGISTICS",
             "status": "ACTIVE",
-            "wallet_balance": float(total_earned),
+            "wallet_balance": float(money["available"]),
         },
     }), 200
 
@@ -1244,6 +1247,10 @@ def paystack_webhook():
                         status=EscrowStatus.PENDING_PAYMENT,
                     ).first()
 
+                # Lock the row first: a webhook retry and a status poll can't
+                # both confirm (and pay out) the same payment.
+                from app.routes.escrow import lock_escrow
+                escrow = lock_escrow(escrow)
                 if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
                     escrow.status = EscrowStatus.IN_ESCROW
                     escrow.paid_at = escrow.paid_at or _utcnow()
@@ -1251,6 +1258,8 @@ def paystack_webhook():
                     # backward-compat with the release route
                     escrow.payscrow_transaction_id = reference
                     order.status = 'PAID'
+                    from app.routes.escrow import record_card_rail
+                    record_card_rail(order, 'PAYSTACK')
 
                     # Flush so updates are visible to delivery helpers
                     db.session.flush()
@@ -1265,25 +1274,8 @@ def paystack_webhook():
                         is_event = _deliver_event_tickets(order, escrow)
 
                     if not is_digital and not is_service and not is_event:
-                        # Physical goods: Activate logistics assignment if pending
-                        from app.models.escrow import LogisticsAssignment
-                        assignment = LogisticsAssignment.query.filter_by(
-                            order_id=order.id
-                        ).first()
-                        if assignment and assignment.status == 'PENDING':
-                            assignment.status = 'ASSIGNED'
-                            assignment.assigned_at = _utcnow()
-                            db.session.add(Notification(
-                                user_id=assignment.partner_id,
-                                title="New Delivery Assignment",
-                                message=(
-                                    f"New delivery for Order #{order.id}. "
-                                    f"Fee: ₦{assignment.delivery_fee:,.2f}."
-                                ),
-                                type="DELIVERY",
-                                order_id=order.id,
-                            ))
-
+                        # A partner delivery job (if any) was assigned by the flush
+                        # hook when paid_at was set (app/services/logistics_flow.py).
                         if order.buyer_id:
                             db.session.add(Notification(
                                 user_id=order.buyer_id,
@@ -1634,12 +1626,16 @@ def my_referral_stats():
 # ===========================================================================
 
 @bridge_bp.route('/partners/apply', methods=['POST'])
+@limiter.limit("5 per minute; 20 per hour")
 def apply_for_partnership():
-    data = request.get_json() or {}
+    from app.services.delivery import DeliveryError
+    from app.services.logistics_partners import clean_coverage
+
+    data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip().lower()
-    password = data.get('password', '')
-    fullname = (data.get('fullname') or '').strip()
-    business_name = (data.get('business_name') or fullname or '').strip()
+    password = data.get('password', '') or ''
+    fullname = (data.get('fullname') or data.get('full_name') or '').strip()[:120]
+    business_name = (data.get('business_name') or fullname or '').strip()[:255]
 
     service_type = (data.get('partner_role') or data.get('service_type') or 'LOGISTICS').strip().upper()
     # Siiqo doesn't give or arrange loans or funding, so financing partners
@@ -1650,21 +1646,50 @@ def apply_for_partnership():
             "message": "Siiqo no longer takes financing partners. Siiqo doesn't give grants, loans or funding.",
         }), 400
 
-    if not email or not password:
+    if not email or '@' not in email or not password:
         return jsonify({"message": "Email and password are required"}), 400
-
+    if len(password) < 8:
+        return jsonify({"message": "Password must be at least 8 characters"}), 400
     if not business_name:
         return jsonify({"message": "Business name is required"}), 400
 
-    if User.query.filter_by(email=email).first():
+    # Where the partner delivers and its price per area (logistics only).
+    coverage = None
+    if service_type == 'LOGISTICS':
+        raw_cov = data.get('coverage')
+        if raw_cov is None and data.get('states'):
+            # Simple form: a list of states with one price for all of them.
+            raw_cov = [{"state": st, "price": data.get('base_price') or data.get('price')}
+                       for st in (data.get('states') or []) if st]
+        try:
+            coverage = clean_coverage(raw_cov)
+        except DeliveryError as e:
+            return jsonify({"code": e.code, "message": e.message}), e.status
+
+    if User.query.filter(db.func.lower(User.email) == email).first():
         return jsonify({"message": "An account with this email already exists"}), 409
 
-    names = fullname.split(' ', 1)
+    # Payout bank: the account name always comes from the bank, never the form.
+    bank_code = str(data.get('bank_code') or '').strip()[:20]
+    account_number = ''.join(ch for ch in str(data.get('account_number') or '') if ch.isdigit())
+    bank_name = str(data.get('bank_name') or '').strip()[:100] or None
+    account_name = None
+    if bank_code or account_number:
+        if not bank_code or len(account_number) != 10:
+            return jsonify({"message": "Enter your bank and 10-digit account number."}), 400
+        from app.services.bank_resolve import resolve_account
+        resolved = resolve_account(bank_code, account_number)
+        if resolved.rejected:
+            return jsonify({"code": "BANK_NOT_FOUND",
+                            "message": "We couldn't find that bank account. Check the bank and number."}), 400
+        account_name = resolved["account_name"] if resolved.resolved else None
+
+    names = fullname.split(' ', 1) if fullname else [business_name]
     new_user = User(
         email=email,
-        first_name=names[0],
-        last_name=names[1] if len(names) > 1 else '',
-        phone=data.get('phone'),
+        first_name=names[0][:60],
+        last_name=(names[1] if len(names) > 1 else '')[:60],
+        phone=(str(data.get('phone') or '').strip()[:20] or None),
         role=UserRole.PARTNER,
         is_verified=False,
         is_active=True,
@@ -1675,7 +1700,7 @@ def apply_for_partnership():
 
     raw_exp = data.get('experience_years') or data.get('experience') or 0
     try:
-        exp_years = int("".join(filter(str.isdigit, str(raw_exp))) or 0)
+        exp_years = min(80, int("".join(filter(str.isdigit, str(raw_exp))) or 0))
     except Exception:
         exp_years = 0
 
@@ -1683,23 +1708,64 @@ def apply_for_partnership():
         user_id=new_user.id,
         business_name=business_name,
         service_type=service_type,
+        provider_type='siiqo_partner',
         experience_years=exp_years,
-        state_of_operation=data.get('state') or data.get('state_of_operation'),
+        portfolio_url=(str(data.get('portfolio_url') or '').strip()[:255] or None),
+        state_of_operation=(", ".join(c["state"] for c in coverage)[:100] if coverage
+                            else (str(data.get('state') or data.get('state_of_operation') or '')[:100] or None)),
+        pricing_settings={"coverage": coverage} if coverage else {},
+        bank_code=bank_code or None,
+        account_number=account_number or None,
+        account_name=account_name,
+        bank_name=bank_name,
         status='PENDING',
     )
     db.session.add(partner_app)
     db.session.commit()
 
     return jsonify({
-        "message": "Application submitted. We'll review and get back to you within 48 hours.",
+        "message": "Application submitted. We'll review it and email you within 48 hours.",
         "status": "success",
+        "bank_verified": bool(account_name),
+        "account_name": account_name,
     }), 201
+
+
+@bridge_bp.route('/partners/forgot-password', methods=['POST'])
+def partner_forgot_password():
+    """Partners and riders reset their password with the same email code as everyone."""
+    from app.routes.auth import forgot_password
+    return forgot_password()
+
+
+@bridge_bp.route('/partners/reset-password', methods=['POST'])
+def partner_reset_password():
+    from app.routes.auth import reset_password
+    return reset_password()
 
 
 @bridge_bp.route('/partners/active', methods=['GET'])
 def get_active_partners():
     from app.routes.logistics import get_active_partners as _get_active
     return _get_active()
+
+
+@bridge_bp.route('/partners/me', methods=['GET'])
+@jwt_required()
+def partner_me():
+    """Where the partner's application stands (works before approval too)."""
+    from app.services.logistics_partners import latest_application, partner_access
+    user = db.session.get(User, int(get_jwt_identity()))
+    access = partner_access(user)
+    app_row = latest_application(user.id) if user else None
+    return jsonify({
+        "status": "success",
+        "access": access.ok,
+        "code": access.code,
+        "message": access.message,
+        "application_status": app_row.status if app_row else None,
+        "business_name": app_row.business_name if app_row else None,
+    }), 200
 
 
 @bridge_bp.route('/vendor/logistics/settings', methods=['GET', 'POST'])
@@ -1710,230 +1776,187 @@ def partner_vendor_logistics_settings():
     if not user:
         return jsonify({"message": "Unauthorized"}), 401
 
-    if user.role == UserRole.PARTNER:
-        app = PartnerApplication.query.filter_by(user_id=user.id, status='APPROVED').first()
-        if not app:
-            return jsonify({"message": "Approved partnership required"}), 403
-
-        if request.method == 'GET':
-            pricing = app.pricing_settings or {}
-            return jsonify({
-                "status": "success",
-                "data": {
-                    "pricing_model": pricing.get('pricing_model', 'FLAT'),
-                    "flat_rate": pricing.get('flat_rate', ''),
-                    "base_fee": pricing.get('base_fee', ''),
-                    "per_km_fee": pricing.get('per_km_fee', ''),
-                    "external_api_key": pricing.get('external_api_key', ''),
-                    "bank_code": app.bank_code or '',
-                    "account_number": app.account_number or '',
-                    "account_name": app.account_name or '',
-                }
-            }), 200
-
-        data = request.get_json() or {}
-        # Build a fresh copy — mutating the existing dict in-place won't trigger
-        # SQLAlchemy's change detection for JSON columns.
-        pricing = dict(app.pricing_settings or {})
-        if 'pricing_model' in data:
-            pricing['pricing_model'] = data['pricing_model']
-        if 'flat_rate' in data:
-            pricing['flat_rate'] = data['flat_rate']
-        if 'base_fee' in data:
-            pricing['base_fee'] = data['base_fee']
-        if 'per_km_fee' in data:
-            pricing['per_km_fee'] = data['per_km_fee']
-        if 'external_api_key' in data:
-            pricing['external_api_key'] = data['external_api_key']
-        # Assign the new dict object so SQLAlchemy detects the change
-        app.pricing_settings = pricing
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(app, 'pricing_settings')
-
-        if 'bank_code' in data:
-            app.bank_code = data['bank_code']
-        if 'account_number' in data:
-            app.account_number = data['account_number']
-        if 'account_name' in data:
-            app.account_name = data['account_name']
-
-        db.session.commit()
-        return jsonify({"message": "Settings updated", "status": "success"}), 200
-
-    else:
+    if user.role != UserRole.PARTNER:
         # Delegate to standard vendor logistics preferences route
         from app.routes.logistics import vendor_logistics_settings as _vendor_settings
         return _vendor_settings()
+
+    from app.services.delivery import DeliveryError
+    from app.services.logistics_partners import clean_coverage, partner_access, partner_coverage
+    access = partner_access(user)
+    if not access.ok:
+        return access.response()
+    app = access.application
+
+    if request.method == 'GET':
+        pricing = app.pricing_settings or {}
+        return jsonify({
+            "status": "success",
+            "data": {
+                "business_name": app.business_name,
+                "coverage": partner_coverage(app),
+                "pricing_model": pricing.get('pricing_model', 'FLAT'),
+                "flat_rate": pricing.get('flat_rate', ''),
+                "base_fee": pricing.get('base_fee', ''),
+                "per_km_fee": pricing.get('per_km_fee', ''),
+                "bank_code": app.bank_code or '',
+                "bank_name": app.bank_name or '',
+                "account_number": app.account_number or '',
+                "account_name": app.account_name or '',
+            }
+        }), 200
+
+    data = request.get_json(silent=True) or {}
+    # Build a fresh copy — mutating the existing dict in-place won't trigger
+    # SQLAlchemy's change detection for JSON columns.
+    pricing = dict(app.pricing_settings or {})
+    if 'coverage' in data:
+        try:
+            pricing['coverage'] = clean_coverage(data.get('coverage'))
+        except DeliveryError as e:
+            return jsonify({"code": e.code, "message": e.message}), e.status
+        app.state_of_operation = ", ".join(c["state"] for c in pricing['coverage'])[:100]
+    for key in ('pricing_model', 'flat_rate', 'base_fee', 'per_km_fee'):
+        if key in data:
+            pricing[key] = data[key]
+    app.pricing_settings = pricing
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(app, 'pricing_settings')
+
+    if 'business_name' in data and str(data.get('business_name') or '').strip():
+        app.business_name = str(data['business_name']).strip()[:255]
+
+    if 'bank_code' in data or 'account_number' in data:
+        bank_code = str(data.get('bank_code') or app.bank_code or '').strip()[:20]
+        account_number = ''.join(ch for ch in str(data.get('account_number') or app.account_number or '')
+                                 if ch.isdigit())
+        if not bank_code or len(account_number) != 10:
+            return jsonify({"message": "Enter your bank and 10-digit account number."}), 400
+        from app.services.bank_resolve import resolve_account
+        resolved = resolve_account(bank_code, account_number)
+        if resolved.rejected:
+            return jsonify({"code": "BANK_NOT_FOUND",
+                            "message": "We couldn't find that bank account. Check the bank and number."}), 400
+        app.bank_code, app.account_number = bank_code, account_number
+        app.account_name = resolved["account_name"] if resolved.resolved else None
+        if 'bank_name' in data:
+            app.bank_name = str(data.get('bank_name') or '').strip()[:100] or None
+
+    db.session.commit()
+    return jsonify({"message": "Settings updated", "status": "success",
+                    "coverage": partner_coverage(app)}), 200
 
 
 @bridge_bp.route('/partners/dashboard/assignments', methods=['GET'])
 @jwt_required()
 def partner_dashboard_assignments():
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    if not user or user.role != UserRole.PARTNER:
-        return jsonify({"message": "Partner access required"}), 403
+    from app.services.logistics_partners import partner_access
+    from app.services.logistics_flow import assignment_public
+    user = db.session.get(User, int(get_jwt_identity()))
+    access = partner_access(user)
+    if not access.ok:
+        return access.response()
 
     from app.models.escrow import LogisticsAssignment
-    assignments = LogisticsAssignment.query.filter_by(partner_id=user_id).order_by(
-        LogisticsAssignment.created_at.desc()
-    ).all()
-
-    result = []
-    for a in assignments:
-        order = a.order
-        vendor = order.vendor if order else None
-        sf = vendor.storefront if vendor else None
-
-        result.append({
-            "id": a.id,
-            "order_id": a.order_id,
-            "status": a.status,
-            "vendor": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
-            "vendor_name": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
-            "vendor_phone": (sf.phone or vendor.phone) if sf else (vendor.phone if vendor else ""),
-            "vendor_id": vendor.id if vendor else None,
-            "destination": order.delivery_address if order and order.delivery_address else (order.delivery_city if order else "N/A"),
-            "delivery_address": order.delivery_address if order else "N/A",
-            "city": order.delivery_city if order else "",
-            "fee": float(a.delivery_fee),
-            "delivery_fee": float(a.delivery_fee),
-            "date": a.created_at.strftime('%d %b %Y') if a.created_at else "",
-            "created_at": a.created_at.isoformat() if a.created_at else None,
-            "buyer_name": order.buyer.full_name if order and order.buyer else "N/A",
-            "buyer_phone": order.buyer.phone if order and order.buyer else "",
-        })
-
-    return jsonify({"status": "success", "data": result}), 200
+    # Jobs waiting for the buyer's payment (PENDING) stay hidden: the partner
+    # sees the buyer's address only once the order is paid and assigned.
+    assignments = LogisticsAssignment.query.filter(
+        LogisticsAssignment.partner_id == user.id, LogisticsAssignment.status != 'PENDING'
+    ).order_by(LogisticsAssignment.created_at.desc()).limit(500).all()
+    return jsonify({"status": "success", "data": [assignment_public(a) for a in assignments]}), 200
 
 
 @bridge_bp.route('/partners/earnings', methods=['GET'])
 @jwt_required()
 def partner_earnings():
-    """Return real lifetime earnings for a partner from completed deliveries."""
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    if not user or user.role != UserRole.PARTNER:
-        return jsonify({"message": "Partner access required"}), 403
-
-    from sqlalchemy import func
-    from app.models.escrow import LogisticsAssignment
-
-    total_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter_by(
-        partner_id=user_id, status='DELIVERED'
-    ).scalar() or 0.0
-
-    pending_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter(
-        LogisticsAssignment.partner_id == int(user_id),
-        LogisticsAssignment.status.in_(['ASSIGNED', 'IN_TRANSIT']),
-    ).scalar() or 0.0
-
-    completed_count = LogisticsAssignment.query.filter_by(
-        partner_id=user_id, status='DELIVERED'
-    ).count()
-
+    """Earned = delivered jobs whose payment is final (Safe Pay released, or
+    Pay on Delivery cash confirmed). Pending = jobs still on the way or
+    waiting for the buyer to confirm."""
+    from app.services.logistics_partners import partner_access
+    from app.services.logistics_flow import partner_earnings as _earnings
+    user = db.session.get(User, int(get_jwt_identity()))
+    access = partner_access(user)
+    if not access.ok:
+        return access.response()
+    money = _earnings(user.id)
     return jsonify({
         "status": "success",
-        "total_earned": float(total_earned),
-        "pending_earned": float(pending_earned),
-        "completed_deliveries": completed_count,
+        "total_earned": float(money["earned"]),
+        "pending_earned": float(money["pending"]),
+        "withdrawn": float(money["withdrawn"]),
+        "available": float(money["available"]),
+        "completed_deliveries": money["completed_deliveries"],
         "currency": "NGN",
     }), 200
+
+
+def _rider_user():
+    user = db.session.get(User, int(get_jwt_identity()))
+    if not user or user.role != UserRole.RIDER or not user.is_active:
+        return None
+    return user
 
 
 @bridge_bp.route('/rider/dashboard', methods=['GET'])
 @jwt_required()
 def rider_dashboard():
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    if not user or user.role != UserRole.RIDER:
+    user = _rider_user()
+    if not user:
         return jsonify({"message": "Rider access required"}), 403
 
     from app.models.escrow import LogisticsAssignment
-    
-    # Find assignments where rider's phone number matches
+    from app.services.logistics_flow import assignment_public
+    # Linked by the rider's user id (never by phone number).
     assignments = LogisticsAssignment.query.filter(
-        LogisticsAssignment.rider_phone == user.phone
-    ).order_by(LogisticsAssignment.created_at.desc()).all()
+        LogisticsAssignment.rider_user_id == user.id
+    ).order_by(LogisticsAssignment.created_at.desc()).limit(200).all()
 
     orders_data = []
     for a in assignments:
-        order = a.order
-        vendor = order.vendor if order else None
-        sf = vendor.storefront if vendor else None
-        buyer = order.buyer if order else None
-        
-        orders_data.append({
-            "id": order.id if order else a.order_id,
-            "pickup_address": sf.address if sf else "N/A",
-            "delivery_address": order.delivery_address if order else "N/A",
-            "buyer_name": buyer.full_name if buyer else "N/A",
-            "buyer_phone": buyer.phone if buyer else "",
-            "vendor_name": sf.store_name if sf else (vendor.full_name if vendor else "N/A"),
-            "vendor_phone": sf.phone if sf else (vendor.phone if vendor else ""),
-            "status": a.status,
-        })
+        row = assignment_public(a, for_rider=True)
+        row["assignment_id"] = a.id
+        row["id"] = a.order_id          # older rider screen keys rows by order id
+        orders_data.append(row)
 
     return jsonify({
         "status": "success",
-        "rider": {
-            "name": user.full_name,
-            "email": user.email,
-        },
-        "orders": orders_data
+        "rider": {"name": user.full_name, "email": user.email},
+        "orders": orders_data,
     }), 200
+
+
+def _rider_move(order_id, default_status):
+    user = _rider_user()
+    if not user:
+        return jsonify({"message": "Rider access required"}), 403
+    from app.models.escrow import LogisticsAssignment
+    from app.services.logistics_flow import FlowError, assignment_public, move
+    assignment = LogisticsAssignment.query.filter_by(order_id=order_id, rider_user_id=user.id).first()
+    if not assignment:
+        return jsonify({"message": "Delivery not found for this rider"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        move(assignment, data.get('status') or default_status, user, data)
+    except FlowError as e:
+        db.session.rollback()
+        return e.response()
+    return jsonify({"status": "success", "message": f"Delivery updated: {assignment.status}",
+                    "assignment": assignment_public(assignment, for_rider=True)}), 200
 
 
 @bridge_bp.route('/rider/orders/<int:order_id>/deliver', methods=['POST'])
 @jwt_required()
 def rider_mark_delivered(order_id):
-    from datetime import datetime, timezone
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    if not user or user.role != UserRole.RIDER:
-        return jsonify({"message": "Rider access required"}), 403
+    """Needs the buyer's delivery code (delivery_code / delivery_otp)."""
+    return _rider_move(order_id, 'DELIVERED')
 
-    from app.models.escrow import LogisticsAssignment
-    assignment = LogisticsAssignment.query.filter_by(
-        order_id=order_id, rider_phone=user.phone
-    ).first()
-    if not assignment:
-        return jsonify({"message": "Assignment not found for this rider"}), 404
 
-    data = request.get_json() or {}
-    # Secure OTP verification for escrow transactions
-    if assignment.order and assignment.order.payment_method == 'ESCROW':
-        escrow = assignment.order.escrow
-        if escrow:
-            provided_otp = str(data.get('delivery_otp') or '').strip()
-            actual_otp = str(escrow.escrow_code or '').strip()
-            if not actual_otp or provided_otp != actual_otp:
-                return jsonify({"message": "Invalid delivery OTP. Please verify with the buyer."}), 400
+@bridge_bp.route('/rider/orders/<int:order_id>/status', methods=['POST', 'PATCH'])
+@jwt_required()
+def rider_update_status(order_id):
+    """{status: PICKED_UP | IN_TRANSIT | DELIVERED, delivery_code, proof_photo_url}"""
+    return _rider_move(order_id, '')
 
-    # Update assignment and order status to DELIVERED
-    assignment.status = 'DELIVERED'
-    assignment.delivered_at = datetime.now(timezone.utc)
-    if assignment.order and assignment.order.escrow:
-        # Only a held payment moves to DELIVERED; never a disputed, released
-        # or refunded one (auto-release pays out DELIVERED escrows).
-        if assignment.order.escrow.status in ('IN_ESCROW', 'SHIPPED'):
-            assignment.order.escrow.status = 'DELIVERED'
-
-        # Notify buyer
-        from app.models.communication import Notification
-        db.session.add(Notification(
-            user_id=assignment.order.buyer_id,
-            title="Your Order Has Been Delivered",
-            message=(
-                f"Order #{assignment.order.id} has been delivered. "
-                "Please confirm receipt to release payment to the vendor."
-            ),
-            type="ORDER",
-            order_id=assignment.order.id,
-        ))
-
-    db.session.commit()
-    return jsonify({"status": "success", "message": "Order marked as delivered"}), 200
 
 # ===========================================================================
 # VENDOR CRYPTO WALLET  — bridge aliases
@@ -1987,13 +2010,13 @@ PLAN_CATALOGUE = [
     },
     {
         "name": "PRO_MONTHLY",
-        "price_ngn": 1999,
+        "price_ngn": 3000,
         "billing": "monthly",
         "label": "Verified Pro",
         "tagline": "Get verified and unlock Pro tools",
         "features": _verified_pro_features(),
         "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
-        "cta": "Get Verified Pro — ₦1,999/mo",
+        "cta": "Get Verified Pro — ₦3,000/mo",
         "highlight": True,
     },
     {
@@ -2001,7 +2024,7 @@ PLAN_CATALOGUE = [
         "price_ngn": 19990,
         "billing": "annual",
         "label": "Verified Pro (yearly)",
-        "tagline": "Two months free",
+        "tagline": "Save 44%",
         "features": _verified_pro_features(),
         "transaction_fee_pct": float(PLATFORM_FEE_PERCENT),
         "cta": "Get Verified Pro — ₦19,990/yr",

@@ -9,6 +9,16 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def _name_status(acc) -> str:
+    from app.services.payout_account_name import name_status
+    return name_status(acc)
+
+
+def _mask(number) -> str:
+    from app.utils.log_mask import mask_account
+    return mask_account(number)
+
+
 class VendorBankAccount(db.Model):
     """Store vendor bank account details for payouts"""
     __tablename__ = 'vendor_bank_accounts'
@@ -19,7 +29,9 @@ class VendorBankAccount(db.Model):
     bank_name = db.Column(db.String(100), nullable=False)
     bank_code = db.Column(db.String(10), nullable=False)
     account_number = db.Column(db.String(20), nullable=False)
-    account_name = db.Column(db.String(255), nullable=False)
+    # Only ever a name returned by a bank lookup; NULL while the name is pending
+    # (app/services/payout_account_name.py).
+    account_name = db.Column(db.String(255), nullable=True)
 
     recipient_code = db.Column(db.String(100), nullable=True, unique=True)
     paystack_subaccount_code = db.Column(db.String(100), nullable=True)
@@ -43,6 +55,9 @@ class VendorBankAccount(db.Model):
             'account_number': self.account_number,
             'account_name': self.account_name,
             'is_verified': self.is_verified,
+            # "verified" = name confirmed by the bank; "pending" = payouts wait.
+            'name_status': _name_status(self),
+            'account_number_masked': _mask(self.account_number),
             'is_default': self.is_default,
             'paystack_subaccount_code': self.paystack_subaccount_code,
             'flw_subaccount_id': self.flw_subaccount_id,
@@ -286,7 +301,7 @@ class DayaPayment(db.Model):
     # "ngn_onramp" or "crypto_direct"
     payment_type = db.Column(db.String(20), nullable=False)
 
-    daya_funding_account_id = db.Column(db.String(100), nullable=True)
+    daya_funding_account_id = db.Column(db.String(100), nullable=True, index=True)  # webhook lookup
     daya_rate_id    = db.Column(db.String(100), nullable=True)
     rate_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
 

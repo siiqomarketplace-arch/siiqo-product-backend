@@ -141,9 +141,11 @@ class Ledger(db.Model):
     a refund is issued, or a fee is charged.
     """
     __tablename__ = 'ledgers'
+    # Balance sums and duplicate-credit/debit checks look up (vendor, reference).
+    __table_args__ = (db.Index('ix_ledgers_vendor_id_reference_id', 'vendor_id', 'reference_id'),)
 
     id = db.Column(db.Integer, primary_key=True)
-    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
 
     transaction_type = db.Column(db.String(50), nullable=False)
     # CREDIT (payout), DEBIT (refund/fee)

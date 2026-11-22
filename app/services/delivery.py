@@ -9,8 +9,8 @@ The seller sets ``storefronts.delivery_settings``::
      "pickup": {"enabled": bool, "area": "Wuse 2, Abuja"}}  # an area, never a full address
 
 At checkout the server prices the chosen option itself; the fee the browser
-sends is never trusted for the seller's own delivery or pickup, and is clamped
-to the partner's minimum for Siiqo partners.
+sends is never trusted. Siiqo partners are priced from their coverage list
+(app/services/logistics_partners.py).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 MAX_FEE = 500_000
 MAX_DAYS = 30
 MAX_AREA = 120
-PARTNER_MARKUP = 1.10           # as cart.py: the partner is paid fee / 1.10
+PARTNER_MARKUP = 1.10           # buyer pays partner price x 1.10; the partner earns its price
 PARTNER_MAX_FEE = 200_000
 PICKUP_IDS = ("pickup", "self_pickup")
 VENDOR_SELF_ID = "vendor_self"
@@ -143,54 +143,32 @@ def vendor_self_fee(sf, delivery_city, delivery_state) -> float:
     return float(fee)
 
 
-def partner_min_fee(partner_id: int) -> float:
-    """Lowest fee a buyer can pay for a Siiqo partner: its flat rate (FLAT) or
-    base fee (other models), with the 10% markup. Same defaults as
-    GET /api/logistics/active."""
-    pricing = {}
-    if partner_id:
-        from app.models.partnerships import PartnerApplication
-        app_row = PartnerApplication.query.filter_by(user_id=partner_id, status="APPROVED").first()
-        pricing = (app_row.pricing_settings if app_row and isinstance(app_row.pricing_settings, dict) else {}) or {}
-        model = (pricing.get("pricing_model") or "FLAT").upper()
-        try:
-            base = float(pricing.get("flat_rate") or 1500) if model == "FLAT" else float(pricing.get("base_fee") or 1000)
-        except (TypeError, ValueError):
-            base = 1500.0
-    else:
-        base = 1500.0   # "Siiqo Standard Delivery" fallback option
-    return round(max(0.0, base) * PARTNER_MARKUP, 2)
-
-
-def price_option(option: dict, sf, delivery_city, delivery_state) -> tuple[float, str | None]:
-    """(fee, provider id) for one vendor's chosen logistics option."""
+def price_option(option: dict, sf, delivery_city, delivery_state, delivery_lga=None):
+    """(fee, option id, provider quote or None) for one vendor's chosen
+    delivery option, priced by the server. The fee the browser sends is never
+    used. Raises DeliveryError when the option isn't available."""
     option = option if isinstance(option, dict) else {}
     opt_id = option.get("id")
     opt_id = str(opt_id).strip() if opt_id is not None else None
-    try:
-        client_fee = max(0.0, float(option.get("fee", 0.0)))
-        if not math.isfinite(client_fee):
-            client_fee = 0.0
-    except (TypeError, ValueError):
-        client_fee = 0.0
 
     if opt_id == VENDOR_SELF_ID:
-        return vendor_self_fee(sf, delivery_city, delivery_state), opt_id
+        return vendor_self_fee(sf, delivery_city, delivery_state), opt_id, None
 
     if opt_id in PICKUP_IDS:
         ds = getattr(sf, "delivery_settings", None)
         if isinstance(ds, dict) and not ((ds.get("pickup") or {}).get("enabled")):
             raise DeliveryError("PICKUP_NOT_AVAILABLE", "This seller doesn't offer pickup.")
-        return 0.0, opt_id
+        return 0.0, opt_id, None
 
-    if opt_id and opt_id.startswith(PARTNER_PREFIX):
-        pid = opt_id[len(PARTNER_PREFIX):]
-        minimum = partner_min_fee(int(pid)) if pid.isdigit() else partner_min_fee(0)
-        fee = min(max(client_fee, minimum), PARTNER_MAX_FEE)
-        if fee != client_fee:
-            log.warning("checkout: partner fee %.2f for %s adjusted to %.2f", client_fee, opt_id, fee)
-        return round(fee, 2), opt_id
+    if not opt_id:
+        return 0.0, None, None
 
-    if client_fee > 0:
-        log.warning("checkout: unknown logistics option %r with fee %.2f kept as sent", opt_id, client_fee)
-    return client_fee, opt_id
+    # Siiqo partners (and, later, API couriers): app/services/logistics_partners.py
+    from app.services.logistics_partners import quote_selected
+    quote = quote_selected(opt_id, sf, delivery_state, delivery_city, delivery_lga)
+    if quote is not None:
+        return quote.fee, quote.id, quote
+
+    log.warning("checkout: unknown delivery option %r refused", opt_id)
+    raise DeliveryError("DELIVERY_OPTION_INVALID",
+                        "That delivery option is not available. Please choose another one.")

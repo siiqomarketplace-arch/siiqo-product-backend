@@ -40,6 +40,7 @@ from . import seller_report  # noqa: F401  (Report this seller)
 from . import assistant  # noqa: F401  (Phase 4: store concierge and seller copilot)
 from . import verification_requirement  # noqa: F401  (Phase 4: mandatory verification holds)
 from . import location  # noqa: F401  (Shop location by NIPOST postcode)
+from . import growth  # noqa: F401  (signup source, activation, batched broadcasts)
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',

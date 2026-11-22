@@ -7,6 +7,8 @@ ACCT = "0123456789"
 
 
 class _Resp:
+    status_code = 200
+
     def json(self):
         return {"status": True, "data": {"account_name": "ADA OBI", "account_number": ACCT}}
 
@@ -19,6 +21,7 @@ def _fake_get(calls):
 
 
 def test_post_resolves_from_json_body(client, monkeypatch):
+    monkeypatch.setenv("PAYSTACK_SECRET_KEY", "sk_test_dummy")
     calls = []
     monkeypatch.setattr(wd.requests, "get", _fake_get(calls))
     res = client.post("/api/withdrawal/banks/resolve", json={"account_number": ACCT, "bank_code": "058"})
@@ -34,6 +37,7 @@ def test_post_validates_body(client):
 
 
 def test_get_still_works_and_logs_without_number(client, monkeypatch, caplog):
+    monkeypatch.setenv("PAYSTACK_SECRET_KEY", "sk_test_dummy")
     monkeypatch.setattr(wd.requests, "get", _fake_get([]))
     with caplog.at_level(logging.INFO):
         res = client.get("/api/withdrawal/banks/resolve",

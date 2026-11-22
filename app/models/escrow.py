@@ -30,7 +30,7 @@ class EscrowTransaction(db.Model):
         db.String(100), unique=True, nullable=False, index=True,
         default=lambda: f"ESC-{uuid.uuid4().hex[:12].upper()}"
     )
-    status = db.Column(db.String(50), default=EscrowStatus.PENDING_PAYMENT, nullable=False)
+    status = db.Column(db.String(50), default=EscrowStatus.PENDING_PAYMENT, nullable=False, index=True)
 
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     fee_percent = db.Column(db.Numeric(5, 2), default=3.00)    # Siiqo's cut (app/services/fees.py)
@@ -130,7 +130,8 @@ class EscrowTransaction(db.Model):
             )
 
         downloads = []
-        if self.status == EscrowStatus.RELEASED or (self.order and self.order.status == 'COMPLETED'):
+        if self.status == EscrowStatus.RELEASED or (
+                self.order and self.order.status == 'COMPLETED' and self.order.is_paid()):
             if link_ptype == 'digital' and link_file_url:
                 downloads.append({
                     "product_name": (self.order.payment_link.title if getattr(self.order, 'payment_link', None) else "Digital Item"),
@@ -199,18 +200,40 @@ class LogisticsAssignment(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), unique=True, nullable=False)
-    partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
 
     status = db.Column(db.String(50), default='PENDING', nullable=False)
-    # PENDING → ASSIGNED → IN_TRANSIT → DELIVERED
+    # PENDING (awaiting payment) → ASSIGNED (paid, awaiting pickup) → PICKED_UP
+    # → IN_TRANSIT → DELIVERED; CANCELLED when the order is cancelled/refunded.
+    # See app/services/logistics_flow.py.
+
+    # 'siiqo_partner' today; an API courier later (app/services/logistics_partners.py).
+    provider_type = db.Column(db.String(30), nullable=True, default='siiqo_partner')
 
     rider_name = db.Column(db.String(100), nullable=True)
     rider_phone = db.Column(db.String(20), nullable=True)
+    # The rider's login (users.id) and staff row; riders see only their own jobs.
+    rider_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
+    staff_id = db.Column(db.Integer, db.ForeignKey('partner_staff.id'), nullable=True)
     tracking_link = db.Column(db.String(255), nullable=True)
     delivery_fee = db.Column(db.Numeric(10, 2), default=0.00)
 
     assigned_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    picked_up_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    in_transit_at = db.Column(db.DateTime(timezone=True), nullable=True)
     delivered_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    cancelled_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # Optional photo taken at handover (S3 URL from the upload helper).
+    proof_photo_url = db.Column(db.String(500), nullable=True)
+
+    # Wrong buyer-code guesses: at most CODE_MAX_ATTEMPTS per hour, then locked.
+    code_attempts = db.Column(db.Integer, nullable=False, default=0)
+    code_window_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    code_locked_until = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Pay-on-delivery orders have no Safe Pay code: a handover code is sent to
+    # the buyer instead and only its keyed hash is kept.
+    handover_code_hash = db.Column(db.String(64), nullable=True)
 
     # Real-time coordinates telemetry (polling-based)
     current_latitude = db.Column(db.Numeric(9, 6), nullable=True)
@@ -223,3 +246,4 @@ class LogisticsAssignment(db.Model):
     # Relationships
     order = db.relationship('Order')
     partner = db.relationship('User', foreign_keys=[partner_id])
+    rider_user = db.relationship('User', foreign_keys=[rider_user_id])

@@ -74,7 +74,7 @@ def transfers(monkeypatch):
 def _order(make_vendor, make_product, make_order, currency, payment_method="FLUTTERWAVE",
            amount=100, fee=3, status=EscrowStatus.IN_ESCROW, product_type="digital", prefix="FLW-PL"):
     vendor, store = make_vendor()
-    db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
+    db.session.add(VendorBankAccount(is_verified=True, vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
                                      account_number="0000000000", account_name="Test Vendor", is_default=True))
     product = make_product(store, price=amount, product_type=product_type, file_url="https://files.example/x.pdf")
     order = make_order(vendor, total=amount, payment_method=payment_method)

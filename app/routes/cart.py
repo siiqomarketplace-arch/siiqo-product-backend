@@ -19,6 +19,7 @@ from app.models.withdrawal import PODPayment, VendorBankAccount
 from app.utils.email import send_siiqo_email
 from app.utils.telegram import send_telegram_message
 from app.routes.escrow import generate_order_token
+from app.routes.public import _public_file_url
 from app.services.fees import PLATFORM_FEE_PERCENT, platform_fee_float
 from app.services.attribution import apply_to_order as apply_attribution
 from app.services.delivery import DeliveryError, price_option as price_delivery_option
@@ -127,7 +128,8 @@ def get_cart():
                 "stock_quantity": item.product.stock_quantity,
                 "category": item.product.category.name if item.product.category else "",
                 "product_type": (item.product.product_type if item.product else 'physical') or 'physical',
-                "file_url": item.product.file_url if item.product else None,
+                # Nothing in a cart is paid yet: only a free product's file.
+                "file_url": _public_file_url(item.product) if item.product else None,
                 "booking_link": item.product.booking_link if item.product else None,
                 "is_negotiable": item.product.is_negotiable,
                 "negotiated_price": str(item.negotiated_price) if item.negotiated_price else None,
@@ -436,6 +438,36 @@ def checkout():
 
     orders_created = []
 
+    # "First Order N500 Off" (app/services/marketing.py): the code belongs to
+    # one seller, so it comes off that seller's order only. The buyer pays the
+    # discount less; Siiqo tops the seller up when the order is delivered.
+    promo = promo_group = None
+    promo_raw = (data.get('promo_code') or '').strip()
+    if promo_raw:
+        from app.services import marketing as _mkt
+        _p_email = (data.get('delivery_email') or data.get('email') or (data.get('customer', {}) or {}).get('email')
+                    or (user.email if user else '') or '').strip().lower()
+        _p_phone = (data.get('delivery_phone') or data.get('phone') or (data.get('customer', {}) or {}).get('phone')
+                    or (user.phone if user else '') or '').strip()
+        found = _mkt.find_promo(promo_raw)
+        groups = [k for k in vendors if found is not None and k[0] == found.vendor_id]
+        if found is not None and not groups and filter_vendor_id and filter_vendor_id != found.vendor_id:
+            found = None  # this checkout is for another seller; the code is used on its own seller's checkout
+        elif groups or found is None or not filter_vendor_id:
+            def _group_total(key):
+                return sum(float(i.negotiated_price if i.negotiated_price else i.product.price) * i.quantity
+                           for i in vendors[key])
+            promo_group = max(groups, key=_group_total) if groups else None
+            try:
+                promo = _mkt.check_promo(
+                    promo_raw, vendor_id=promo_group[0] if promo_group else -1,
+                    subtotal_ngn=_group_total(promo_group) if promo_group else 0, currency='NGN',
+                    payment_method=payment_method, buyer_user_id=int(user_id) if user_id else None,
+                    email=_p_email, phone=_p_phone)
+            except _mkt.MarketingError as e:
+                db.session.rollback()
+                return jsonify(e.to_dict()), e.status
+
     if user_id:
         buyer_order_count = Order.query.filter_by(buyer_id=int(user_id)).count()
         if buyer_order_count < 100:
@@ -461,12 +493,17 @@ def checkout():
             float(item.negotiated_price if item.negotiated_price else item.product.price) * item.quantity
             for item in items
         )
+        promo_discount = 0.0
+        if promo is not None and (vid, is_physical) == promo_group:
+            promo_discount = float(promo.discount_ngn)
+            total = round(total - promo_discount, 2)   # the buyer pays less; escrow holds the discounted amount
         vendor_user = db.session.get(User, vid)
         fee_percent = float(PLATFORM_FEE_PERCENT)
         fee_amount = platform_fee_float(total)
         has_physical_items = is_physical
         logistics_fee = 0.0
         logistics_provider_id = None
+        logistics_quote = None
 
         if has_physical_items and logistics_selections:
             for sel in logistics_selections:
@@ -475,10 +512,11 @@ def checkout():
                     # The server prices the option; the browser's fee is not
                     # trusted (app/services/delivery.py).
                     try:
-                        logistics_fee, logistics_provider_id = price_delivery_option(
+                        logistics_fee, logistics_provider_id, logistics_quote = price_delivery_option(
                             sel.get('selectedOption') or {},
                             vendor_user.storefront if vendor_user else None,
-                            data.get('delivery_city'), data.get('delivery_state'))
+                            data.get('delivery_city'), data.get('delivery_state'),
+                            data.get('delivery_lga'))
                     except DeliveryError as e:
                         db.session.rollback()
                         return jsonify({"code": e.code, "message": e.message}), e.status
@@ -528,20 +566,22 @@ def checkout():
         db.session.add(new_order)
         db.session.flush()
 
-        if logistics_provider_id and logistics_provider_id.startswith('siiqo_partner_'):
-            pid_str = logistics_provider_id.replace('siiqo_partner_', '')
-            if pid_str.isdigit():
-                partner_id = int(pid_str)
-                partner_base_fee = round(logistics_fee / 1.10, 2)
-                from app.models.escrow import LogisticsAssignment
-                assignment = LogisticsAssignment(
-                    order_id=new_order.id,
-                    partner_id=partner_id,
-                    status='ASSIGNED' if payment_method == 'POD' else 'PENDING',
-                    delivery_fee=partner_base_fee,
-                    assigned_at=datetime.utcnow() if payment_method == 'POD' else None
-                )
-                db.session.add(assignment)
+        if promo_discount:
+            from app.services import marketing as _mkt
+            try:
+                _mkt.reserve_promo(promo, new_order, buyer_user_id=effective_buyer_id,
+                                   email=guest_email, phone=guest_phone)
+            except _mkt.MarketingError as e:
+                db.session.rollback()
+                return jsonify(e.to_dict()), e.status
+
+        if logistics_quote is not None:
+            # A delivery partner was chosen and priced by the server. The job
+            # waits (PENDING) until payment is confirmed; Pay on Delivery
+            # orders need no payment step, so they are assigned now
+            # (app/services/logistics_flow.py).
+            from app.services.logistics_flow import create_assignment
+            create_assignment(new_order, logistics_quote, assign_now=(payment_method == 'POD'))
 
         for item in items:
             product = db.session.query(Product).with_for_update().get(item.product.id)
@@ -623,6 +663,7 @@ def checkout():
                 "vendor_id": vid,
                 "total_amount": str(total),
                 "escrow_txn": txn_number,
+                "promo_discount_ngn": promo_discount or None,
                 "payment_method": "CRYPTO",
                 "confirmation_url": f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}",
                 "buyer_phone": guest_phone,
@@ -647,6 +688,7 @@ def checkout():
                 "vendor_id": vid,
                 "total_amount": str(total),
                 "escrow_txn": txn_number,
+                "promo_discount_ngn": promo_discount or None,
                 "payment_method": "ESCROW",
                 "confirmation_url": f"https://siiqo.com/order-confirm/{new_order.id}?token={generate_order_token(new_order.id)}",
                 "buyer_phone": guest_phone,
@@ -786,4 +828,6 @@ def checkout():
         "id": orders_created[0]["order_id"] if orders_created else None,
         "status": "success",
         "skipped_items": skipped_items,
+        "promo": ({"code": promo.code, "discount_ngn": float(promo.discount_ngn), "vendor_id": promo.vendor_id,
+                   "paid_by": "siiqo"} if promo is not None else None),
     }), 200

@@ -303,6 +303,22 @@ def pay_payment_link(link_id):
     buyer_user = User.query.filter_by(email=buyer_email).first() if has_real_email else None
     existing_account = buyer_user is not None  # track if this is a pre-existing Siiqo account
 
+    # "First Order N500 Off" (app/services/marketing.py): the buyer pays the
+    # discount less on every rail (the Daya amount is set from this amount);
+    # Siiqo tops the seller up when the order is delivered.
+    promo = None
+    list_amount = amount
+    promo_raw = (data.get('promo_code') or '').strip()
+    if promo_raw:
+        from app.services import marketing as _mkt
+        try:
+            promo = _mkt.check_promo(promo_raw, vendor_id=link.vendor_id, subtotal_ngn=amount,
+                                     currency=link_currency, buyer_user_id=buyer_user.id if buyer_user else None,
+                                     email=buyer_email if has_real_email else None, phone=buyer_phone)
+        except _mkt.MarketingError as e:
+            return jsonify(e.to_dict()), e.status
+        amount = amount - Decimal(str(promo.discount_ngn))
+
     # Create Direct Order (buyer_id=None for guest, matching cart.py and events.py)
     new_order = Order(
         buyer_id=buyer_user.id if buyer_user else None,
@@ -327,11 +343,19 @@ def pay_payment_link(link_id):
     db.session.add(new_order)
     db.session.flush()
 
-    # Add order item
+    if promo is not None:
+        try:
+            _mkt.reserve_promo(promo, new_order, buyer_user_id=buyer_user.id if buyer_user else None,
+                               email=buyer_email if has_real_email else None, phone=buyer_phone)
+        except _mkt.MarketingError as e:
+            db.session.rollback()
+            return jsonify(e.to_dict()), e.status
+
+    # Add order item (at the listed price; the order total is what the buyer pays)
     db.session.add(OrderItem(
         order_id=new_order.id,
         product_id=None,
-        price_at_purchase=amount,
+        price_at_purchase=list_amount,
         quantity=1,
     ))
 
@@ -496,6 +520,9 @@ def pay_payment_link(link_id):
                 daya_funding_account_id=str(fa.get('id') or ''),
                 daya_rate_id=rate_id,
                 amount_ngn=final_amount_ngn,
+                # What the buyer is asked to send by crypto (checked against the deposit).
+                amount_crypto=f"{calc_amount_usd}" if daya_type == 'crypto_direct' else None,
+                asset="USDT" if daya_type == 'crypto_direct' else None,
                 rate=rate,
                 rate_expires_at=expires_dt,
                 status='PENDING',
@@ -538,6 +565,7 @@ def pay_payment_link(link_id):
                 "amount_ngn": final_amount_ngn,
                 "amount_usd": amount_usd,
                 "existing_account": existing_account,
+                "promo_discount_ngn": float(promo.discount_ngn) if promo is not None else None,
                 "confirmation_url": conf_url,
                 "buyer_phone": buyer_phone,
                 "buyer_email": buyer_email if has_real_email else "",
@@ -633,6 +661,7 @@ def pay_payment_link(link_id):
             "status": EscrowStatus.PENDING_PAYMENT,
             "order_id": new_order.id,
             "existing_account": existing_account,
+            "promo_discount_ngn": float(promo.discount_ngn) if promo is not None else None,
             "confirmation_url": conf_url,
             "buyer_phone": buyer_phone,
             "buyer_email": buyer_email if has_real_email else "",
@@ -685,6 +714,7 @@ def pay_payment_link(link_id):
             "status": EscrowStatus.PENDING_PAYMENT,
             "order_id": new_order.id,
             "existing_account": existing_account,
+            "promo_discount_ngn": float(promo.discount_ngn) if promo is not None else None,
             "confirmation_url": conf_url,
             "buyer_phone": buyer_phone,
             "buyer_email": buyer_email if has_real_email else "",

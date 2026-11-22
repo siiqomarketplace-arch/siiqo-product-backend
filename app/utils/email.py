@@ -71,8 +71,40 @@ def _validate_email(email: str) -> bool:
     
     return True
 
-def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail_sender, to_email, subject, html_content, context):
-    """Background worker for sending emails."""
+def _header_value(value) -> str:
+    """A header value with no line breaks (blocks header injection)."""
+    return re.sub(r"[\r\n\0]+", " ", str(value or "")).strip()
+
+
+def unsubscribe_headers(url=None, mailto=None) -> dict:
+    """List-Unsubscribe (RFC 2369) with a mailto and/or a one-click URL, and
+    List-Unsubscribe-Post (RFC 8058) when there is a URL. Empty when neither."""
+    parts = []
+    if mailto:
+        parts.append(f"<mailto:{_header_value(mailto)}?subject=unsubscribe>")
+    if url:
+        parts.append(f"<{_header_value(url)}>")
+    if not parts:
+        return {}
+    headers = {"List-Unsubscribe": ", ".join(parts)}
+    if url:
+        headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    return headers
+
+
+def unsubscribe_mailto() -> str | None:
+    """UNSUBSCRIBE_MAILTO, else the sender address (MAIL_DEFAULT_SENDER / MAIL_USERNAME) when it is an email."""
+    for raw in (os.environ.get('UNSUBSCRIBE_MAILTO'), os.environ.get('MAIL_DEFAULT_SENDER'),
+                os.environ.get('MAIL_USERNAME')):
+        m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", raw or "")
+        if m:
+            return m.group(0)
+    return None
+
+
+def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail_sender, to_email, subject, html_content, context, headers=None):
+    """Sends one email. Runs on a background thread, or inline with
+    send_siiqo_email(..., wait=True). Returns True when the SMTP server took it."""
     # â”€â”€ LOCAL DEV FALLBACK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # If SMTP credentials are missing, print OTP to console instead of crashing.
     if not mail_server or not mail_username or not mail_password:
@@ -83,7 +115,7 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
         if 'otp' in context:
             logger.info(f"   >>>  TEST OTP: {context['otp']}  <<<")
         logger.info("="*60 + "\n")
-        return
+        return False
 
     # â”€â”€ BUILD MESSAGE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Use MIMEMultipart so we can explicitly set charset=utf-8 on every part.
@@ -95,6 +127,9 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
     msg['Subject'] = Header(subject, charset='utf-8')
     msg['From']    = f"Siiqo <{mail_sender}>"
     msg['To']      = to_email
+    for _name, _value in (headers or {}).items():
+        if _name and _value:
+            msg[_header_value(_name)] = _header_value(_value)
 
     # Plain-text fallback (utf-8)
     plain_part = MIMEText("Please enable HTML to view this Siiqo email.", 'plain', 'utf-8')
@@ -121,12 +156,14 @@ def _send_email_async(mail_server, mail_port, mail_username, mail_password, mail
                 server.send_message(msg)
 
         logger.info(f"[EMAIL OK] Sent '{subject}' to {mask_email(to_email)}")
+        return True
 
     except Exception as e:
         import traceback
         import logging
         logging.error(f"[EMAIL ERROR] Failed to send email to {mask_email(to_email)}. "
                       f"Error: {mask_emails_in(e)}\n{mask_emails_in(traceback.format_exc())}")
+        return False
 
 
 def send_siiqo_email(to_email, subject, template_name, locale=None, **context):
@@ -139,7 +176,13 @@ def send_siiqo_email(to_email, subject, template_name, locale=None, **context):
     enabled (LANGUAGES), else the English template. English is the default.
     
     Security: Validates email before sending to prevent SMTP injection attacks.
+
+    headers: extra message headers (e.g. unsubscribe_headers(...)).
+    wait: send on this thread and return whether the SMTP server took it
+    (batched broadcasts); otherwise a background thread sends and True is returned.
     """
+    headers = context.pop('headers', None)
+    wait = bool(context.pop('wait', False))
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # SECURITY: Validate email address before any processing
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -170,10 +213,15 @@ def send_siiqo_email(to_email, subject, template_name, locale=None, **context):
         html_content = f"<h1>Siiqo</h1><p>Hi {first_name},</p><p>{subject}</p>"
         logger.info(f"[EMAIL WARN] Template render failed ({tmpl_err}), using plain fallback.")
 
+    if wait:
+        return bool(_send_email_async(mail_server, mail_port, mail_username, mail_password, mail_sender,
+                                      to_email, subject, html_content, context, headers))
+
     # Dispatch to background thread
     thread = threading.Thread(
         target=_send_email_async,
         args=(mail_server, mail_port, mail_username, mail_password, mail_sender, to_email, subject, html_content, context)
+        + ((headers,) if headers else ()),
     )
     thread.daemon = True
     thread.start()

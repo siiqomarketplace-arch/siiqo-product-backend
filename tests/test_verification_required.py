@@ -68,7 +68,7 @@ def _existing_seller(make_vendor, days_old=60):
     vendor, store = make_vendor()
     store.created_at = datetime.now(timezone.utc) - timedelta(days=days_old)
     store.is_published = True
-    db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="058",
+    db.session.add(VendorBankAccount(is_verified=True, vendor_id=vendor.id, bank_name="Test Bank", bank_code="058",
                                      account_number="0123456789", account_name="Test Vendor", is_default=True,
                                      recipient_code=f"RCP_{secrets.token_hex(4)}"))
     db.session.commit()
@@ -327,7 +327,7 @@ def test_new_stores_start_unpublished_and_publish_after_verification(client, mak
     assert res.status_code == 403 and res.get_json()["title"] == "Verify to keep selling"
 
     # A sale through their Pay Link still waits for verification.
-    db.session.add(VendorBankAccount(vendor_id=seller.id, bank_name="B", bank_code="058",
+    db.session.add(VendorBankAccount(is_verified=True, vendor_id=seller.id, bank_name="B", bank_code="058",
                                      account_number="0123456780", account_name="S", is_default=True,
                                      recipient_code="RCP_new"))
     db.session.commit()

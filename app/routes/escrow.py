@@ -172,6 +172,26 @@ def _hold_if_foreign_currency(order, escrow) -> bool:
     return _payout_amount_or_hold(order, escrow) is None
 
 
+def lock_escrow(escrow):
+    """Lock this escrow's row until the transaction ends (SELECT ... FOR UPDATE
+    on Postgres) and reload its current state. Every path that moves money for
+    an escrow (payment confirmation that releases, buyer/token/admin/auto
+    release) calls this before checking the status, so two concurrent calls
+    run one after the other and the second sees the first one's result."""
+    if escrow is None or getattr(escrow, "id", None) is None:
+        return escrow
+    return (db.session.query(EscrowTransaction).filter_by(id=escrow.id)
+            .with_for_update().populate_existing().first())
+
+
+def payout_transfer_reference(prefix: str, order, recipient_key: str) -> str:
+    """Deterministic transfer reference for one order and one recipient, so a
+    repeated payout call reuses the same reference and the gateway refuses a
+    second transfer instead of sending the money twice."""
+    digest = hashlib.sha256(f"{order.id}:{recipient_key or ''}".encode()).hexdigest()[:10].upper()
+    return f"{prefix}-{order.id}-{digest}"
+
+
 def _record_payout_debit(order, escrow, net_amount: float):
     """An automatic payout (transfer or gateway split) has paid the vendor:
     write the matching DEBIT so the ledger credit cannot be withdrawn again."""
@@ -664,10 +684,26 @@ def _deliver_event_tickets(order, escrow):
     logging.info(f"[EVENT] Auto-delivered and released Order #{order.id}")
     return True
 
+_DAYA_PAYMENT_METHODS = ('CRYPTO', 'DAYA', 'DAYA_BANK_TRANSFER', 'USDT', 'USDC')
+
+
+def record_card_rail(order, rail: str) -> None:
+    """A card gateway (`rail`, e.g. 'PAYSTACK') confirmed this order's payment.
+    Orders created before the buyer picked a rail (event tickets, store
+    checkout) can carry a Daya method; store the rail actually used so every
+    release path pays out on it, never through Daya. 'ESCROW' (Paystack Pay
+    Links and cart) is kept as it is."""
+    if order is not None and (order.payment_method or '').upper() in _DAYA_PAYMENT_METHODS:
+        logging.info(f"[RAIL] Order #{order.id} paid by {rail}; payment_method "
+                     f"{order.payment_method} -> {rail}")
+        order.payment_method = rail
+
+
 def _activate_paystack_escrow(escrow, ref) -> bool:
     """Mark one escrow paid after Paystack confirmed its payment, and deliver.
     Idempotent: only an escrow still PENDING_PAYMENT is touched."""
-    if escrow.status != EscrowStatus.PENDING_PAYMENT:
+    escrow = lock_escrow(escrow)  # a webhook and a status poll may race here
+    if escrow is None or escrow.status != EscrowStatus.PENDING_PAYMENT:
         return False
     escrow.status = EscrowStatus.IN_ESCROW
     escrow.paid_at = escrow.paid_at or _utcnow()
@@ -676,6 +712,7 @@ def _activate_paystack_escrow(escrow, ref) -> bool:
     if not order:
         return True
     order.status = 'PAID'
+    record_card_rail(order, 'PAYSTACK')
     db.session.flush()
     from app.services.fx import capture_for_order
     capture_for_order(order, escrow, stage="payment")
@@ -945,7 +982,7 @@ def escrow_status():
         elif escrow.order and (escrow.order.payment_method or '').upper() in ('CRYPTO', 'DAYA_BANK_TRANSFER', 'DAYA'):
             try:
                 from app.models.withdrawal import DayaPayment
-                from app.routes.payments import _handle_crypto_payment_confirmed, _key_configured
+                from app.routes.payments import _handle_crypto_payment_confirmed, _key_configured, apply_daya_deposit
                 from app.services import daya_service
                 dp = DayaPayment.query.filter_by(order_id=escrow.order.id).first()
                 if dp and dp.daya_funding_account_id and _key_configured():
@@ -953,15 +990,10 @@ def escrow_status():
                     if deposit:
                         dep_fa = deposit.get("funding_account_id") or deposit.get("fundingAccountId") or ""
                         if dep_fa == dp.daya_funding_account_id:
-                            new_status = daya_service._map_daya_status(deposit.get("status", ""))
-                            dp.daya_deposit_id = deposit.get("id")
-                            if new_status in ("COMPLETED", "RECEIVED"):
-                                dp.status = "COMPLETED"
-                                dp.updated_at = _utcnow()
-                                db.session.commit()
-                                _handle_crypto_payment_confirmed(escrow.order.id, dp)
-                                db.session.refresh(escrow)
-                elif dp and dp.status in ("COMPLETED", "RECEIVED"):
+                            # Settled deposit with the full amount only.
+                            apply_daya_deposit(dp, deposit)
+                            db.session.refresh(escrow)
+                elif dp and dp.status == "COMPLETED":
                     _handle_crypto_payment_confirmed(escrow.order.id, dp)
                     db.session.refresh(escrow)
             except Exception as _daya_err:
@@ -1049,46 +1081,50 @@ def _paystack_payout_vendor(order, escrow):
             vendor_id=order.vendor_id
         ).first()
 
-    # Storefront fallback: auto-create VendorBankAccount if vendor configured bank during onboarding
+    # Storefront fallback: bank details given at onboarding become a payout
+    # account, name pending (the typed name, store name or "Vendor" is never
+    # used); the name check below asks the bank before any money moves.
     if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
         try:
+            from app.services.payout_account_name import mark_pending, pending_account_from_storefront
             from app.models.user import Storefront
-            sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-            if sf and sf.account_number and sf.bank_code:
-                if not bank_acc:
-                    bank_acc = VendorBankAccount(
-                        vendor_id=order.vendor_id,
-                        bank_name="Bank",
-                        bank_code=sf.bank_code,
-                        account_number=sf.account_number,
-                        account_name=sf.account_name or (order.vendor.full_name if order.vendor else "Vendor"),
-                        is_default=True,
-                    )
-                    db.session.add(bank_acc)
-                else:
+            if not bank_acc:
+                bank_acc = pending_account_from_storefront(order.vendor_id)
+            else:
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.account_number and sf.bank_code:
                     bank_acc.bank_code = sf.bank_code
                     bank_acc.account_number = sf.account_number
-                    if sf.account_name:
-                        bank_acc.account_name = sf.account_name
+                    mark_pending(bank_acc)
+            if bank_acc is not None:
                 db.session.commit()
-                logging.info(f"[PAYSTACK FALLBACK] Synced bank account from storefront for vendor {order.vendor_id}")
+                logging.info(f"[PAYSTACK FALLBACK] Synced bank account from storefront for vendor {order.vendor_id} (name pending)")
         except Exception as _sf_err:
+            db.session.rollback()
             logging.warning(f"[PAYSTACK FALLBACK] Failed to sync bank from storefront: {_sf_err}")
+
+    # Only pay an account whose holder name the bank confirmed. One lookup
+    # now; still unconfirmed -> the money stays in the seller's balance.
+    if bank_acc and bank_acc.account_number and bank_acc.bank_code:
+        from app.services.payout_account_name import hold_if_unconfirmed
+        if hold_if_unconfirmed(bank_acc, vendor_id=order.vendor_id, order_id=order.id,
+                               amount_ngn=net_amount):
+            return False
 
     if bank_acc:
         if not bank_acc.recipient_code and bank_acc.account_number and bank_acc.bank_code:
             # Self-healing payout: create Paystack transfer recipient on-the-fly
             try:
                 from app.services.escrow.paystack_provider import ensure_paystack_transfer_recipient
+                # The name was confirmed by the bank just above.
                 rec_res = ensure_paystack_transfer_recipient(
                     account_number=bank_acc.account_number,
                     bank_code=bank_acc.bank_code,
-                    account_name=bank_acc.account_name or "Vendor",
+                    account_name=bank_acc.account_name,
+                    name_confirmed=True,
                 )
                 if rec_res.get("success"):
                     bank_acc.recipient_code = rec_res["recipient_code"]
-                    if not bank_acc.account_name or bank_acc.account_name == "Vendor":
-                        bank_acc.account_name = rec_res.get("account_name") or bank_acc.account_name
                     db.session.commit()
                     logging.info(
                         f"[PAYSTACK SELF-HEALING] Auto-created recipient {bank_acc.recipient_code} "
@@ -1099,11 +1135,12 @@ def _paystack_payout_vendor(order, escrow):
 
         if bank_acc.recipient_code:
             from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-            import uuid
             transfer_result = paystack_transfer_to_vendor(
                 recipient_code=bank_acc.recipient_code,
                 amount_ngn=net_amount,
-                reference=f"PAYOUT-{order.id}-{uuid.uuid4().hex[:6].upper()}",
+                # Same order + same recipient = same reference: Paystack refuses
+                # a duplicate reference, so a repeat call can't pay twice.
+                reference=payout_transfer_reference("PAYOUT", order, bank_acc.recipient_code),
                 reason=f"Siiqo payout for Order #{order.id}",
             )
             if not transfer_result.get("success"):
@@ -1184,31 +1221,35 @@ def _flutterwave_payout_vendor(order, escrow):
         vendor_id=order.vendor_id
     ).first()
 
-    # Storefront fallback: auto-create VendorBankAccount if vendor configured bank during onboarding
+    # Storefront fallback: bank details given at onboarding become a payout
+    # account, name pending (the typed name, store name or "Vendor" is never
+    # used); the name check below asks the bank before any money moves.
     if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
         try:
+            from app.services.payout_account_name import mark_pending, pending_account_from_storefront
             from app.models.user import Storefront
-            sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-            if sf and sf.account_number and sf.bank_code:
-                if not bank_acc:
-                    bank_acc = VendorBankAccount(
-                        vendor_id=order.vendor_id,
-                        bank_name="Bank",
-                        bank_code=sf.bank_code,
-                        account_number=sf.account_number,
-                        account_name=sf.account_name or (order.vendor.full_name if order.vendor else "Vendor"),
-                        is_default=True,
-                    )
-                    db.session.add(bank_acc)
-                else:
+            if not bank_acc:
+                bank_acc = pending_account_from_storefront(order.vendor_id)
+            else:
+                sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
+                if sf and sf.account_number and sf.bank_code:
                     bank_acc.bank_code = sf.bank_code
                     bank_acc.account_number = sf.account_number
-                    if sf.account_name:
-                        bank_acc.account_name = sf.account_name
+                    mark_pending(bank_acc)
+            if bank_acc is not None:
                 db.session.commit()
-                logging.info(f"[FLW FALLBACK] Synced bank account from storefront for vendor {order.vendor_id}")
+                logging.info(f"[FLW FALLBACK] Synced bank account from storefront for vendor {order.vendor_id} (name pending)")
         except Exception as _sf_err:
+            db.session.rollback()
             logging.warning(f"[FLW FALLBACK] Failed to sync bank from storefront: {_sf_err}")
+
+    # Only pay an account whose holder name the bank confirmed. One lookup
+    # now; still unconfirmed -> the money stays in the seller's balance.
+    if bank_acc and bank_acc.account_number and bank_acc.bank_code:
+        from app.services.payout_account_name import hold_if_unconfirmed
+        if hold_if_unconfirmed(bank_acc, vendor_id=order.vendor_id, order_id=order.id,
+                               amount_ngn=net_amount):
+            return False
 
     if not bank_acc or not bank_acc.account_number or not bank_acc.bank_code:
         logging.warning(
@@ -1253,8 +1294,10 @@ def _flutterwave_payout_vendor(order, escrow):
 
     try:
         from app.services import flutterwave_service as _flw
-        import uuid as _uuid
-        payout_ref = f"WD-FLW-{order.id}-{_uuid.uuid4().hex[:6].upper()}"
+        # Deterministic per order + bank account: Flutterwave rejects a
+        # duplicate reference, so a repeat call can't send a second transfer.
+        payout_ref = payout_transfer_reference(
+            "WD-FLW", order, f"{bank_acc.bank_code}:{bank_acc.account_number}")
         flw_tx = _flw.transfer_to_vendor(
             account_bank=bank_acc.bank_code,
             account_number=bank_acc.account_number,
@@ -1286,6 +1329,12 @@ def execute_order_escrow_release(order, escrow, source="admin"):
     5. Sends notifications to buyer & vendor
     """
     if not order or not escrow:
+        return False
+
+    # One release at a time per escrow: lock the row and re-read its status
+    # (buyer, token, admin, auto-release and dispute decisions all come here).
+    escrow = lock_escrow(escrow)
+    if escrow is None:
         return False
 
     if escrow.status == EscrowStatus.RELEASED:
@@ -1497,6 +1546,7 @@ def release_escrow():
                     if e.status == EscrowStatus.PENDING_PAYMENT:
                         e.status = EscrowStatus.IN_ESCROW
                         e.paid_at = e.paid_at or _utcnow()
+                        record_card_rail(e.order, 'PAYSTACK')
                 db.session.commit()
         except Exception as e:
             logging.warning(f"[RELEASE] Paystack verify fallback failed: {e}")
@@ -1894,6 +1944,7 @@ def get_order_details_by_token():
                 "id": order.id,
                 "status": order.status,
                 "total_amount": float(order.total_amount),
+                "promo_discount_ngn": float(order.promo_discount_ngn) if order.promo_discount_ngn else None,
                 "buyer_name": order.buyer_name if show_contact else None,
                 "buyer_email": order.buyer_email if show_contact else None,
                 "buyer_phone": order.buyer_phone if show_contact else None,

@@ -182,10 +182,15 @@ def test_company_rider_codes_credit_the_company_with_per_rider_results(
     assert acq.agent_user_id == company_user.id and acq.code_id == rider["code_id"]
 
     buyer = make_user()
-    order = make_order(seller, buyer=buyer)
+    order = make_order(seller, buyer=buyer, total=20000)   # the first sale needs N20,000+
     from datetime import datetime, timezone
+    from app.models.escrow import EscrowTransaction
     order.paid_at = datetime.now(timezone.utc)
     order.status = "PAID"
+    db.session.commit()
+    # Rewards count once delivery is confirmed (escrow released).
+    db.session.add(EscrowTransaction(order_id=order.id, amount=order.total_amount, status="RELEASED",
+                                     released_at=datetime.now(timezone.utc)))
     db.session.commit()
     db.session.expire_all()
     earnings = AgentEarning.query.filter_by(seller_user_id=seller.id).all()
@@ -377,6 +382,12 @@ def test_signup_with_existing_email_says_log_in(client, make_user, monkeypatch):
 
 def test_partner_login_token_works_on_agent_routes(client, make_user):
     partner = make_user(role=UserRole.PARTNER, email="rider@example.com")
+    # Only an approved partner can log in to the partner portal.
+    from app.models.partnerships import PartnerApplication
+    partner.is_verified = True
+    db.session.add(PartnerApplication(user_id=partner.id, business_name="Rider Co", service_type="LOGISTICS",
+                                      status="APPROVED"))
+    db.session.commit()
     res = client.post("/api/auth/partner/login", json={"email": "rider@example.com",
                                                        "password": "not-a-real-password"})
     assert res.status_code == 200, res.get_json()

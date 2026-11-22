@@ -88,7 +88,7 @@ def test_crypto_payout_is_debited(client, make_vendor, make_order, monkeypatch):
                         lambda: {"data": {"collection_balance_usd": 0, "withdrawal_balance_usd": 1000}})
     monkeypatch.setattr(daya_service, "transfer_ngn_to_vendor", lambda **k: {"success": True})
     vendor, order = _stuck_order(make_vendor, make_order)
-    db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
+    db.session.add(VendorBankAccount(is_verified=True, vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
                                      account_number="0000000000", account_name="Test Vendor", is_default=True))
     db.session.commit()
 

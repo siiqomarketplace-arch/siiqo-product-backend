@@ -7,6 +7,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 import requests
 
@@ -213,6 +214,84 @@ def _map_daya_status(daya_status: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Settlement and amount checks (before an order is treated as paid)
+# ---------------------------------------------------------------------------
+# Daya's webhook docs (docs.daya.co/api-reference/webhooks/events): deposit
+# events are deposit.received / processing / requires_review / completed /
+# failed / reversed, and "deposit.completed" is the terminal event to credit
+# on; RECEIVED and PROCESSING are not final for NGN and crypto deposits. The
+# deposit object carries `status`, `amount` (a string) and `currency` (NGN for
+# a bank transfer, USDT/USDC for crypto). A deposit is only accepted as payment
+# when it is COMPLETED and its amount and currency cover what the server asked
+# for; anything missing fails closed (held for admin review).
+
+SETTLED_DEPOSIT_EVENTS = ("deposit.completed", "deposit.received", "deposit.settled")
+# Shortfall tolerated for rounding only.
+_AMOUNT_TOLERANCE = {"NGN": Decimal("1.00")}
+_CRYPTO_TOLERANCE = Decimal("0.01")
+
+
+def _dec(value):
+    if value is None or value == "":
+        return None
+    try:
+        d = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return d if d.is_finite() else None
+
+
+def deposit_is_settled(deposit: dict | None, event_type: str | None = None) -> bool:
+    """True only for a deposit Daya reports as COMPLETED (never PROCESSING or
+    RECEIVED-in-progress). With a webhook, the event must also be a deposit
+    completion event."""
+    if not deposit:
+        return False
+    if event_type is not None and event_type not in SETTLED_DEPOSIT_EVENTS:
+        return False
+    return str(deposit.get("status") or "").upper() == "COMPLETED"
+
+
+def expected_deposit(dp) -> tuple:
+    """(amount, currency) the buyer was asked to send, from server records."""
+    if dp.payment_type == "crypto_direct":
+        expected = _dec(dp.amount_crypto)
+        if expected is None:
+            ngn, rate = _dec(dp.amount_ngn), _dec(dp.rate)
+            if ngn is not None and rate is not None and rate > 0:
+                expected = (ngn / rate).quantize(Decimal("0.000001"))
+        return expected, (dp.asset or "USDT").upper()
+    return _dec(dp.amount_ngn), "NGN"
+
+
+def check_deposit_amount(dp, deposit: dict) -> tuple[bool, dict]:
+    """(ok, details). ok is True only when the deposited amount and currency
+    are present and cover the expected amount. Fails closed otherwise."""
+    amount = _dec((deposit or {}).get("amount"))
+    currency = str((deposit or {}).get("currency") or "").upper()
+    expected, expected_currency = expected_deposit(dp)
+    details = {
+        "deposit_id": (deposit or {}).get("id"),
+        "received_amount": str(amount) if amount is not None else None,
+        "received_currency": currency or None,
+        "expected_amount": str(expected) if expected is not None else None,
+        "expected_currency": expected_currency,
+    }
+    if amount is None or not currency or expected is None or expected <= 0:
+        details["reason"] = "unverified"
+        return False, details
+    if currency != expected_currency:
+        details["reason"] = "currency_mismatch"
+        return False, details
+    tolerance = _AMOUNT_TOLERANCE.get(currency, _CRYPTO_TOLERANCE)
+    if amount + tolerance < expected:
+        details["reason"] = "underpaid"
+        return False, details
+    details["reason"] = "ok"
+    return True, details
+
+
+# ---------------------------------------------------------------------------
 # Webhook verification
 # ---------------------------------------------------------------------------
 
@@ -373,8 +452,8 @@ def resolve_bank_account(bank_code: str, account_number: str) -> dict:
         headers=_headers(),
         json={"account_number": account_number, "bank_code": bank_code},
     )
-    logger.info("[DAYA] Resolved bank account %s/%s -> %s",
-                bank_code, account_number, data.get("account_name"))
+    from app.utils.log_mask import mask_account
+    logger.info("[DAYA] Resolved bank account %s/%s", bank_code, mask_account(account_number))
     return data
 
 

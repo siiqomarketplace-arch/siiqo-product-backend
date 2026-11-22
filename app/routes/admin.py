@@ -2327,6 +2327,14 @@ def admin_release_funds(order_id):
 # Partners
 # ---------------------------------------------------------------------------
 
+def _partner_coverage(app_row):
+    try:
+        from app.services.logistics_partners import partner_coverage
+        return partner_coverage(app_row)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 @admin_bp.route('/partners/applications', methods=['GET'])
 @jwt_required()
 def get_partnerships():
@@ -2347,8 +2355,11 @@ def get_partnerships():
             "portfolio_url": p.portfolio_url,
             "applied_at": p.applied_at.isoformat() if p.applied_at else None,
             "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
-            # Bank payout details
-            "bank_name": p.account_name or "",
+            "review_note": p.review_note,
+            "provider_type": p.provider_type or "siiqo_partner",
+            "coverage": _partner_coverage(p),
+            # Bank payout details (account_name comes from the bank, or empty if not verified yet)
+            "bank_name": p.bank_name or "",
             "account_number": p.account_number or "",
             "account_name": p.account_name or "",
             "bank_code": p.bank_code or "",
@@ -2369,65 +2380,81 @@ def get_partnerships():
 @admin_bp.route('/partners/<int:app_id>/status', methods=['PATCH'])
 @jwt_required()
 def update_partner_status(app_id):
+    """Approve, reject, suspend or reinstate a partner. The applicant is
+    emailed every time; reject/suspend keep the admin's note and block the
+    partner portal (app/services/logistics_partners.partner_access)."""
     admin_id = get_jwt_identity()
     if not _require_superadmin(_parse_admin_id(admin_id)):
         return jsonify({"message": "SuperAdmin required"}), 403
+    data = request.get_json(silent=True) or {}
+    return _review_partner(app_id, (data.get('status') or '').upper(),
+                           str(data.get('note') or data.get('reason') or '').strip()[:1000] or None)
 
+
+def _review_partner(app_id, status, note):
     app = db.session.get(PartnerApplication, app_id)
     if not app:
         return jsonify({"message": "Application not found"}), 404
-
-    data = request.get_json() or {}
-    status = (data.get('status') or '').upper()
-
-    if status == 'APPROVED':
-        app.status = 'APPROVED'
-        app.reviewed_at = _utcnow()
-        if app.user:
-            app.user.role = 'PARTNER'
-            app.user.is_verified = True
-            try:
-                send_siiqo_email(
-                    to_email=app.user.email,
-                    subject="Welcome to the Siiqo Partner Network!",
-                    template_name="system_notice",
-                    header="Application Approved",
-                    body=(
-                        f"Hi {app.user.full_name}, your partner application for {app.business_name} "
-                        "has been approved. You can now log in to your partner dashboard."
-                    ),
-                )
-            except Exception:
-                pass
-    elif status in ('REJECTED', 'ACTIVE', 'SUSPENDED'):
-        app.status = status
-        app.reviewed_at = _utcnow()
-    else:
+    if status == 'ACTIVE':          # older admin screens: "reinstate"
+        status = 'APPROVED'
+    if status not in ('APPROVED', 'REJECTED', 'SUSPENDED'):
         return jsonify({"message": "Invalid status"}), 400
 
+    app.status = status
+    app.reviewed_at = _utcnow()
+    app.review_note = note if status != 'APPROVED' else None
+    user = app.user
+    name = (user.first_name if user else None) or "there"
+    from html import escape as _esc
+    note_html = f"<br><br><strong>Reason:</strong> {_esc(note)}" if note else ""
+    if user:
+        if status == 'APPROVED':
+            user.role = 'PARTNER'
+            user.is_verified = True
+            user.is_active = True
+            subject = "Welcome to the Siiqo Partner Network!"
+            text = (f"Your partner application for {_esc(app.business_name or '')} has been approved. "
+                    "Log in to your partner dashboard to add your riders and check your delivery prices.")
+            cta = ("https://siiqo.com/partners/login", "Open partner dashboard")
+        elif status == 'REJECTED':
+            user.is_verified = False
+            subject = "Your Siiqo partner application"
+            text = (f"Thank you for applying to deliver with Siiqo. We can't approve "
+                    f"{_esc(app.business_name or 'your application')} right now.{note_html}<br><br>"
+                    "Reply to this email if you have questions.")
+            cta = None
+        else:
+            user.is_verified = False
+            subject = "Your Siiqo partner account is suspended"
+            text = (f"Your partner account for {_esc(app.business_name or '')} has been suspended, so you "
+                    f"can't log in or take new deliveries for now.{note_html}<br><br>"
+                    "Contact support@siiqo.com if you think this is a mistake.")
+            cta = None
     db.session.commit()
+
+    if user and user.email:
+        try:
+            send_siiqo_email(
+                to_email=user.email,
+                subject=subject,
+                template_name="system_notice",
+                first_name=name,
+                notice_text=text,
+                **({"cta_url": cta[0], "cta_label": cta[1]} if cta else {}),
+            )
+        except Exception as e:  # noqa: BLE001 - the decision is saved either way
+            logging.warning(f"[ADMIN PARTNER] email not sent for application {app.id}: {e}")
     return jsonify({"message": f"Partner application {status.lower()}.", "status": "success"}), 200
 
 
-# Backward-compat alias
+# Backward-compat alias (same as PATCH /partners/<id>/status {"status": "APPROVED"})
 @admin_bp.route('/partnerships/<int:app_id>/approve', methods=['POST'])
 @jwt_required()
 def approve_partnership(app_id):
     admin_id = get_jwt_identity()
     if not _require_superadmin(_parse_admin_id(admin_id)):
         return jsonify({"message": "SuperAdmin required"}), 403
-
-    app = db.session.get(PartnerApplication, app_id)
-    if not app:
-        return jsonify({"message": "Application not found"}), 404
-
-    app.status = 'APPROVED'
-    app.reviewed_at = _utcnow()
-    if app.user:
-        app.user.role = 'PARTNER'
-        app.user.is_verified = True
-    db.session.commit()
-    return jsonify({"message": f"Partnership {app.business_name} approved."}), 200
+    return _review_partner(app_id, 'APPROVED', None)
 
 
 # ---------------------------------------------------------------------------
@@ -2947,93 +2974,129 @@ def manage_platform_settings():
 @admin_bp.route('/broadcast', methods=['POST'])
 @jwt_required()
 def send_email_broadcast():
-    admin_id = get_jwt_identity()
-    if not _require_superadmin(_parse_admin_id(admin_id)):
+    """Queue a broadcast. It is sent in the background in batches
+    (app/services/broadcasts.py); progress is at GET /broadcast/jobs/<id>.
+    Unsubscribed people are never included."""
+    admin_id = _parse_admin_id(get_jwt_identity())
+    if not _require_superadmin(admin_id):
         return jsonify({"message": "SuperAdmin required"}), 403
+    from app.services import broadcasts
 
     data = request.get_json() or {}
-    target_audience = str(data.get('target_audience') or data.get('audience', 'ALL')).upper()
-    subject = data.get('subject', '')
-    body = data.get('body', '')
-    critical = data.get('critical', False)
-
-    if not subject or not body:
+    target_audience = str(data.get('target_audience') or data.get('audience') or 'ALL').upper()
+    subject = str(data.get('subject') or '').strip()
+    body = str(data.get('body') or '')
+    critical = bool(data.get('critical', False))
+    if not subject or not body.strip():
         return jsonify({"message": "Subject and body are required"}), 400
+    if target_audience not in broadcasts.SEGMENTS:
+        return jsonify({"message": "Unknown audience"}), 400
 
-    if target_audience == 'VENDORS':
-        recipients = User.query.filter_by(role='VENDOR', is_subscribed_to_broadcasts=True).all()
-    elif target_audience == 'BUYERS':
-        recipients = User.query.filter_by(role='BUYER', is_subscribed_to_broadcasts=True).all()
-    elif target_audience == 'PARTNERS':
-        recipients = User.query.filter_by(role='PARTNER', is_subscribed_to_broadcasts=True).all()
-    elif target_audience == 'CUSTOM':
-        custom_emails_raw = data.get('customEmails') or data.get('custom_emails', '')
-        custom_emails = [e.strip() for e in custom_emails_raw.split(',') if e.strip()]
-        if not custom_emails:
-            return jsonify({"message": "No valid email addresses provided for custom broadcast"}), 400
-        class _FakeUser:
-            def __init__(self, email):
-                self.email = email
-                self.first_name = None
-                self.is_subscribed_to_broadcasts = True
-        recipients = [_FakeUser(e) for e in custom_emails]
-    else:
-        recipients = User.query.filter_by(is_subscribed_to_broadcasts=True).all()
-
-    sent, failed, skipped = 0, 0, 0
-    import hashlib
-    from flask import current_app
-    secret = current_app.config.get('SECRET_KEY', 'default-key')
-
-    def _is_valid_broadcast_email(email: str) -> bool:
-        """Return False for placeholder / ghost addresses that should never receive broadcasts."""
-        if not email or '@' not in email:
-            return False
-        domain = email.rsplit('@', 1)[-1].lower()
-        # Reject local / fake domains (e.g. @guest.siiqo.local, @example.com, .local TLD)
-        if domain.endswith('.local') or domain in ('example.com', 'test.com', 'localhost'):
-            return False
-        # Must have at least one dot in the domain (real TLD present)
-        if '.' not in domain:
-            return False
-        return True
-
-    for user in recipients:
-
-        if not _is_valid_broadcast_email(getattr(user, 'email', '')):
-            skipped += 1
-            continue
-
-        try:
-            token = hashlib.sha256(f"{user.email}{secret}".encode()).hexdigest()[:16]
-            base_url = request.host_url.rstrip('/')
-            unsubscribe_link = f"{base_url}/api/auth/unsubscribe?email={user.email}&token={token}"
-            
-            ok = send_siiqo_email(
-                to_email=user.email,
-                subject=subject,
-                template_name="broadcast",
-                first_name=getattr(user, 'first_name', None) or "Siiqo Member",
-                body_content=body,
-                unsubscribe_link=None if critical else unsubscribe_link
-            )
-            if ok:
-                sent += 1
-            else:
-                failed += 1
-        except Exception as e:
-            failed += 1
-
+    try:
+        job = broadcasts.create_job(
+            target_audience, subject, body, critical=critical, admin_id=admin_id,
+            api_base=request.host_url.rstrip('/'),
+            custom_emails=data.get('customEmails') or data.get('custom_emails'))
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    if job.status == "queued":
+        broadcasts.start(job.id)
+    job = db.session.get(type(job), job.id)
     return jsonify({
-        "message": "Broadcast dispatched.",
+        "message": "Broadcast queued. It is sending in the background.",
+        "job": job.to_dict(),
         "details": {
             "audience": target_audience,
-            "total_recipients": len(recipients),
-            "sent": sent,
-            "failed": failed,
-            "skipped_invalid": skipped,
+            "total_recipients": job.total,
+            "sent": job.sent,
+            "failed": job.failed,
+            "skipped_invalid": job.skipped,
         },
-    }), 200
+    }), 202
+
+
+@admin_bp.route('/broadcast/audience', methods=['GET', 'POST'])
+@jwt_required()
+def broadcast_audience_count():
+    """How many people a broadcast would reach, before sending."""
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "SuperAdmin required"}), 403
+    from app.services import broadcasts
+    data = request.get_json(silent=True) or {}
+    segment = str(data.get('audience') or request.args.get('audience') or 'ALL').upper()
+    custom = data.get('customEmails') or data.get('custom_emails') or request.args.get('custom_emails')
+    try:
+        counts = broadcasts.audience_counts(segment, custom)
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    return jsonify({**counts, "segments": [{"value": k, "label": v} for k, v in broadcasts.SEGMENTS.items()]}), 200
+
+
+@admin_bp.route('/broadcast/jobs', methods=['GET'])
+@jwt_required()
+def broadcast_jobs():
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "SuperAdmin required"}), 403
+    from app.models.growth import BroadcastJob
+    jobs = BroadcastJob.query.order_by(BroadcastJob.id.desc()).limit(20).all()
+    return jsonify({"jobs": [j.to_dict() for j in jobs]}), 200
+
+
+@admin_bp.route('/broadcast/jobs/<int:job_id>', methods=['GET'])
+@jwt_required()
+def broadcast_job(job_id):
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "SuperAdmin required"}), 403
+    from app.models.growth import BroadcastJob, BroadcastRecipient
+    job = db.session.get(BroadcastJob, job_id)
+    if job is None:
+        return jsonify({"message": "Broadcast not found"}), 404
+    failed = (BroadcastRecipient.query.filter_by(job_id=job_id, status="failed")
+              .order_by(BroadcastRecipient.id).limit(50).all())
+    return jsonify({"job": job.to_dict(),
+                    "failed_recipients": [{"email": mask_email(r.email), "error": r.error} for r in failed]}), 200
+
+
+@admin_bp.route('/broadcast/jobs/<int:job_id>/<action>', methods=['POST'])
+@jwt_required()
+def broadcast_job_action(job_id, action):
+    """cancel: stop sending (rows already sent stay sent). resume: send the rest."""
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "SuperAdmin required"}), 403
+    from app.services import broadcasts
+    if action == "cancel":
+        job = broadcasts.cancel(job_id)
+    elif action == "resume":
+        job = broadcasts.resume(job_id)
+        if job is not None and job.status == "queued":
+            broadcasts.start(job.id)
+            db.session.refresh(job)
+    else:
+        return jsonify({"message": "Unknown action"}), 400
+    if job is None:
+        return jsonify({"message": "Broadcast not found"}), 404
+    return jsonify({"job": job.to_dict()}), 200
+
+
+@admin_bp.route('/metrics/weekly', methods=['GET'])
+@jwt_required()
+def admin_weekly_metrics():
+    """Superadmin: the Monday dashboard (?weeks=8, ?format=csv) from orders,
+    escrow, disputes, payouts and stores (app/services/activation.py)."""
+    if not _require_superadmin(_parse_admin_id(get_jwt_identity())):
+        return jsonify({"message": "Superadmin access required"}), 403
+    from app.services.activation import dashboard_csv, weekly_dashboard
+    try:
+        weeks = int(request.args.get('weeks') or 8)
+    except ValueError:
+        return jsonify({"message": "weeks must be a number"}), 400
+    data = weekly_dashboard(weeks)
+    if (request.args.get('format') or '').lower() == 'csv':
+        resp = make_response(dashboard_csv(data))
+        resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+        resp.headers['Content-Disposition'] = f'attachment; filename="siiqo-weekly-{data["weeks"][-1]["week_end"]}.csv"'
+        return resp
+    return jsonify(data), 200
 
 
 # ---------------------------------------------------------------------------
@@ -3348,6 +3411,15 @@ def admin_retry_payout(order_id):
                 "code": "FX_RATE_REQUIRED",
             }), 409
 
+    # Pay out only money already released to the seller, and only once.
+    if escrow.status != EscrowStatus.RELEASED:
+        return jsonify({"message": f"Order #{order_id} escrow is {escrow.status}; only released payments can be paid out.",
+                        "code": "NOT_RELEASED"}), 409
+    if Ledger.query.filter_by(vendor_id=order.vendor_id, transaction_type='DEBIT',
+                              reference_id=f"PAYOUT-{escrow.transaction_number or order.id}").first():
+        return jsonify({"message": f"Order #{order_id} has already been paid out.",
+                        "code": "ALREADY_PAID_OUT"}), 409
+
     # Get vendor's current default bank account
     bank_acc = VendorBankAccount.query.filter_by(
         vendor_id=order.vendor_id, is_default=True
@@ -3396,6 +3468,10 @@ def admin_retry_payout(order_id):
     )
 
     if result.get("success"):
+        # The seller has been paid: the matching DEBIT keeps the ledger credit
+        # from also being withdrawn.
+        from app.routes.escrow import _record_payout_debit
+        _record_payout_debit(order, escrow, net_amount_ngn)
         # Add notification to vendor
         db.session.add(Notification(
             user_id=order.vendor_id,
@@ -3503,6 +3579,7 @@ def admin_retry_all_failed_payouts():
 
         from app.routes.escrow import _vendor_net_amount
         net_amount_ngn = _vendor_net_amount(order, escrow)
+        payout_debit_ref = f"PAYOUT-{escrow.transaction_number or order.id}"
 
         entry = {
             "order_id": order.id,
@@ -3528,6 +3605,20 @@ def admin_retry_all_failed_payouts():
         if payout_blocked(order, escrow):
             entry["status"] = "SKIPPED"
             entry["error"] = "Dispute open: payout frozen"
+            results.append(entry)
+            continue
+
+        # Only money already released to the seller is paid out, and only once:
+        # a PAYOUT debit means the automatic payout already went through.
+        if escrow.status != EscrowStatus.RELEASED:
+            entry["status"] = "SKIPPED"
+            entry["error"] = f"Escrow is {escrow.status}, not released"
+            results.append(entry)
+            continue
+        if Ledger.query.filter_by(vendor_id=order.vendor_id, transaction_type='DEBIT',
+                                  reference_id=payout_debit_ref).first():
+            entry["status"] = "SKIPPED"
+            entry["error"] = "Already paid out"
             results.append(entry)
             continue
 
@@ -3557,11 +3648,18 @@ def admin_retry_all_failed_payouts():
             )
             db.session.flush()
 
-        # Attempt payout via Daya
+        # Attempt payout via Daya; a payout sent writes the matching DEBIT so
+        # the credit can't also be withdrawn (idempotent by reference).
         try:
             from app.routes.payments import _payout_vendor_via_daya
-            _payout_vendor_via_daya(order, escrow)
-            entry["status"] = "SUCCESS"
+            from app.routes.escrow import _record_payout_debit
+            if _payout_vendor_via_daya(order, escrow):
+                _record_payout_debit(order, escrow, net_amount_ngn)
+                db.session.flush()
+                entry["status"] = "SUCCESS"
+            else:
+                entry["status"] = "FAILED"
+                entry["error"] = "Payout not sent (held, or transfer failed); money stays in the seller's balance"
         except Exception as exc:
             db.session.rollback()
             entry["status"] = "FAILED"

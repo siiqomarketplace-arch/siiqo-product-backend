@@ -130,6 +130,7 @@ def _apply(client, role, email):
     return client.post("/api/partners/apply", json={
         "email": email, "password": "a-test-password-123", "fullname": "Ada Partner",
         "business_name": "Ada Ltd", "partner_role": role,
+        "coverage": [{"state": "Lagos", "price": 2000}],
     })
 
 

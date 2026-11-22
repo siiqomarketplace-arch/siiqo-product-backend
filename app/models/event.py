@@ -328,7 +328,7 @@ class TicketPurchase(db.Model):
     event_id = db.Column(db.Integer, db.ForeignKey('events.id'), nullable=False)
     ticket_type_id = db.Column(db.Integer, db.ForeignKey('ticket_types.id'), nullable=False)
     buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Optional for guest buyers
-    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)  # NULL for free tickets
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True, index=True)  # NULL for free tickets
     
     # Unique ticket identification
     ticket_code = db.Column(db.String(50), unique=True, nullable=False, index=True)

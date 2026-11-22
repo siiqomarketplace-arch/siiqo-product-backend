@@ -234,6 +234,9 @@ def register():
     # Marketing code this person came through (siiqo.com/r/<CODE>), if any.
     from app.services.marketing import credit_signup
     credit_signup(new_user, data)
+    # Where this account came from (code, utm or organic): every signup.
+    from app.services.attribution import record_signup
+    record_signup(new_user, data)
 
     # Generate OTP
     otp = str(random.randint(100000, 999999))
@@ -717,26 +720,44 @@ def delete_account():
 # Unsubscribe from Broadcasts (one-click, no login needed)
 # ---------------------------------------------------------------------------
 
-@auth_bp.route('/unsubscribe', methods=['GET'])
-def unsubscribe():
+def _unsubscribe_user():
+    """The user an unsubscribe link is for, or None. New links carry a signed
+    token with the user id only (?t=...); old links (?email=&token=) still work."""
     import hashlib
+    import hmac
+    from flask import current_app
+    from sqlalchemy import func
+    from app.services.broadcasts import read_unsubscribe_token
+    signed = (request.args.get('t') or request.form.get('t') or '').strip()
+    if signed:
+        uid = read_unsubscribe_token(signed)
+        return db.session.get(User, uid) if uid else None
     email = (request.args.get('email') or '').strip().lower()
     token = (request.args.get('token') or '').strip()
-
     if not email or not token:
-        return jsonify({"message": "Invalid unsubscribe link."}), 400
+        return None
+    # Old links: sha256(email + secret)[:16]. The admin sender used the app
+    # config SECRET_KEY, this route the environment one; accept either.
+    secrets_ = {os.environ.get('SECRET_KEY', 'siiqo-default'), current_app.config.get('SECRET_KEY', 'default-key')}
+    if not any(hmac.compare_digest(token, hashlib.sha256(f"{email}{sec}".encode()).hexdigest()[:16])
+               for sec in secrets_ if sec):
+        return None
+    return User.query.filter(func.lower(User.email) == email).first() or False
 
-    # Verify the token (sha256 of email + secret key — prevents arbitrary unsubscribes)
-    secret = os.environ.get('SECRET_KEY', 'siiqo-default')
-    expected_token = hashlib.sha256(f"{email}{secret}".encode()).hexdigest()[:16]
 
-    if token != expected_token:
+@auth_bp.route('/unsubscribe', methods=['GET', 'POST'])
+def unsubscribe():
+    """One-click unsubscribe from marketing emails (no login). GET is the link
+    in the email; POST is the List-Unsubscribe-Post one-click (RFC 8058)."""
+    user = _unsubscribe_user()
+    if user is None:
         return jsonify({"message": "Invalid or expired unsubscribe link."}), 400
-
-    user = User.query.filter_by(email=email).first()
     if user:
+        # The broadcast flag is the marketing-email consent (app/routes/privacy.py).
         user.is_subscribed_to_broadcasts = False
         db.session.commit()
+    if request.method == 'POST':
+        return jsonify({"status": "success", "message": "Unsubscribed."}), 200
 
     # Return a friendly HTML response (not JSON) since this is a browser click
     return """
@@ -854,6 +875,8 @@ def telegram_login():
             user.generate_referral_code()
             from app.services.marketing import credit_signup
             credit_signup(user, data)
+            from app.services.attribution import record_signup
+            record_signup(user, data)
             db.session.commit()
         else:
             return jsonify({
@@ -1165,8 +1188,10 @@ def telegram_webapp_create():
     except tgw.InitDataError as err:
         return _tg_error(err)
     from app.services.marketing import credit_signup
-    if credit_signup(user, data) is not None:
-        db.session.commit()
+    from app.services.attribution import record_signup
+    credit_signup(user, data)
+    record_signup(user, data)
+    db.session.commit()
     return _tg_login_response(user)
 
 

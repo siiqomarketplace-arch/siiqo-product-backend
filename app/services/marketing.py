@@ -10,16 +10,37 @@ This module:
   order from a separate buyer), idempotently, from session hooks and an
   hourly sweep;
 - writes agent earnings to a ledger. Agents earn nothing for a signup or a
-  store being set up: they earn a fixed amount for each of the first few
-  qualifying sales of a seller they brought (paid, not free, from a separate
-  buyer; by default each from a different buyer). A reward is HELD for the
-  hold period, then PAYABLE; if its order is refunded, cancelled or disputed
-  while HELD it is REVERSED and the slot is free for a later sale. Nothing is
-  paid out by the system: an admin pays by hand and marks the rows PAID.
+  store being set up. They earn for the first AGENT_REWARDED_SALES (10)
+  qualifying sales of a seller they brought: a first-sale bonus (N500) for the
+  first qualifying sale, which must be at least AGENT_FIRST_SALE_MIN_NGN
+  (N20,000), then AGENT_SALE_REWARD_NGN (N200) for each of sales 2-10, each at
+  least AGENT_FOLLOW_ON_MIN_NGN (N10,000). A sale qualifies only once delivery
+  is confirmed (its Safe Pay escrow RELEASED: buyer confirmed, 72h
+  auto-release, admin; a digital/service/event order: paid and completed),
+  from a separate buyer (not the seller/agent by account, email, phone or
+  bank), by default each from a different buyer. Amounts are compared in
+  naira at the order's stored rate (no rate: the sale doesn't count). A sale
+  below the minimum doesn't count and uses no slot. A reward is HELD for the
+  hold period counted from the release, then PAYABLE; if its order is
+  refunded, cancelled or disputed while HELD it is REVERSED and the slot is
+  free for a later sale. Nothing is paid out by the system: an admin pays by
+  hand and marks the rows PAID;
+- seller-to-seller referrals: a seller who joined through another seller's
+  invite code earns that seller SELLER_REFERRAL_REWARD_NGN (default 0 = off)
+  on their first qualifying sale (same rules as the agent first sale, minimum
+  SELLER_REFERRAL_MIN_NGN). Held the same way, then credited to the referring
+  seller's ledger (they withdraw it like any sale money);
+- the buyer "First Order N500 Off" offer (BuyerPromoCode): checked and
+  reserved at checkout, Siiqo tops the seller up on delivery.
 
-Settings (env): AGENT_SALE_REWARD_NGN (200), AGENT_REWARDED_SALES (5),
-AGENT_SALES_DISTINCT_BUYERS (true), AGENT_REWARD_HOLD_DAYS (7),
-SETUP_MIN_PRODUCTS (5), ATTRIBUTION_WINDOW_DAYS (30).
+Settings (env): AGENT_FIRST_SALE_BONUS_NGN (500), AGENT_FIRST_SALE_MIN_NGN
+(20000), AGENT_SALE_REWARD_NGN (200), AGENT_FOLLOW_ON_MIN_NGN (10000),
+AGENT_REWARDED_SALES (10), AGENT_SALES_DISTINCT_BUYERS (true),
+AGENT_REWARD_HOLD_DAYS (7), SELLER_REFERRAL_REWARD_NGN (0),
+SELLER_REFERRAL_MIN_NGN (20000), BUYER_OFFER_DISCOUNT_NGN (500),
+BUYER_OFFER_MIN_ORDER_NGN (5000), BUYER_OFFER_CAP_PER_SELLER (10),
+BUYER_OFFER_UNPAID_HOLD_HOURS (48), SETUP_MIN_PRODUCTS (5),
+ATTRIBUTION_WINDOW_DAYS (30).
 """
 from __future__ import annotations
 
@@ -36,8 +57,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.extensions import db
-from app.models.marketing import (AgentEarning, AgentProfile, AgentTeam, MarketingCampaign, MarketingCode,
-                                  MarketingScan, SellerAcquisition)
+from app.models.marketing import (AgentEarning, AgentProfile, AgentTeam, BuyerPromoCode, BuyerPromoUse,
+                                  MarketingCampaign, MarketingCode, MarketingScan, SellerAcquisition)
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +100,42 @@ def _int_env(name, default):
 
 
 def sale_reward():
+    """Follow-on reward, sales 2..AGENT_REWARDED_SALES."""
     return max(0, _int_env("AGENT_SALE_REWARD_NGN", 200))
 
 
+def first_sale_bonus():
+    return max(0, _int_env("AGENT_FIRST_SALE_BONUS_NGN", 500))
+
+
+def first_sale_min():
+    return max(0, _int_env("AGENT_FIRST_SALE_MIN_NGN", 20000))
+
+
+def follow_on_min():
+    return max(0, _int_env("AGENT_FOLLOW_ON_MIN_NGN", 10000))
+
+
 def rewarded_sales():
-    """How many sales of each seller earn the agent a reward."""
-    return max(0, _int_env("AGENT_REWARDED_SALES", 5))
+    """How many sales of each seller earn the agent a reward (the first included)."""
+    return max(0, _int_env("AGENT_REWARDED_SALES", 10))
+
+
+def slot_amount(sale_number):
+    return first_sale_bonus() if sale_number == 1 else sale_reward()
+
+
+def slot_min(sale_number):
+    return first_sale_min() if sale_number == 1 else follow_on_min()
+
+
+def seller_referral_reward():
+    """Naira the inviting seller earns; 0 (the default) means the reward is off."""
+    return max(0, _int_env("SELLER_REFERRAL_REWARD_NGN", 0))
+
+
+def seller_referral_min():
+    return max(0, _int_env("SELLER_REFERRAL_MIN_NGN", 20000))
 
 
 def sales_distinct_buyers():
@@ -96,7 +147,8 @@ def sales_distinct_buyers():
 
 
 def max_per_seller():
-    return sale_reward() * rewarded_sales()
+    n = rewarded_sales()
+    return first_sale_bonus() + sale_reward() * (n - 1) if n else 0
 
 
 def hold_days():
@@ -298,12 +350,38 @@ def resolve_code(raw, sid=None):
     return 200, {
         "code": code.code,
         "kind": code.kind,
-        "label": code.label,
+        # An agent or rider code's label is the person's full name: never public.
+        "label": None if code.kind == "agent" else code.label,
         "destination": code.destination,
         "campaign": campaign_slug,
         "utm": {"source": code.kind, "medium": "qr", "campaign": campaign_slug or code.code.lower()},
         "ref": code.code,
+        "agent": public_agent_for_code(code),
     }
+
+
+def public_agent_for_code(code):
+    """Who an agent code belongs to, for the scan welcome on /r/<code>: first
+    name and team or area only (never phone, surname or bank). None when the
+    code isn't an approved agent's (or a logistics company's rider code)."""
+    try:
+        if code.kind != "agent" or not code.owner_user_id:
+            return None
+        profile = AgentProfile.query.filter_by(user_id=code.owner_user_id).first()
+        if profile is None or profile.status != "APPROVED":
+            return None
+        if profile.code_id and code.id != profile.code_id:
+            # A rider code under a logistics company: the rider's first name and the company.
+            first = ((code.label or "").split() or [""])[0][:40] or None
+            return {"role": "rider", "first_name": first,
+                    "area": (profile.company_name or "").strip()[:80] or None}
+        first = ((profile.full_name or "").split() or [""])[0][:40] or None
+        team = profile.team_ref.name if profile.team_id and profile.team_ref else (profile.team or "")
+        area = (team or "").strip() or (profile.city or "").strip()
+        return {"role": "agent", "first_name": first, "area": area[:80] or None}
+    except Exception as e:  # the welcome is optional; never block the scan
+        logger.warning(f"[MARKETING] agent welcome lookup failed for {code.code}: {e}")
+        return None
 
 
 # ── crediting a new seller ───────────────────────────────────────────────────
@@ -481,9 +559,11 @@ def setup_steps(user_id):
 
 
 def _people(seller_user_id, agent_user_id):
-    """User ids, emails and phones that are not a separate buyer."""
+    """User ids, emails, phones and bank account numbers that are not a
+    separate buyer: the seller's and the agent's (or referring seller's)."""
     from app.models.user import User
     ids, emails, phones = {seller_user_id}, set(), set()
+    banks = set(bank_accounts(seller_user_id))
     seller = db.session.get(User, seller_user_id)
     if seller is not None:
         emails.add(_norm_email(seller.email))
@@ -501,26 +581,49 @@ def _people(seller_user_id, agent_user_id):
         profile = AgentProfile.query.filter_by(user_id=agent_user_id).first()
         if profile is not None:
             phones.add(_norm_phone(profile.phone))
+            if len(_digits(profile.account_number)) >= 6:
+                banks.add(_digits(profile.account_number))
+        banks |= bank_accounts(agent_user_id)
     emails.discard(None)
     phones.discard(None)
-    return ids, emails, phones
+    return ids, emails, phones, banks
 
 
-def _separate_buyer(order, people):
+def _buyer_bank_accounts(order):
+    """Account numbers the buyer paid from, when the payment record has one.
+    Daya bank-transfer payments today store only the virtual account the buyer
+    paid INTO (DayaPayment.account_number), not the sender's account, so this
+    is empty for now; it reads a sender_account_number field if one is ever
+    stored on the payment."""
+    try:
+        from app.models.withdrawal import DayaPayment
+        rows = DayaPayment.query.filter_by(order_id=order.id).all() if order.id else []
+    except Exception:
+        return set()
+    numbers = {_digits(getattr(dp, "sender_account_number", None)) for dp in rows}
+    return {n for n in numbers if len(n) >= 6}
+
+
+def _separate_buyer_parts(buyer_id, emails_in, phones_in, banks_in, people):
     from app.models.user import User
-    ids, emails, phones = people
-    if order.buyer_id and order.buyer_id in ids:
+    ids, emails, phones, banks = people
+    if buyer_id and buyer_id in ids:
         return False
-    buyer_emails = {_norm_email(order.buyer_email)}
-    buyer_phones = {_norm_phone(order.buyer_phone), _norm_phone(order.delivery_phone)}
-    if order.buyer_id:
-        buyer = db.session.get(User, order.buyer_id)
+    buyer_emails = {_norm_email(e) for e in emails_in}
+    buyer_phones = {_norm_phone(p) for p in phones_in}
+    if buyer_id:
+        buyer = db.session.get(User, buyer_id)
         if buyer is not None:
             buyer_emails.add(_norm_email(buyer.email))
             buyer_phones.add(_norm_phone(buyer.phone))
     buyer_emails.discard(None)
     buyer_phones.discard(None)
-    return not (buyer_emails & emails) and not (buyer_phones & phones)
+    return not (buyer_emails & emails) and not (buyer_phones & phones) and not (set(banks_in) & banks)
+
+
+def _separate_buyer(order, people):
+    return _separate_buyer_parts(order.buyer_id, (order.buyer_email,),
+                                 (order.buyer_phone, order.delivery_phone), _buyer_bank_accounts(order), people)
 
 
 def paid_orders_query(vendor_id=None):
@@ -541,6 +644,73 @@ def qualifying_orders(acq):
     for order in paid_orders_query(acq.seller_user_id).order_by(Order.paid_at, Order.id).all():
         (good if _separate_buyer(order, people) else bad).append(order)
     return good, bad
+
+
+def order_value_ngn(order):
+    """The sale's item value in naira: the order subtotal (delivery excluded)
+    plus any Siiqo-paid promo discount (the seller is paid full price), at the
+    order's stored naira rate. None when a non-naira order has no rate."""
+    gross = Decimal(str(order.total_amount or 0)) + Decimal(str(getattr(order, "promo_discount_ngn", None) or 0))
+    currency = (order.currency or "NGN").strip().upper()
+    if currency == "NGN":
+        return gross
+    try:
+        rate = Decimal(str(order.fx_rate_to_ngn)) if order.fx_rate_to_ngn is not None else None
+    except Exception:
+        rate = None
+    if rate is None or not rate.is_finite() or rate <= 0:
+        return None
+    return Decimal(str(order.total_amount or 0)) * rate
+
+
+def order_is_physical(order):
+    """False for digital, service and event-ticket orders."""
+    if order.payment_link_id:
+        from app.models.payment_link import PaymentLink
+        link = db.session.get(PaymentLink, order.payment_link_id)
+        return ((getattr(link, "product_type", None) or "service") if link else "service") == "physical"
+    try:
+        from app.models.event import TicketPurchase
+        if TicketPurchase.query.filter_by(order_id=order.id).first() is not None:
+            return False
+    except Exception:
+        pass
+    items = list(order.items or [])
+    if not items:
+        return True
+    return any(((i.product.product_type if i.product else None) or "physical") == "physical" for i in items)
+
+
+def delivery_confirmed_at(order):
+    """When the sale was confirmed delivered, else None.
+    An order with a Safe Pay escrow: when it was RELEASED (buyer confirmed,
+    72h auto-release, admin, a dispute decided for the seller; digital,
+    service and event orders release at payment). With no escrow: only a
+    digital/service/event order that is paid and COMPLETED. A seller's own
+    status edit never sets paid_at, so it never counts."""
+    from app.models.escrow import EscrowTransaction
+    if order is None or order.paid_at is None:
+        return None
+    escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    if escrow is not None:
+        if (escrow.status or "").upper() != "RELEASED":
+            return None
+        return _aware(escrow.released_at) or _aware(order.released_at) or _aware(order.paid_at)
+    if (order.status or "").upper() == "COMPLETED" and not order_is_physical(order):
+        return _aware(order.released_at) or _aware(order.paid_at)
+    return None
+
+
+def delivered_sales(vendor_id):
+    """[(order, delivered_at)] for a seller's paid, not-free, not-closed orders
+    whose delivery is confirmed, oldest delivery first."""
+    out = []
+    for order in paid_orders_query(vendor_id).all():
+        when = delivery_confirmed_at(order)
+        if when is not None:
+            out.append((order, when))
+    out.sort(key=lambda pair: (pair[1], pair[0].id))
+    return out
 
 
 def buyer_key(order):
@@ -567,7 +737,7 @@ def _rewarded_identities(seller_user_id):
     from app.models.user import User
     other_ids = [r[0] for r in db.session.query(AgentEarning.seller_user_id).filter(
         AgentEarning.seller_user_id.isnot(None), AgentEarning.seller_user_id != seller_user_id,
-        AgentEarning.kind.in_(("sale", "setup", "first_sale"))).distinct().all()]
+        AgentEarning.kind.in_(("sale", "referral", "setup", "first_sale"))).distinct().all()]
     phones, banks = set(), set()
     for uid in other_ids:
         user = db.session.get(User, uid)
@@ -631,8 +801,12 @@ def _reverse_bad_sale_earnings(acq, earnings):
 
 def _award_sales(acq, now):
     """Make sure the first AGENT_REWARDED_SALES qualifying sales of this seller
-    (oldest paid first, skipping bad orders and, by default, repeat buyers)
-    each have a "sale" reward. Idempotent."""
+    each have a "sale" reward: sale 1 (the first-sale bonus) needs at least
+    AGENT_FIRST_SALE_MIN_NGN, sales 2.. at least AGENT_FOLLOW_ON_MIN_NGN.
+    Sales are taken in the order their delivery was confirmed, skipping bad
+    orders, sales below the minimum (they use no slot, so a later sale can
+    still be the first) and, by default, repeat buyers. The hold runs from the
+    delivery confirmation. Idempotent."""
     from app.models.order import Order
     earnings = (AgentEarning.query.filter_by(seller_user_id=acq.seller_user_id, kind="sale")
                 .order_by(AgentEarning.id).all())
@@ -654,26 +828,38 @@ def _award_sales(acq, now):
     people = _people(acq.seller_user_id, acq.agent_user_id)
     made = []
     allowed = None  # checked at the first candidate sale (it reads every rewarded seller)
-    for order in paid_orders_query(acq.seller_user_id).order_by(Order.paid_at, Order.id).all():
+    # Follow-on sales are the ones after the first-sale bonus: a sale delivered
+    # before it (too small to be the first) never becomes "sale 2" later.
+    first_mark = None
+    first_live = next((e for e in live if e.sale_number == 1 and e.order_id), None)
+    if first_live is not None:
+        first_order = db.session.get(Order, first_live.order_id)
+        when = delivery_confirmed_at(first_order) if first_order is not None else None
+        first_mark = (when, first_order.id) if when is not None else None
+    for order, delivered in delivered_sales(acq.seller_user_id):
         if len(live) + len(made) >= limit:
             break
         if order.id in rewarded_order_ids or not _separate_buyer(order, people) or order_went_bad(order.id):
             continue
-        key = buyer_key(order)
-        if distinct:
-            if key is None or key in used_buyers:
-                continue
-            used_buyers.add(key)
         free = [n for n in range(1, limit + 1) if n not in used_slots]
         if not free:
             break
+        slot = free[0]   # 1 (the bonus) while no first sale stands
+        if slot != 1 and first_mark is not None and (delivered, order.id) < first_mark:
+            continue   # came before the first qualifying sale
+        value = order_value_ngn(order)
+        if value is None or value < slot_min(slot):
+            continue   # below the minimum (or no naira rate): doesn't count, uses no slot
+        key = buyer_key(order)
+        if distinct and (key is None or key in used_buyers):
+            continue
         if allowed is None:
             allowed = _may_reward(acq)
         if not allowed:
             break
         earning = AgentEarning(agent_user_id=acq.agent_user_id, seller_user_id=acq.seller_user_id, kind="sale",
-                               order_id=order.id, sale_number=free[0], amount_ngn=Decimal(sale_reward()),
-                               status="HELD", earned_at=now, payable_at=now + timedelta(days=hold_days()),
+                               order_id=order.id, sale_number=slot, amount_ngn=Decimal(slot_amount(slot)),
+                               status="HELD", earned_at=now, payable_at=delivered + timedelta(days=hold_days()),
                                created_at=now)
         try:
             with db.session.begin_nested():
@@ -681,16 +867,93 @@ def _award_sales(acq, now):
                 db.session.flush()
         except IntegrityError:
             continue  # rewarded at the same moment elsewhere
-        used_slots.add(free[0])
+        if key:
+            used_buyers.add(key)
+        used_slots.add(slot)
+        if slot == 1:
+            first_mark = (delivered, order.id)
         made.append(earning)
         if acq.agent_user_id:
             from app.models.user import User
             seller = db.session.get(User, acq.seller_user_id)
+            what = "first-sale bonus" if slot == 1 else f"sale {slot} of {limit}"
             _notify_agent(
                 acq.agent_user_id, "Sale reward earned",
-                f"₦{int(earning.amount_ngn):,} earned: sale {earning.sale_number} of {limit} "
-                f"from {_seller_label(seller)}.")
+                f"₦{int(earning.amount_ngn):,} earned: {what} from {_seller_label(seller)}.")
     return made
+
+
+def _referrer_user_id(acq):
+    """The seller whose invite code brought this seller, else None."""
+    code = acq.code if acq.code_id else None
+    if code is None or code.kind != "seller_invite" or not code.owner_user_id:
+        return None
+    return None if code.owner_user_id == acq.seller_user_id else code.owner_user_id
+
+
+def _award_referral(acq, now):
+    """Seller-to-seller referral: the inviting seller earns
+    SELLER_REFERRAL_REWARD_NGN (0 = off) on the invited seller's first
+    qualifying sale (delivery confirmed, at least SELLER_REFERRAL_MIN_NGN in
+    naira, a separate real buyer). One standing reward per invited seller;
+    a HELD reward whose order goes bad is reversed and a later sale may earn
+    it. Idempotent."""
+    referrer = _referrer_user_id(acq)
+    if referrer is None:
+        return None
+    rows = AgentEarning.query.filter_by(seller_user_id=acq.seller_user_id, kind="referral").all()
+    for e in rows:
+        if e.status == "HELD" and e.order_id:
+            reason = order_went_bad(e.order_id)
+            if reason:
+                e.status = "REVERSED"
+                e.reversed_reason = reason[:255]
+    if any(e.status != "REVERSED" for e in rows):
+        return None
+    amount = seller_referral_reward()
+    if amount <= 0:
+        return None
+    if bank_accounts(acq.seller_user_id) & bank_accounts(referrer):
+        _add_flag(acq, "shared_bank_with_referrer")
+        return None
+    tried = {e.order_id for e in rows}
+    people = _people(acq.seller_user_id, referrer)
+    for order, delivered in delivered_sales(acq.seller_user_id):
+        if order.id in tried or not _separate_buyer(order, people) or order_went_bad(order.id):
+            continue
+        value = order_value_ngn(order)
+        if value is None or value < seller_referral_min() or buyer_key(order) is None:
+            continue
+        earning = AgentEarning(agent_user_id=referrer, seller_user_id=acq.seller_user_id, kind="referral",
+                               order_id=order.id, sale_number=1, amount_ngn=Decimal(amount), status="HELD",
+                               earned_at=now, payable_at=delivered + timedelta(days=hold_days()), created_at=now)
+        try:
+            with db.session.begin_nested():
+                db.session.add(earning)
+                db.session.flush()
+        except IntegrityError:
+            return None
+        from app.models.user import User
+        _notify_agent(referrer, "Referral reward earned",
+                      f"₦{amount:,} earned: {_seller_label(db.session.get(User, acq.seller_user_id))}, "
+                      f"who joined with your invite, made their first sale. It moves to your Siiqo balance "
+                      f"after {hold_days()} days if there is no refund.")
+        return earning
+    return None
+
+
+def _credit_referral(earning, now):
+    """A referral reward that cleared the hold goes to the referring seller's
+    ledger (withdrawn like sale money) and is marked PAID. Idempotent: the
+    ledger write is keyed by the earning."""
+    from app.routes.escrow import _credit_vendor_ledger
+    reference = f"seller_referral:{earning.id}"
+    _credit_vendor_ledger(vendor_id=earning.agent_user_id, amount=float(earning.amount_ngn or 0),
+                          reference_id=reference,
+                          description="Referral reward: a seller you invited made their first sale")
+    earning.status = "PAID"
+    earning.paid_at = now
+    earning.paid_reference = reference
 
 
 def recompute_for(seller_user_id, now=None):
@@ -731,6 +994,8 @@ def recompute_for(seller_user_id, now=None):
 
     if acq.agent_user_id:
         _award_sales(acq, now)
+    elif acq.code_id:
+        _award_referral(acq, now)
     return acq
 
 
@@ -759,8 +1024,11 @@ def _after_flush(session, flush_context):
             elif isinstance(obj, Product):
                 if obj.storefront_id:
                     stores.add(obj.storefront_id)
-            elif isinstance(obj, Order) and obj.paid_at is not None and obj.vendor_id:
-                sellers.add(obj.vendor_id)
+            elif isinstance(obj, Order):
+                if obj.paid_at is not None and obj.vendor_id:
+                    sellers.add(obj.vendor_id)
+                if getattr(obj, "promo_code", None) and obj.id:
+                    orders.add(obj.id)
             elif isinstance(obj, DisputeCase) and obj.vendor_id:
                 sellers.add(obj.vendor_id)
             elif isinstance(obj, EscrowTransaction) and obj.order_id:
@@ -789,6 +1057,16 @@ def _before_commit(session):
     if not sellers and not stores and not orders:
         return
     session.info["_mkt_busy"] = True
+    if orders:
+        # The buyer offer: give a use back when its order is cancelled or
+        # refunded, top the seller up when it is delivered (escrow released).
+        try:
+            with session.begin_nested():
+                for order_id in list(orders):
+                    sync_promo_for_order(order_id)
+                session.flush()
+        except Exception as e:  # never block the change that triggered this
+            logger.warning(f"[MARKETING] promo update skipped: {e}")
     try:
         with session.begin_nested():
             if stores:
@@ -858,9 +1136,13 @@ def run_marketing_sweep(now=None):
     reverse held rewards. Idempotent."""
     now = now or _now()
     recomputed = 0
+    still_open = [SellerAcquisition.setup_at.is_(None), SellerAcquisition.pay_link_at.is_(None),
+                  SellerAcquisition.first_paid_order_at.is_(None), SellerAcquisition.agent_user_id.isnot(None)]
+    if seller_referral_reward() > 0:   # invited sellers whose referral reward may still be due
+        still_open.append(SellerAcquisition.code_id.in_(
+            db.session.query(MarketingCode.id).filter(MarketingCode.kind == "seller_invite")))
     open_rows = SellerAcquisition.query.filter(
-        db.or_(SellerAcquisition.setup_at.is_(None), SellerAcquisition.pay_link_at.is_(None),
-               SellerAcquisition.first_paid_order_at.is_(None), SellerAcquisition.agent_user_id.isnot(None)),
+        db.or_(*still_open),
         SellerAcquisition.signed_up_at >= now - timedelta(days=365)).all()
     for acq in open_rows:
         try:
@@ -870,10 +1152,10 @@ def run_marketing_sweep(now=None):
         except Exception as e:
             logger.warning(f"[MARKETING] sweep skipped seller {acq.seller_user_id}: {e}")
 
-    released = reversed_count = 0
+    released = reversed_count = credited = 0
     for earning in AgentEarning.query.filter_by(status="HELD").all():
         reason = None
-        if earning.kind == "sale" and earning.order_id:
+        if earning.kind in ("sale", "referral") and earning.order_id:
             reason = order_went_bad(earning.order_id)
         elif earning.kind == "first_sale" and earning.seller_user_id:  # old rows
             acq = SellerAcquisition.query.filter_by(seller_user_id=earning.seller_user_id).first()
@@ -883,10 +1165,16 @@ def run_marketing_sweep(now=None):
             earning.reversed_reason = reason[:255]
             reversed_count += 1
         elif earning.payable_at is not None and _aware(earning.payable_at) <= now:
-            earning.status = "PAYABLE"
-            released += 1
+            if earning.kind == "referral":
+                _credit_referral(earning, now)   # straight to the referring seller's balance
+                credited += 1
+            else:
+                earning.status = "PAYABLE"
+                released += 1
+    promos = sweep_promos(now)
     db.session.commit()
-    return {"recomputed": recomputed, "payable": released, "reversed": reversed_count}
+    return {"recomputed": recomputed, "payable": released, "reversed": reversed_count,
+            "referrals_credited": credited, **promos}
 
 
 # ── agents ───────────────────────────────────────────────────────────────────
@@ -1363,13 +1651,20 @@ def agent_me(profile):
                     "company_name": profile.company_name, "full_name": profile.full_name, "code": code,
                     "link": code_link(code) if approved and code else None,
                     "is_team_lead": bool(led_teams(profile.user_id))},
-        "rates": {"per_sale": sale_reward(), "rewarded_sales": rewarded_sales(),
-                  "max_per_seller": max_per_seller(), "hold_days": hold_days(), "min_products": min_products()},
+        "rates": rates(),
         "today": stats_for_agent(profile, period_start("day", now)),
         "week": stats_for_agent(profile, period_start("week", now)),
         "totals": stats_for_agent(profile),
-        "earnings": earning_totals(AgentEarning.query.filter(AgentEarning.agent_user_id == profile.user_id)),
+        "earnings": earning_totals(AgentEarning.query.filter(AgentEarning.agent_user_id == profile.user_id,
+                                                             AgentEarning.kind != "referral")),
     }
+
+
+def rates():
+    """The agent reward rules, for the portal and admin."""
+    return {"first_sale_bonus": first_sale_bonus(), "first_sale_min": first_sale_min(),
+            "per_sale": sale_reward(), "follow_on_min": follow_on_min(), "rewarded_sales": rewarded_sales(),
+            "max_per_seller": max_per_seller(), "hold_days": hold_days(), "min_products": min_products()}
 
 
 def seller_status(acq, qualifying_count=None):
@@ -1491,6 +1786,8 @@ def growth_kit(user, storefront):
     db.session.commit()
 
     invited = SellerAcquisition.query.filter_by(code_id=invite.id)
+    referral_rows = AgentEarning.query.filter(AgentEarning.agent_user_id == user.id,
+                                              AgentEarning.kind == "referral")
     since = _now() - timedelta(days=30)
     from app.models.order import Order
     by_source = (paid_orders_query(user.id).filter(Order.paid_at >= since)
@@ -1504,6 +1801,9 @@ def growth_kit(user, storefront):
         "sticker": {"code": sticker.code, "link": code_link(sticker.code)},
         "invite": {"code": invite.code, "link": code_link(invite.code)},
         "verified": bool(storefront.is_verified or storefront.verification_status == "VERIFIED" or pro_active),
+        # Seller-to-seller reward: off (0) until Siiqo sets an amount.
+        "referral": {"reward_ngn": seller_referral_reward(), "min_sale_ngn": seller_referral_min(),
+                     "hold_days": hold_days(), "earnings": earning_totals(referral_rows)},
         "results": {
             "sticker_scans": sticker.scan_count or 0,
             "invite_scans": invite.scan_count or 0,
@@ -1702,3 +2002,444 @@ def board(date_from=None, date_to=None):
     last_day = (end - timedelta(seconds=1)).astimezone(LAGOS).date().isoformat()
     return {"range": {"from": start.astimezone(LAGOS).date().isoformat(), "to": last_day},
             "totals": totals, "campaigns": campaign_rows, "codes": code_rows, "agents": agent_rows}
+
+
+# ── buyer offer: "First Order N500 Off" ──────────────────────────────────────
+# One code per seller, paid for by Siiqo. The buyer pays the discount less
+# (the order, escrow and Daya amounts are the discounted amount). When the
+# order is delivered (escrow RELEASED, or a digital/service/event order paid
+# and completed) the seller's ledger is topped up by the discount less
+# Siiqo's normal fee on it, so the seller ends with exactly what full price
+# would have given them. A cancelled/refunded order gives its use back.
+
+PROMO_TOPUP_PREFIX = "promo_topup"
+
+
+def buyer_offer_discount():
+    return max(0, _int_env("BUYER_OFFER_DISCOUNT_NGN", 500))
+
+
+def buyer_offer_min_order():
+    return max(0, _int_env("BUYER_OFFER_MIN_ORDER_NGN", 5000))
+
+
+def buyer_offer_cap():
+    return max(0, _int_env("BUYER_OFFER_CAP_PER_SELLER", 10))
+
+
+def buyer_offer_unpaid_hours():
+    """An unpaid order gives its use back after this many hours (it is topped
+    up anyway if it is paid and delivered later)."""
+    return max(1, _int_env("BUYER_OFFER_UNPAID_HOLD_HOURS", 48))
+
+
+def promo_topup_amount(discount):
+    """What Siiqo credits the seller: the discount less Siiqo's normal fee on
+    it (app/services/fees.py), e.g. N500 - 3% = N485."""
+    from app.services.fees import platform_fee
+    d = Decimal(str(discount or 0))
+    return (d - platform_fee(d)).quantize(Decimal("0.01"))
+
+
+def find_promo(raw):
+    code = normalize_code(raw)
+    if not code:
+        return None
+    return BuyerPromoCode.query.filter_by(code=code).first()
+
+
+def promo_is_live(promo, now=None):
+    now = now or _now()
+    if promo is None or not promo.active:
+        return False
+    if promo.starts_at is not None and _aware(promo.starts_at) > now:
+        return False
+    if promo.ends_at is not None and _aware(promo.ends_at) <= now:
+        return False
+    return True
+
+
+def _buyer_identities(buyer_user_id, email, phone):
+    from app.models.user import User
+    emails, phones = {_norm_email(email)}, {_norm_phone(phone)}
+    if buyer_user_id:
+        user = db.session.get(User, buyer_user_id)
+        if user is not None:
+            emails.add(_norm_email(user.email))
+            phones.add(_norm_phone(user.phone))
+    emails.discard(None)
+    phones.discard(None)
+    return emails, phones
+
+
+def promo_buyer_keys(buyer_user_id, email, phone):
+    emails, phones = _buyer_identities(buyer_user_id, email, phone)
+    keys = {f"e:{e}" for e in emails} | {f"p:{p}" for p in phones}
+    if buyer_user_id:
+        keys.add(f"u:{buyer_user_id}")
+    return keys
+
+
+def _primary_buyer_key(buyer_user_id, email, phone):
+    if buyer_user_id:
+        return f"u:{buyer_user_id}"
+    if _norm_email(email):
+        return f"e:{_norm_email(email)}"
+    return f"p:{_norm_phone(phone)}" if _norm_phone(phone) else None
+
+
+def buyer_has_paid_order(buyer_user_id, email, phone):
+    """True when this buyer (by account, email or phone; guests too) already
+    has a paid order on Siiqo."""
+    from app.models.order import Order
+    emails, phones = _buyer_identities(buyer_user_id, email, phone)
+    q = Order.query.filter(Order.paid_at.isnot(None),
+                           func.upper(func.coalesce(Order.payment_method, "")) != "FREE")
+    conds = []
+    if buyer_user_id:
+        conds.append(Order.buyer_id == buyer_user_id)
+    for e in emails:
+        conds.append(func.lower(func.trim(Order.buyer_email)) == e)
+    if conds and q.filter(db.or_(*conds)).first() is not None:
+        return True
+    for p in phones:
+        tail = _digits(p)[-4:]
+        if not tail:
+            continue
+        rows = q.filter(db.or_(Order.buyer_phone.like(f"%{tail}"), Order.delivery_phone.like(f"%{tail}"))) \
+            .with_entities(Order.buyer_phone, Order.delivery_phone).limit(500).all()
+        if any(p in (_norm_phone(a), _norm_phone(b)) for a, b in rows):
+            return True
+    return False
+
+
+def _promo_error(code, message, status=400, **extra):
+    return MarketingError(status, code, message, field="promo_code", **extra)
+
+
+def check_promo(raw, *, vendor_id, subtotal_ngn, currency="NGN", payment_method=None, buyer_user_id=None,
+                email=None, phone=None, now=None):
+    """The promo for this order, or MarketingError with a plain message.
+    subtotal_ngn is the order's item total before the discount."""
+    now = now or _now()
+    promo = find_promo(raw)
+    if promo is None:
+        raise _promo_error("PROMO_NOT_FOUND", "We couldn't find that code. Check it and try again.", 404)
+    if not promo_is_live(promo, now):
+        raise _promo_error("PROMO_INACTIVE", "This code is not active right now.")
+    if promo.vendor_id != vendor_id:
+        sf = _store(promo.vendor_id)
+        name = sf.store_name if sf is not None and sf.store_name else "another seller"
+        raise _promo_error("PROMO_WRONG_SELLER", f"This code only works for {name}.")
+    if (currency or "NGN").strip().upper() != "NGN":
+        raise _promo_error("PROMO_NAIRA_ONLY", "This code works for naira payments only.")
+    if (payment_method or "").upper() == "POD":
+        raise _promo_error("PROMO_SAFE_PAY_ONLY", "This code works when you pay with Safe Pay, not pay on delivery.")
+    subtotal = Decimal(str(subtotal_ngn or 0))
+    minimum = Decimal(str(promo.min_order_ngn or 0))
+    discount = Decimal(str(promo.discount_ngn or 0))
+    if subtotal < minimum or subtotal <= discount:
+        raise _promo_error("PROMO_MIN_ORDER", f"Spend at least ₦{int(minimum):,} with this seller to use this code.")
+    acq = SellerAcquisition.query.filter_by(seller_user_id=vendor_id).first()
+    people = _people(vendor_id, acq.agent_user_id if acq is not None else None)
+    if not _separate_buyer_parts(buyer_user_id, (email,), (phone,), (), people):
+        raise _promo_error("PROMO_SELF", "Sellers can't use their own code.")
+    if not (buyer_user_id or _norm_email(email) or _norm_phone(phone)):
+        raise _promo_error("PROMO_NEED_CONTACT", "Add your email or phone number to use this code.")
+    if buyer_has_paid_order(buyer_user_id, email, phone):
+        raise _promo_error("PROMO_NOT_FIRST_ORDER", "This code is for your first order on Siiqo.")
+    keys = promo_buyer_keys(buyer_user_id, email, phone)
+    if BuyerPromoUse.query.filter(BuyerPromoUse.buyer_key.in_(list(keys)),
+                                  BuyerPromoUse.status != "RELEASED").first() is not None:
+        raise _promo_error("PROMO_NOT_FIRST_ORDER", "You already used a first-order code. It works once per buyer.")
+    if (promo.uses_reserved or 0) >= (promo.cap or 0):
+        raise _promo_error("PROMO_USED_UP", "This code has been fully used.", 409)
+    return promo
+
+
+def reserve_promo(promo, order, *, buyer_user_id=None, email=None, phone=None):
+    """Take one use of the code for this order (caller commits). The cap is
+    enforced by a conditional UPDATE, so the use after the last one fails
+    even when two checkouts arrive together."""
+    result = db.session.execute(
+        update(BuyerPromoCode)
+        .where(BuyerPromoCode.id == promo.id, BuyerPromoCode.uses_reserved < BuyerPromoCode.cap)
+        .values(uses_reserved=BuyerPromoCode.uses_reserved + 1)
+        .execution_options(synchronize_session=False))
+    if result.rowcount != 1:
+        raise _promo_error("PROMO_USED_UP", "This code has been fully used.", 409)
+    use = BuyerPromoUse(promo_id=promo.id, order_id=order.id, vendor_id=order.vendor_id,
+                        buyer_key=_primary_buyer_key(buyer_user_id, email, phone),
+                        discount_ngn=Decimal(str(promo.discount_ngn)), status="RESERVED", created_at=_now())
+    db.session.add(use)
+    order.promo_code = promo.code
+    order.promo_discount_ngn = Decimal(str(promo.discount_ngn))
+    db.session.flush()
+    return use
+
+
+def _change_uses(promo_id, delta):
+    stmt = update(BuyerPromoCode).where(BuyerPromoCode.id == promo_id)
+    if delta < 0:
+        stmt = stmt.where(BuyerPromoCode.uses_reserved > 0)
+    db.session.execute(stmt.values(uses_reserved=BuyerPromoCode.uses_reserved + delta)
+                       .execution_options(synchronize_session=False))
+
+
+def _release_use(use, reason, now):
+    use.status = "RELEASED"
+    use.released_reason = (reason or "")[:120] or None
+    use.released_at = now
+    _change_uses(use.promo_id, -1)
+
+
+def _order_closed(order):
+    """Reason when the order was cancelled or refunded (money back to the buyer)."""
+    from app.models.escrow import EscrowTransaction
+    if order is None:
+        return "Order no longer exists"
+    status = (order.status or "").upper()
+    if status in CLOSED_ORDER_STATUSES:
+        return _BAD_REASONS[status]
+    escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    if escrow is not None and (escrow.status or "").upper() in ("REFUNDED", "CANCELLED"):
+        return _BAD_REASONS[(escrow.status or "").upper()]
+    return None
+
+
+def _topup(use, order, now):
+    from app.models.communication import Notification
+    from app.routes.escrow import _credit_vendor_ledger
+    if use.status == "RELEASED":
+        _change_uses(use.promo_id, 1)   # an order paid after its hold ran out: Siiqo still honours it
+    amount = promo_topup_amount(use.discount_ngn)
+    reference = f"{PROMO_TOPUP_PREFIX}:{use.promo_id}:{order.id}"
+    _credit_vendor_ledger(vendor_id=order.vendor_id, amount=float(amount), reference_id=reference,
+                          description=f"Siiqo paid ₦{int(use.discount_ngn):,} of Order #{order.id} "
+                                      f"(First Order offer), less Siiqo's fee")
+    use.status = "TOPPED_UP"
+    use.topup_ngn = amount
+    use.topup_reference = reference
+    use.topped_up_at = now
+    try:
+        with db.session.begin_nested():
+            db.session.add(Notification(
+                user_id=order.vendor_id, title="Siiqo paid the buyer's discount",
+                message=f"₦{amount:,.2f} added to your balance: Siiqo paid the ₦{int(use.discount_ngn):,} "
+                        f"first-order discount on Order #{order.id}.", type="ESCROW", order_id=order.id))
+    except Exception as e:
+        logger.warning(f"[MARKETING] promo notice skipped for order {order.id}: {e}")
+
+
+def sync_promo_for_order(order_id, now=None):
+    """Bring one order's promo use up to date. Idempotent."""
+    from app.models.order import Order
+    use = BuyerPromoUse.query.filter_by(order_id=order_id).first()
+    if use is None or use.status == "TOPPED_UP":
+        return None
+    now = now or _now()
+    order = db.session.get(Order, order_id)
+    reason = _order_closed(order)
+    if reason:
+        if use.status == "RESERVED":
+            _release_use(use, reason, now)
+        return use
+    if delivery_confirmed_at(order) is not None:
+        _topup(use, order, now)
+    return use
+
+
+def sweep_promos(now=None):
+    """Hourly: top up delivered orders, give back the uses of cancelled,
+    refunded or long-unpaid orders."""
+    from app.models.order import Order
+    now = now or _now()
+    released = topped = 0
+    cutoff = now - timedelta(hours=buyer_offer_unpaid_hours())
+    for use in BuyerPromoUse.query.filter(BuyerPromoUse.status != "TOPPED_UP").all():
+        try:
+            with db.session.begin_nested():
+                before = use.status
+                sync_promo_for_order(use.order_id, now)
+                if use.status == "RESERVED":
+                    order = db.session.get(Order, use.order_id)
+                    if order is not None and order.paid_at is None and _aware(use.created_at) <= cutoff:
+                        _release_use(use, "Not paid in time", now)
+                released += int(before == "RESERVED" and use.status == "RELEASED")
+                topped += int(use.status == "TOPPED_UP")
+        except Exception as e:
+            logger.warning(f"[MARKETING] promo sweep skipped order {use.order_id}: {e}")
+    return {"promo_released": released, "promo_topped_up": topped}
+
+
+def promo_preview(raw, candidates, *, payment_method=None, buyer_user_id=None, email=None, phone=None):
+    """For the checkout field: candidates is [{vendor_id, subtotal, currency}].
+    Returns what the buyer will save, or raises MarketingError."""
+    promo = find_promo(raw)
+    if promo is None:
+        raise _promo_error("PROMO_NOT_FOUND", "We couldn't find that code. Check it and try again.", 404)
+    mine = [c for c in candidates if c.get("vendor_id") == promo.vendor_id]
+    target = max(mine, key=lambda c: c.get("subtotal") or 0) if mine else (candidates[0] if candidates else {})
+    check_promo(raw, vendor_id=target.get("vendor_id"), subtotal_ngn=target.get("subtotal") or 0,
+                currency=target.get("currency") or "NGN", payment_method=payment_method,
+                buyer_user_id=buyer_user_id, email=email, phone=phone)
+    sf = _store(promo.vendor_id)
+    return {"code": promo.code, "vendor_id": promo.vendor_id, "store_name": sf.store_name if sf else None,
+            "discount_ngn": _money(promo.discount_ngn), "min_order_ngn": _money(promo.min_order_ngn),
+            "message": f"₦{int(promo.discount_ngn):,} off your first order, paid by Siiqo."}
+
+
+# ── admin: promo codes ───────────────────────────────────────────────────────
+
+def _promo_code_prefix(vendor_id):
+    from app.models.user import User
+    sf = _store(vendor_id)
+    user = db.session.get(User, vendor_id)
+    name = (user.first_name if user is not None and user.first_name else None) or (sf.store_name if sf else "")
+    letters = re.sub(r"[^A-Z]", "", (name or "").split()[0].upper() if (name or "").split() else "")[:10]
+    return letters if len(letters) >= 2 else "SIIQO"
+
+
+def _promo_code_taken(code):
+    return BuyerPromoCode.query.filter_by(code=code).first() is not None or code_taken(code)
+
+
+def new_promo_code(vendor_id, discount):
+    base = f"{_promo_code_prefix(vendor_id)}{int(discount)}"[:24]
+    if not _promo_code_taken(base):
+        return base
+    for _ in range(30):
+        code = f"{base[:20]}{_random_part(3)}"
+        if not _promo_code_taken(code):
+            return code
+    raise MarketingError(500, "CODE_GENERATION_FAILED", "Could not make a free code. Please try again.")
+
+
+def _promo_day(value, field, end=False):
+    if value in (None, ""):
+        return None
+    when = _parse_day(value, end=end)
+    if when is None:
+        raise MarketingError(400, "VALIDATION_ERROR", "Use a date like 2026-12-31.", field=field)
+    return when
+
+
+def _positive_int(data, key, default, minimum=0):
+    if data.get(key) in (None, ""):
+        return default
+    try:
+        value = int(Decimal(str(data.get(key))))
+    except Exception:
+        raise MarketingError(400, "VALIDATION_ERROR", "Enter a whole number.", field=key)
+    if value < minimum:
+        raise MarketingError(400, "VALIDATION_ERROR", f"Enter at least {minimum}.", field=key)
+    return value
+
+
+def create_promo(data, admin_id=None):
+    """One code per seller. data: seller_id or store_slug; optional code,
+    discount_ngn, min_order_ngn, cap, starts_on, ends_on (Lagos days), active."""
+    from app.models.user import Storefront
+    data = data if isinstance(data, dict) else {}
+    vendor_id = None
+    if data.get("seller_id") not in (None, ""):
+        try:
+            vendor_id = int(data.get("seller_id"))
+        except (TypeError, ValueError):
+            vendor_id = None
+    elif isinstance(data.get("store_slug"), str) and data["store_slug"].strip():
+        sf = Storefront.query.filter_by(store_slug=data["store_slug"].strip().lower()).first()
+        vendor_id = sf.vendor_id if sf is not None else None
+    if not vendor_id or _store(vendor_id) is None:
+        raise MarketingError(400, "VALIDATION_ERROR", "Pick a seller with a store.", field="seller_id")
+    existing = BuyerPromoCode.query.filter_by(vendor_id=vendor_id).first()
+    if existing is not None:
+        raise MarketingError(409, "PROMO_EXISTS", "This seller already has a code. Edit that one instead.",
+                             promo_id=existing.id, code_value=existing.code)
+    discount = _positive_int(data, "discount_ngn", buyer_offer_discount(), 1)
+    minimum = _positive_int(data, "min_order_ngn", buyer_offer_min_order(), 0)
+    if minimum <= discount:
+        raise MarketingError(400, "VALIDATION_ERROR", "The minimum order must be more than the discount.",
+                             field="min_order_ngn")
+    cap = _positive_int(data, "cap", buyer_offer_cap(), 1)
+    if data.get("code") not in (None, ""):
+        code = normalize_code(str(data.get("code")))
+        if not code:
+            raise MarketingError(400, "INVALID_CODE", "A code is 3 to 24 letters, numbers or dashes.", field="code")
+        if _promo_code_taken(code):
+            raise MarketingError(409, "CODE_TAKEN", "That code is already in use.", field="code")
+    else:
+        code = new_promo_code(vendor_id, discount)
+    starts = _promo_day(data.get("starts_on"), "starts_on")
+    ends = _promo_day(data.get("ends_on"), "ends_on", end=True)
+    if starts and ends and ends <= starts:
+        raise MarketingError(400, "VALIDATION_ERROR", "The end date must be after the start date.", field="ends_on")
+    active = data.get("active", True)
+    if not isinstance(active, bool):
+        raise MarketingError(400, "VALIDATION_ERROR", "active is true or false.", field="active")
+    promo = BuyerPromoCode(code=code, vendor_id=vendor_id, discount_ngn=Decimal(discount),
+                           min_order_ngn=Decimal(minimum), cap=cap, uses_reserved=0, starts_at=starts,
+                           ends_at=ends, active=active, created_by_admin_id=admin_id, created_at=_now())
+    db.session.add(promo)
+    db.session.flush()
+    return promo
+
+
+def update_promo(promo, data):
+    data = data if isinstance(data, dict) else {}
+    if "active" in data:
+        if not isinstance(data.get("active"), bool):
+            raise MarketingError(400, "VALIDATION_ERROR", "active is true or false.", field="active")
+        promo.active = data["active"]
+    if "cap" in data:
+        promo.cap = _positive_int(data, "cap", promo.cap, 1)
+    if "min_order_ngn" in data:
+        minimum = _positive_int(data, "min_order_ngn", int(promo.min_order_ngn), 0)
+        if minimum <= int(promo.discount_ngn):
+            raise MarketingError(400, "VALIDATION_ERROR", "The minimum order must be more than the discount.",
+                                 field="min_order_ngn")
+        promo.min_order_ngn = Decimal(minimum)
+    if "starts_on" in data:
+        promo.starts_at = _promo_day(data.get("starts_on"), "starts_on")
+    if "ends_on" in data:
+        promo.ends_at = _promo_day(data.get("ends_on"), "ends_on", end=True)
+    if promo.starts_at and promo.ends_at and _aware(promo.ends_at) <= _aware(promo.starts_at):
+        raise MarketingError(400, "VALIDATION_ERROR", "The end date must be after the start date.", field="ends_on")
+    return promo
+
+
+def promo_dict(promo, with_orders=False):
+    from app.models.order import Order
+    uses = BuyerPromoUse.query.filter_by(promo_id=promo.id).order_by(BuyerPromoUse.id.desc()).all()
+    sf = _store(promo.vendor_id)
+    standing = [u for u in uses if u.status != "RELEASED"]
+    topped = [u for u in uses if u.status == "TOPPED_UP"]
+    out = {
+        "id": promo.id, "code": promo.code, "seller_id": promo.vendor_id,
+        "store_name": sf.store_name if sf else None, "store_slug": sf.store_slug if sf else None,
+        "discount_ngn": _money(promo.discount_ngn), "min_order_ngn": _money(promo.min_order_ngn),
+        "cap": promo.cap, "uses": len(standing), "uses_left": max(0, (promo.cap or 0) - (promo.uses_reserved or 0)),
+        "delivered": len(topped), "pending": len(standing) - len(topped),
+        # What Siiqo has paid: the discount on each delivered order (the seller
+        # got the top-up; Siiqo also forgoes its fee on the discount).
+        "siiqo_cost_ngn": _money(sum((u.discount_ngn or 0) for u in topped)),
+        "siiqo_cost_pending_ngn": _money(sum((u.discount_ngn or 0) for u in standing if u.status == "RESERVED")),
+        "topups_ngn": _money(sum((u.topup_ngn or 0) for u in topped)),
+        "starts_on": _aware(promo.starts_at).astimezone(LAGOS).date().isoformat() if promo.starts_at else None,
+        "ends_on": (_aware(promo.ends_at) - timedelta(seconds=1)).astimezone(LAGOS).date().isoformat()
+        if promo.ends_at else None,
+        "active": bool(promo.active), "live": promo_is_live(promo), "created_at": _iso(promo.created_at),
+    }
+    if with_orders:
+        rows = []
+        for u in uses:
+            order = db.session.get(Order, u.order_id)
+            rows.append({"order_id": u.order_id, "status": u.status, "discount_ngn": _money(u.discount_ngn),
+                         "topup_ngn": _money(u.topup_ngn) if u.topup_ngn is not None else None,
+                         "order_status": order.status if order else None,
+                         "order_total_ngn": _money(order.total_amount) if order else None,
+                         "paid_at": _iso(order.paid_at) if order else None,
+                         "released_reason": u.released_reason, "created_at": _iso(u.created_at),
+                         "topped_up_at": _iso(u.topped_up_at)})
+        out["orders"] = rows
+    return out

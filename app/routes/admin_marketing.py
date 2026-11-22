@@ -12,6 +12,8 @@ a superadmin. Every write is audit-logged.
     POST       /api/admin/marketing/earnings/mark-paid  (superadmin)
     POST       /api/admin/marketing/earnings/<id>/reverse (superadmin)
     GET        /api/admin/marketing/flags
+    GET/POST   /api/admin/marketing/promos              GET/PATCH /api/admin/marketing/promos/<id>
+    GET        /api/admin/marketing/rules               agent, referral and buyer-offer amounts
     GET/POST   /api/admin/marketing/teams               PATCH /api/admin/marketing/teams/<id>
     POST       /api/admin/agents/<id>/make-lead {team_id}   POST /api/admin/agents/<id>/remove-lead
 """
@@ -25,8 +27,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db, limiter
 from app.models.audit import AdminAuditLog
-from app.models.marketing import (AgentEarning, AgentProfile, AgentTeam, MarketingCampaign, MarketingCode,
-                                  SellerAcquisition)
+from app.models.marketing import (AgentEarning, AgentProfile, AgentTeam, BuyerPromoCode, MarketingCampaign,
+                                  MarketingCode, SellerAcquisition)
 from app.models.user import Storefront, User
 from app.routes.admin import _client_ip, _get_admin, _parse_admin_id, _require_superadmin, admin_bp
 from app.services import marketing as svc
@@ -642,3 +644,98 @@ def admin_marketing_flags():
                                                        "store_name": sf.store_name if sf else None},
                     "agent": agent, "flags": list(a.flags or []), "created_at": svc._iso(a.created_at)})
     return jsonify({"flags": out, "total": total}), 200
+
+
+# ── buyer offer: "First Order N500 Off" codes ────────────────────────────────
+
+@admin_bp.route("/marketing/rules", methods=["GET"])
+@jwt_required()
+def admin_marketing_rules():
+    if not _admin():
+        return _forbidden()
+    return jsonify({
+        "agent": svc.rates(),
+        "seller_referral": {"reward_ngn": svc.seller_referral_reward(), "min_sale_ngn": svc.seller_referral_min(),
+                            "hold_days": svc.hold_days(), "on": svc.seller_referral_reward() > 0},
+        "buyer_offer": {"discount_ngn": svc.buyer_offer_discount(), "min_order_ngn": svc.buyer_offer_min_order(),
+                        "cap_per_seller": svc.buyer_offer_cap(),
+                        "seller_topup_ngn": float(svc.promo_topup_amount(svc.buyer_offer_discount())),
+                        "unpaid_hold_hours": svc.buyer_offer_unpaid_hours()},
+    }), 200
+
+
+@admin_bp.route("/marketing/promos", methods=["GET"])
+@jwt_required()
+def admin_list_promos():
+    if not _admin():
+        return _forbidden()
+    page, per_page = svc.page(request.args)
+    q = BuyerPromoCode.query
+    term = (request.args.get("q") or "").strip()
+    if term:
+        like = f"%{term.lower()}%"
+        q = q.outerjoin(Storefront, Storefront.vendor_id == BuyerPromoCode.vendor_id).filter(
+            or_(func.lower(BuyerPromoCode.code).like(like), func.lower(Storefront.store_name).like(like)))
+    total = q.count()
+    rows = q.order_by(BuyerPromoCode.id.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    promos = [svc.promo_dict(p) for p in rows]
+    all_rows = [svc.promo_dict(p) for p in BuyerPromoCode.query.all()] if not term else promos
+    totals = {"codes": len(all_rows), "uses": sum(p["uses"] for p in all_rows),
+              "delivered": sum(p["delivered"] for p in all_rows),
+              "siiqo_cost_ngn": sum(p["siiqo_cost_ngn"] for p in all_rows),
+              "siiqo_cost_pending_ngn": sum(p["siiqo_cost_pending_ngn"] for p in all_rows)}
+    return jsonify({"promos": promos, "totals": totals, "total": total, "page": page,
+                    "pages": svc.pages(total, per_page)}), 200
+
+
+@admin_bp.route("/marketing/promos", methods=["POST"])
+@jwt_required()
+@limiter.limit("60 per hour")
+def admin_create_promo():
+    admin = _admin()
+    if not admin:
+        return _forbidden()
+    try:
+        promo = svc.create_promo(_body(), admin_id=admin.id)
+    except svc.MarketingError as e:
+        return _err(e)
+    _audit(admin, "PROMO_CREATE", "buyer_promo_code", promo.id,
+           {"code": promo.code, "seller_id": promo.vendor_id, "discount_ngn": float(promo.discount_ngn)})
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"code": "CODE_TAKEN", "message": "That code or seller already has a promo."}), 409
+    return jsonify({"promo": svc.promo_dict(promo)}), 201
+
+
+@admin_bp.route("/marketing/promos/<int:promo_id>", methods=["GET"])
+@jwt_required()
+def admin_get_promo(promo_id):
+    if not _admin():
+        return _forbidden()
+    promo = db.session.get(BuyerPromoCode, promo_id)
+    if promo is None:
+        return _not_found("Promo code")
+    return jsonify({"promo": svc.promo_dict(promo, with_orders=True)}), 200
+
+
+@admin_bp.route("/marketing/promos/<int:promo_id>", methods=["PATCH"])
+@jwt_required()
+@limiter.limit("120 per hour")
+def admin_update_promo(promo_id):
+    admin = _admin()
+    if not admin:
+        return _forbidden()
+    promo = db.session.get(BuyerPromoCode, promo_id)
+    if promo is None:
+        return _not_found("Promo code")
+    body = _body()
+    try:
+        svc.update_promo(promo, body)
+    except svc.MarketingError as e:
+        return _err(e)
+    _audit(admin, "PROMO_UPDATE", "buyer_promo_code", promo.id,
+           {k: body.get(k) for k in ("active", "cap", "min_order_ngn", "starts_on", "ends_on") if k in body})
+    db.session.commit()
+    return jsonify({"promo": svc.promo_dict(promo)}), 200

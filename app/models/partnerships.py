@@ -21,14 +21,27 @@ class PartnerApplication(db.Model):
     state_of_operation = db.Column(db.String(100), nullable=True)
 
     status = db.Column(db.String(50), default='PENDING')
-    # PENDING, APPROVED, REJECTED
+    # PENDING, APPROVED, REJECTED, SUSPENDED (only APPROVED may use the portal)
+
+    # What kind of delivery provider this is. Today every row is an approved
+    # Siiqo partner; API couriers (e.g. an aggregator) are quoted by code in
+    # app/services/logistics_partners.py and have no application row.
+    provider_type = db.Column(db.String(30), nullable=True, default='siiqo_partner')
+
+    # The admin's note on the last review (reason for rejecting/suspending).
+    review_note = db.Column(db.Text, nullable=True)
 
     # Bank Payout details for logistics partners
     bank_code = db.Column(db.String(20), nullable=True)
     account_number = db.Column(db.String(50), nullable=True)
     account_name = db.Column(db.String(100), nullable=True)
+    bank_name = db.Column(db.String(100), nullable=True)
 
-    # Pricing settings for logistics model (FLAT, DISTANCE, API)
+    # Pricing settings for logistics partners. Areas served and the price per
+    # area live in pricing_settings["coverage"]:
+    #   [{"state": "Lagos", "lgas": ["Ikeja", "Yaba"], "price": 2500}, ...]
+    # (empty lgas = the whole state). Older keys (FLAT/DISTANCE flat_rate,
+    # base_fee) are kept for partners who signed up before coverage existed.
     pricing_settings = db.Column(db.JSON, nullable=True, default=dict)
 
     applied_at = db.Column(db.DateTime(timezone=True), default=utcnow)
@@ -70,6 +83,8 @@ class PartnerStaff(db.Model):
     staff_phone = db.Column(db.String(20), nullable=False)
     staff_email = db.Column(db.String(120), nullable=True)
     staff_role = db.Column(db.String(50), default='RIDER')  # RIDER, DISPATCHER, MANAGER
+    # The rider's own login (users.id), so deliveries are linked by id.
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
 
     is_active = db.Column(db.Boolean, default=True)
 
@@ -77,4 +92,4 @@ class PartnerStaff(db.Model):
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     # Relationships
-    partner = db.relationship('User', backref='staff_members')
+    partner = db.relationship('User', foreign_keys=[partner_id], backref='staff_members')

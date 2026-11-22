@@ -475,16 +475,9 @@ def daya_status():
                             dp.created_at.isoformat() if dp.created_at else "unknown",
                         )
                     else:
-                        new_status = daya_service._map_daya_status(deposit.get("status", ""))
-                        dp.daya_deposit_id = deposit.get("id")
-                        if new_status != dp.status:
-                            dp.status     = new_status
-                            dp.updated_at = _utcnow()
-                            db.session.commit()
-                        # Confirm on COMPLETED or RECEIVED — Daya marks NGN bank
-                        # transfers as RECEIVED when funds land, not COMPLETED.
-                        if new_status in ("COMPLETED", "RECEIVED") and dp.status not in ("PAID",):
-                            _handle_crypto_payment_confirmed(order_id, dp)
+                        # Confirms only a COMPLETED deposit whose amount and
+                        # currency cover what the buyer was asked to pay.
+                        apply_daya_deposit(dp, deposit)
         except Exception as exc:
             logger.warning("[DAYA STATUS] Poll failed for order %s: %s", order_id, exc)
 
@@ -646,11 +639,10 @@ def daya_webhook():
     logger.info("[DAYA WEBHOOK] event=%s deposit_id=%s status=%s",
                 event_type, deposit.get("id"), deposit.get("status"))
 
-    # Handle deposit.completed, deposit.received, and deposit.processing
-    # Daya sends deposit.received for NGN bank transfers when funds arrive;
-    # deposit.completed is sent after internal processing finishes.
-    # We confirm on either to ensure orders reflect immediately.
-    if event_type in ("deposit.completed", "deposit.received", "deposit.processing"):
+    # deposit.received / deposit.processing only record progress. An order is
+    # confirmed on a settled deposit (status COMPLETED, see
+    # daya_service.deposit_is_settled) whose amount covers what was asked.
+    if event_type in ("deposit.completed", "deposit.received", "deposit.processing", "deposit.settled"):
         funding_account_id = deposit.get("funding_account_id")
         deposit_id         = deposit.get("id")
         deposit_created_raw = deposit.get("created_at") or deposit.get("createdAt", "")
@@ -686,11 +678,7 @@ def daya_webhook():
                         deposit_is_fresh = True
 
                 if deposit_is_fresh:
-                    dp.status          = "COMPLETED"
-                    dp.daya_deposit_id = deposit_id
-                    dp.updated_at      = _utcnow()
-                    db.session.commit()
-                    _handle_crypto_payment_confirmed(dp.order_id, dp)
+                    apply_daya_deposit(dp, deposit, event_type)
                 else:
                     logger.warning(
                         "[DAYA WEBHOOK] Stale deposit %s (created_at=%s) arrived for "
@@ -699,8 +687,9 @@ def daya_webhook():
                         dp.order_id,
                         dp.created_at.isoformat() if dp.created_at else "unknown",
                     )
-            else:
+            elif daya_service.deposit_is_settled(deposit, event_type):
                 # Check if this funding account belongs to a storefront verification fee
+                # (settled deposits only; an admin reviews every application).
                 try:
                     from app.models.user import Storefront
                     from app.models.communication import Notification
@@ -732,13 +721,77 @@ def daya_webhook():
 # Internal helper
 # ===========================================================================
 
+def _flag_daya_deposit(dp: DayaPayment, details: dict) -> None:
+    """A settled deposit that doesn't cover the order (or can't be checked):
+    the order stays unpaid and the payment is flagged for an admin."""
+    reason = details.get("reason")
+    new_status = "UNDERPAID" if reason in ("underpaid", "currency_mismatch") else "REQUIRES_REVIEW"
+    already = dp.status == new_status and dp.daya_deposit_id == details.get("deposit_id")
+    dp.status = new_status
+    dp.daya_deposit_id = details.get("deposit_id") or dp.daya_deposit_id
+    dp.updated_at = _utcnow()
+    if not already:
+        logger.error(
+            "[DAYA CONFIRM] Order %s NOT confirmed (%s): received %s %s, expected %s %s. Flagged for admin review.",
+            dp.order_id, reason, details.get("received_amount"), details.get("received_currency"),
+            details.get("expected_amount"), details.get("expected_currency"),
+        )
+        try:
+            from app.models.telemetry import PlatformEvent
+            order = db.session.get(Order, dp.order_id)
+            db.session.add(PlatformEvent(
+                event_name="daya_deposit_flagged",
+                order_id=dp.order_id,
+                business_id=order.vendor_id if order else None,
+                source="daya",
+                properties={**details, "daya_payment_id": dp.id, "status": new_status},
+            ))
+        except Exception as exc:  # the flag on the payment row is what matters
+            logger.warning("[DAYA CONFIRM] Could not record flag event for Order %s: %s", dp.order_id, exc)
+    db.session.commit()
+
+
+def apply_daya_deposit(dp: DayaPayment, deposit: dict, event_type: str | None = None) -> str:
+    """Act on a Daya deposit for this payment (webhook or poll).
+    Returns 'confirmed', 'not_settled' or the reason it was flagged.
+    Only a COMPLETED deposit whose amount and currency cover the server-set
+    amount confirms the order; RECEIVED/PROCESSING only record progress."""
+    if not daya_service.deposit_is_settled(deposit, event_type):
+        interim = daya_service._map_daya_status(str(deposit.get("status") or ""))
+        if (interim != "COMPLETED" and interim != dp.status
+                and dp.status not in ("COMPLETED", "UNDERPAID", "REQUIRES_REVIEW")):
+            dp.status = interim
+            dp.daya_deposit_id = deposit.get("id") or dp.daya_deposit_id
+            dp.updated_at = _utcnow()
+            db.session.commit()
+        return "not_settled"
+
+    ok, details = daya_service.check_deposit_amount(dp, deposit)
+    if not ok:
+        _flag_daya_deposit(dp, details)
+        return details.get("reason") or "unverified"
+
+    dp.status = "COMPLETED"
+    dp.daya_deposit_id = deposit.get("id") or dp.daya_deposit_id
+    dp.updated_at = _utcnow()
+    db.session.commit()
+    _handle_crypto_payment_confirmed(dp.order_id, dp)
+    return "confirmed"
+
+
 def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
-    """Trigger order confirmation for a completed crypto payment."""
+    """Trigger order confirmation for a completed crypto payment.
+    Callers confirm the deposit first (apply_daya_deposit)."""
     from app.models.escrow import EscrowTransaction, EscrowStatus
     from app.models.communication import Notification
+    from app.routes.escrow import lock_escrow
 
     try:
-        order = db.session.get(Order, order_id)
+        # Lock this payment's escrow row (or, before it exists, the order row)
+        # so a webhook and a status poll can't both confirm and pay out.
+        _existing_escrow = lock_escrow(EscrowTransaction.query.filter_by(order_id=order_id).first())
+        order_q = db.session.query(Order).filter_by(id=order_id).populate_existing()
+        order = (order_q.with_for_update() if _existing_escrow is None else order_q).first()
         if not order:
             logger.error("[DAYA CONFIRM] Order %s not found", order_id)
             return
@@ -746,7 +799,6 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             logger.info("[DAYA CONFIRM] Order %s already confirmed -- skipping", order_id)
             return
         # A repeat confirmation must never un-freeze a disputed payment.
-        _existing_escrow = EscrowTransaction.query.filter_by(order_id=order_id).first()
         if _existing_escrow is not None and _existing_escrow.status in (
                 EscrowStatus.DISPUTED, EscrowStatus.RELEASED, EscrowStatus.REFUNDED):
             logger.info("[DAYA CONFIRM] Order %s escrow is %s -- skipping", order_id, _existing_escrow.status)
@@ -973,24 +1025,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                 _record_payout_debit(order, escrow, _vendor_net_amount(order, escrow))
 
         if not is_ticket_order and not is_digital and not is_service:
-            # Physical order — create or activate the LogisticsAssignment
-            from app.models.escrow import LogisticsAssignment
-            assignment = LogisticsAssignment.query.filter_by(order_id=order_id).first()
-            if assignment:
-                # Assignment was pre-created at checkout — activate it now
-                if assignment.status == 'PENDING':
-                    assignment.status = 'ASSIGNED'
-                    assignment.assigned_at = _utcnow()
-                    db.session.add(Notification(
-                        user_id=assignment.partner_id,
-                        title="New Delivery Assignment",
-                        message=(
-                            f"New delivery for Order #{order_id}. "
-                            f"Fee: ₦{float(assignment.delivery_fee):,.2f}."
-                        ),
-                        type="DELIVERY",
-                        order_id=order_id,
-                    ))
+            # A partner delivery job (if any) is assigned and the partner told
+            # by the flush hook once paid_at is set (app/services/logistics_flow.py).
             is_naira = dp and dp.payment_type in ("bank_transfer", "ngn_onramp")
             notif_title = "Payment Received (Bank Transfer)" if is_naira else "Crypto Payment Received"
             notif_msg = (
@@ -1206,17 +1242,25 @@ def _payout_vendor_via_daya(order, escrow):
         vendor_id=order.vendor_id
     ).first()
 
+    if not bank_acc or not bank_acc.bank_code or not bank_acc.account_number:
+        # Bank details given at onboarding only: a payout account, name pending.
+        # The store name / full name is never sent as the account name.
+        from app.services.payout_account_name import pending_account_from_storefront
+        if not bank_acc:
+            bank_acc = pending_account_from_storefront(order.vendor_id)
+
     bank_code = bank_acc.bank_code if bank_acc else None
     account_number = bank_acc.account_number if bank_acc else None
-    account_name = (bank_acc.account_name if bank_acc else "") or ""
 
-    if not bank_code or not account_number:
-        from app.models.user import Storefront
-        sf = Storefront.query.filter_by(vendor_id=order.vendor_id).first()
-        if sf and sf.bank_code and sf.account_number:
-            bank_code = sf.bank_code
-            account_number = sf.account_number
-            account_name = sf.business_name or (order.vendor.full_name if order.vendor else "")
+    if bank_code and account_number:
+        # Only an account holder name the bank confirmed goes to Daya (it skips
+        # its own check when given a name). One lookup now; still unconfirmed ->
+        # held in the seller's Siiqo balance with a notice.
+        from app.services.payout_account_name import hold_if_unconfirmed
+        if hold_if_unconfirmed(bank_acc, vendor_id=order.vendor_id, order_id=order.id,
+                               amount_ngn=net_amount_ngn):
+            return False
+    account_name = (bank_acc.account_name if bank_acc else "") or ""
 
     if not bank_code or not account_number:
         logger.error(
@@ -1843,7 +1887,12 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                        idx + 1, len(escrows), escrow.id, escrow.order_id or 0, escrow.status)
             # Only an unpaid escrow is confirmed. A repeat confirmation (webhook
             # retry, status poll) must not re-run delivery or payouts, or move a
-            # shipped/delivered order back to IN_ESCROW.
+            # shipped/delivered order back to IN_ESCROW. The row is locked first
+            # so a webhook and a status poll can't both confirm (and pay out).
+            from app.routes.escrow import lock_escrow
+            escrow = lock_escrow(escrow)
+            if escrow is None:
+                continue
             if escrow.status != EscrowStatus.PENDING_PAYMENT:
                 logger.info("[FLW CONFIRM] Skipping escrow_id=%d (already %s)", escrow.id, escrow.status)
                 continue

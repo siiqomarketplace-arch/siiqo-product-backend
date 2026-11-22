@@ -114,6 +114,47 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS campaign VARCHAR(100)",
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ref_code VARCHAR(24)",
                 "CREATE INDEX IF NOT EXISTS ix_orders_ref_code ON orders (ref_code)",
+                # ── Indexes on hot order / payment / ledger lookups ──────────────
+                # (same names as the model's index=True, so create_all and this
+                # list never make two copies)
+                "CREATE INDEX IF NOT EXISTS ix_orders_vendor_id ON orders (vendor_id)",
+                "CREATE INDEX IF NOT EXISTS ix_orders_buyer_id ON orders (buyer_id)",
+                "CREATE INDEX IF NOT EXISTS ix_orders_status ON orders (status)",
+                "CREATE INDEX IF NOT EXISTS ix_order_items_order_id ON order_items (order_id)",
+                "CREATE INDEX IF NOT EXISTS ix_ledgers_vendor_id ON ledgers (vendor_id)",
+                "CREATE INDEX IF NOT EXISTS ix_ledgers_vendor_id_reference_id ON ledgers (vendor_id, reference_id)",
+                "CREATE INDEX IF NOT EXISTS ix_escrow_transactions_status ON escrow_transactions (status)",
+                "CREATE INDEX IF NOT EXISTS ix_daya_payments_daya_funding_account_id "
+                "ON daya_payments (daya_funding_account_id)",
+                "CREATE INDEX IF NOT EXISTS ix_ticket_purchases_order_id ON ticket_purchases (order_id)",
+                # ── Logistics partners: approval, coverage, delivery lifecycle ───
+                # (app/services/logistics_partners.py, logistics_flow.py)
+                "ALTER TABLE partner_applications ADD COLUMN IF NOT EXISTS provider_type VARCHAR(30) DEFAULT 'siiqo_partner'",
+                "ALTER TABLE partner_applications ADD COLUMN IF NOT EXISTS review_note TEXT",
+                "ALTER TABLE partner_applications ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100)",
+                "ALTER TABLE partner_staff ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
+                "CREATE INDEX IF NOT EXISTS ix_partner_staff_user_id ON partner_staff (user_id)",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS provider_type VARCHAR(30) DEFAULT 'siiqo_partner'",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS rider_user_id INTEGER REFERENCES users(id)",
+                "CREATE INDEX IF NOT EXISTS ix_logistics_assignments_rider_user_id ON logistics_assignments (rider_user_id)",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS staff_id INTEGER REFERENCES partner_staff(id)",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS in_transit_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS proof_photo_url VARCHAR(500)",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS code_attempts INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS code_window_started_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS code_locked_until TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE logistics_assignments ADD COLUMN IF NOT EXISTS handover_code_hash VARCHAR(64)",
+                "CREATE INDEX IF NOT EXISTS ix_logistics_assignments_partner_id ON logistics_assignments (partner_id)",
+                # ── Growth: signup source, batched broadcasts (app/models/growth.py) ──
+                # Tables are made by db.create_all() above; these keep the lookups fast.
+                "CREATE INDEX IF NOT EXISTS ix_user_attributions_channel ON user_attributions (channel)",
+                "CREATE INDEX IF NOT EXISTS ix_user_attributions_store_created_at ON user_attributions (store_created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_broadcast_recipients_job_status ON broadcast_recipients (job_id, status)",
+                "CREATE INDEX IF NOT EXISTS ix_storefronts_created_at ON storefronts (created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_orders_paid_at ON orders (paid_at)",
+                "CREATE INDEX IF NOT EXISTS ix_escrow_transactions_released_at ON escrow_transactions (released_at)",
                 # Agents are paid per sale (app/services/marketing.py): one earning per
                 # order, numbered 1..AGENT_REWARDED_SALES per seller.
                 "ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS order_id INTEGER",
@@ -122,6 +163,12 @@ def create_app(config_name: str | None = None) -> Flask:
                 "WHERE order_id IS NOT NULL",
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_earning_sale_slot ON agent_earnings "
                 "(seller_user_id, sale_number) WHERE kind = 'sale' AND status <> 'REVERSED'",
+                # Seller-to-seller referral reward and the buyer first-order offer
+                # (app/services/marketing.py). The promo tables are made by create_all().
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_earning_referral ON agent_earnings "
+                "(seller_user_id) WHERE kind = 'referral' AND status <> 'REVERSED'",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code VARCHAR(24)",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_discount_ngn NUMERIC(10, 2)",
                 # Agent teams, team leads and logistics companies (docs/AGENT_ACCOUNTS_PLAN.md).
                 # agent_teams itself is made by db.create_all() above.
                 "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS team_id INTEGER REFERENCES agent_teams(id)",
@@ -247,6 +294,8 @@ def create_app(config_name: str | None = None) -> Flask:
                 "ALTER TABLE articles ADD COLUMN IF NOT EXISTS sub_category VARCHAR(100)",
                 "ALTER TABLE articles ADD COLUMN IF NOT EXISTS author_name VARCHAR(100)",
                 "ALTER TABLE articles ADD COLUMN IF NOT EXISTS subcategory VARCHAR(100)",
+                # ── Payout account name pending (app/services/payout_account_name.py) ──
+                "ALTER TABLE vendor_bank_accounts ALTER COLUMN account_name DROP NOT NULL",
                 """CREATE TABLE IF NOT EXISTS events (
                     id SERIAL PRIMARY KEY,
                     storefront_id INTEGER REFERENCES storefronts(id),
@@ -345,6 +394,17 @@ def create_app(config_name: str | None = None) -> Flask:
             db.session.rollback()
             import logging as _log
             _log.getLogger(__name__).warning(f"[STARTUP] Database schema update failed: {_e}")
+
+        # Payout account names: rows the old fallbacks left with a bank's name
+        # or "Vendor" as the holder name become "name pending". No network
+        # calls here; the hourly job asks the bank. Idempotent.
+        try:
+            from app.services.payout_account_name import flag_bad_names
+            flag_bad_names()
+        except Exception as _e:
+            db.session.rollback()
+            import logging as _log
+            _log.getLogger(__name__).warning(f"[STARTUP] Payout account name check skipped: {_e}")
 
         # Grants: the Grants Hub was removed (Siiqo doesn't give grants, loans
         # or funding). Nothing about grants runs on boot any more; the grants
@@ -709,6 +769,10 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(concierge_bp, url_prefix='/api/concierge')
     app.register_blueprint(copilot_bp, url_prefix='/api/copilot')
 
+    # Admin: payout accounts whose holder name isn't bank-confirmed
+    from app.routes.admin_payout_accounts import payout_accounts_admin_bp
+    app.register_blueprint(payout_accounts_admin_bp, url_prefix='/api/admin/payout-accounts')
+
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
     from app.services.foundations import register as _register_foundations
@@ -978,6 +1042,36 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as marketing_err:
                 logger.warning(f"Marketing task registration skipped: {marketing_err}")
+
+            # Payout account names: ask the bank again for accounts whose holder
+            # name is pending (or can't be real) and tell the seller once when fixed.
+            try:
+                from app.services.payout_account_name import run_name_retry
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_name_retry),
+                    trigger=IntervalTrigger(hours=1),
+                    id='payout_account_name_retry',
+                    name='Payout accounts: re-check pending account holder names',
+                    replace_existing=True,
+                    max_instances=1,
+                )
+            except Exception as account_name_err:
+                logger.warning(f"Payout account name task registration skipped: {account_name_err}")
+
+            # Admin email broadcasts: carry on any job left part-sent (restart,
+            # crashed thread). Jobs and per-recipient status live in the database.
+            try:
+                from app.services.broadcasts import resume_stalled as _resume_broadcasts
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, _resume_broadcasts),
+                    trigger=IntervalTrigger(minutes=2),
+                    id='broadcast_resume',
+                    name='Email broadcasts: resume part-sent jobs',
+                    replace_existing=True,
+                    max_instances=1,
+                )
+            except Exception as broadcast_err:
+                logger.warning(f"Broadcast resume task registration skipped: {broadcast_err}")
 
             scheduler.start()
             logger.info("APScheduler started — escrow background tasks are active.")

@@ -9,7 +9,7 @@ import requests
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, g, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
 
@@ -19,6 +19,7 @@ from app.models.order import Order
 from app.models.finance import Ledger
 from app.models.communication import Notification
 from app.models.user import User
+from app.services.logistics_partners import partner_required
 
 withdrawal_bp = Blueprint('withdrawal', __name__)
 
@@ -75,6 +76,50 @@ def _debit_ledger(vendor_id: int, amount: Decimal, description: str, reference_i
     ))
 
 
+ACCOUNT_NOT_CONFIRMED = "We couldn't confirm this account. Check the number and bank, or try again."
+NAME_PENDING_MESSAGE = ("Bank account saved. We couldn't confirm the account name yet; "
+                        "we'll keep trying. Payouts wait until it's confirmed.")
+_REJECTED = object()
+
+
+def _confirmed_name_and_recipient(bank_code, account_number, bank_name):
+    """(account_name | None | _REJECTED, recipient_code | None, verified).
+
+    The name is only ever one a bank lookup returned. A Paystack recipient is
+    created only with that name; with no confirmed name there is none yet."""
+    from app.services.payout_account_name import resolve_holder_name
+    res = resolve_holder_name(bank_code, account_number, bank_name)
+    if res["status"] == "rejected":
+        return _REJECTED, None, False
+    if res["status"] != "resolved":
+        logging.info("[BANK ACCOUNT] Name not confirmed for %s; saving as name pending",
+                     mask_account(account_number))
+        return None, None, False
+    name = res["account_name"]
+    recipient_code = None
+    try:
+        from app.services.escrow.paystack_provider import ensure_paystack_transfer_recipient
+        rec = ensure_paystack_transfer_recipient(account_number=account_number, bank_code=bank_code,
+                                                 account_name=name, name_confirmed=True)
+        if rec.get("success"):
+            recipient_code = rec.get("recipient_code")
+    except Exception as exc:  # noqa: BLE001 (payout paths create it later)
+        logging.warning("[BANK ACCOUNT] Recipient not created: %s", type(exc).__name__)
+    return name, recipient_code, True
+
+
+def _apply_name(acc, account_name, verified):
+    """New details on a saved row: a confirmed name, or name pending."""
+    if verified and account_name:
+        acc.account_name = account_name
+        acc.is_verified = True
+        acc.verified_at = _utcnow()
+    else:
+        acc.account_name = None
+        acc.is_verified = False
+        acc.verified_at = None
+
+
 # ---------------------------------------------------------------------------
 # BANK ACCOUNT MANAGEMENT
 # ---------------------------------------------------------------------------
@@ -88,22 +133,15 @@ def get_bank_accounts():
     accounts = VendorBankAccount.query.filter_by(vendor_id=vendor_id).all()
     if not accounts:
         try:
-            from app.models.user import Storefront, User
-            sf = Storefront.query.filter_by(vendor_id=vendor_id).first()
-            if sf and sf.account_number and sf.bank_code:
-                u = db.session.get(User, vendor_id)
-                new_acc = VendorBankAccount(
-                    vendor_id=vendor_id,
-                    bank_name="Bank",
-                    bank_code=sf.bank_code,
-                    account_number=sf.account_number,
-                    account_name=sf.account_name or (u.full_name if u else "Vendor"),
-                    is_default=True,
-                )
-                db.session.add(new_acc)
+            # Bank details given at onboarding: saved name pending. The name
+            # typed there is never used; the hourly check asks the bank.
+            from app.services.payout_account_name import pending_account_from_storefront
+            new_acc = pending_account_from_storefront(vendor_id)
+            if new_acc is not None:
                 db.session.commit()
                 accounts = [new_acc]
         except Exception as _e:
+            db.session.rollback()
             logging.warning(f"[BANK ACCOUNTS] Auto-sync from storefront error: {_e}")
 
     return jsonify({
@@ -130,53 +168,15 @@ def add_bank_account():
     paystack_bank_code = NIBSS_TO_PAYSTACK_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
     cbn_bank_code = PAYSTACK_TO_NIBSS_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
 
-    # Verify account with Paystack
-    is_test_mode = PAYSTACK_SECRET_KEY.startswith('sk_test_')
+    # The account holder name only ever comes from a bank lookup (Daya, then
+    # Paystack). Not confirmed -> saved as name pending, no recipient yet.
     try:
-        headers = {
-            'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
-            'Content-Type': 'application/json'
-        }
+        bank_name = (data.get('bank_name') or '').strip() or 'Bank'
+        account_name, recipient_code, verified = _confirmed_name_and_recipient(
+            bank_code, account_number, bank_name)
+        if account_name is _REJECTED:
+            return jsonify({'message': ACCOUNT_NOT_CONFIRMED}), 400
 
-        bank_name = data.get('bank_name', 'Bank')
-
-        if is_test_mode:
-            # Paystack /bank/resolve only works with LIVE keys and real accounts.
-            # In test mode we skip resolution and use the submitted bank name as the account name.
-            logging.info(f'[BANK ACCOUNT] Test mode: skipping account name resolution for {mask_account(account_number)}')
-            account_name = bank_name  # placeholder — replaced with real name once live key is used
-        else:
-            # 1. Resolve account name (live mode only)
-            resolve_url = f'{PAYSTACK_BASE_URL}/bank/resolve'
-            resolve_params = {
-                'account_number': account_number,
-                'bank_code': paystack_bank_code
-            }
-            resolve_response = requests.get(resolve_url, headers=headers, params=resolve_params, timeout=10)
-            resolve_data = resolve_response.json()
-
-            if not resolve_data.get('status'):
-                return jsonify({'message': 'Could not verify account. Please check your account number and bank.'}), 400
-
-            account_name = resolve_data['data']['account_name']
-        
-        # 2. Create transfer recipient
-        recipient_url = f'{PAYSTACK_BASE_URL}/transferrecipient'
-        recipient_payload = {
-            'type': 'nuban',
-            'name': account_name,
-            'account_number': account_number,
-            'bank_code': paystack_bank_code,
-            'currency': 'NGN'
-        }
-        recipient_response = requests.post(recipient_url, headers=headers, json=recipient_payload, timeout=10)
-        recipient_data = recipient_response.json()
-        
-        if not recipient_data.get('status'):
-            return jsonify({'message': 'Could not create recipient. Please try again.'}), 400
-        
-        recipient_code = recipient_data['data']['recipient_code']
-        
         # 3. Check if account already exists
         existing = VendorBankAccount.query.filter_by(
             vendor_id=vendor_id,
@@ -185,10 +185,11 @@ def add_bank_account():
         
         if existing:
             # Update recipient_code and details on existing record
-            existing.recipient_code = recipient_code
+            if recipient_code:
+                existing.recipient_code = recipient_code
             existing.bank_name = bank_name or existing.bank_name
             existing.bank_code = cbn_bank_code or existing.bank_code
-            existing.account_name = account_name or existing.account_name
+            _apply_name(existing, account_name, verified)
             db.session.commit()
             # Verification 2-3: a payout account in a different name opens a re-check.
             from app.services.verification.rechecks import check_after_change
@@ -207,10 +208,10 @@ def add_bank_account():
             bank_name=bank_name,
             bank_code=cbn_bank_code,
             account_number=account_number,
-            account_name=account_name,
+            account_name=account_name if verified else None,
             recipient_code=recipient_code,
-            is_verified=True,
-            verified_at=_utcnow(),
+            is_verified=verified,
+            verified_at=_utcnow() if verified else None,
             is_default=is_first  # First account is default
         )
         
@@ -224,7 +225,7 @@ def add_bank_account():
             from app.services.escrow.paystack_provider import create_paystack_subaccount
             from app.models.user import Storefront
             storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
-            business_name = (storefront.store_name if storefront else account_name)
+            business_name = (storefront.store_name if storefront else (account_name or "Siiqo seller"))
             sub_result = create_paystack_subaccount(
                 business_name=business_name,
                 bank_code=bank_code,
@@ -259,7 +260,7 @@ def add_bank_account():
             from app.services.flutterwave_service import create_subaccount as _flw_create_sub, is_configured as _flw_configured
             if _flw_configured():
                 # Storefront is already loaded above; safe to reuse
-                _flw_business_name = (storefront.store_name if storefront else account_name)
+                _flw_business_name = (storefront.store_name if storefront else (account_name or "Siiqo seller"))
                 _flw_phone = ""
                 if storefront:
                     try:
@@ -303,15 +304,15 @@ def add_bank_account():
         
         return jsonify({
             'status': 'success',
-            'message': 'Bank account added and verified successfully',
+            'message': ('Bank account added and verified successfully' if verified
+                        else NAME_PENDING_MESSAGE),
             'account': bank_account.to_dict()
         }), 201
-        
-    except requests.exceptions.RequestException as e:
-        return jsonify({'message': f'Verification failed: {str(e)}'}), 500
+
     except Exception as e:
         db.session.rollback()
-        return jsonify({'message': f'Error: {str(e)}'}), 500
+        logging.warning(f'[BANK ACCOUNT] Save failed for vendor {vendor_id}: {type(e).__name__}')
+        return jsonify({'message': 'Could not save the bank account. Please try again.'}), 500
 
 
 
@@ -371,6 +372,28 @@ def delete_bank_account(account_id):
         'status': 'success',
         'message': 'Bank account deleted'
     }), 200
+
+
+@withdrawal_bp.route('/bank-accounts/<int:account_id>/recheck', methods=['POST'])
+@jwt_required()
+def recheck_bank_account(account_id):
+    """"Check again" on the Payouts page: ask the bank for the account holder
+    name now (Daya, then Paystack). Confirmed -> verified; else still pending."""
+    from app.services.payout_account_name import confirm_account
+    vendor_id = _get_user_id()
+    account = db.session.get(VendorBankAccount, account_id)
+    if not account or account.vendor_id != int(vendor_id):
+        return jsonify({'message': 'Account not found'}), 404
+    result = confirm_account(account)
+    db.session.commit()
+    if result['confirmed']:
+        return jsonify({'status': 'success', 'confirmed': True,
+                        'message': f'Confirmed: {account.account_name}',
+                        'account': account.to_dict()}), 200
+    return jsonify({'status': 'pending', 'confirmed': False,
+                    'message': ("We still couldn't confirm the account name. "
+                                "Check the number and bank, or try again later. We'll keep trying."),
+                    'account': account.to_dict()}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +474,17 @@ def request_withdrawal():
     vendor_id = _get_user_id()
     data = request.get_json() or {}
 
+    # Money only goes to an account whose holder name the bank confirmed. One
+    # lookup now (before any lock); still unconfirmed -> it stays in the balance.
+    from app.services.payout_account_name import hold_if_unconfirmed, name_confirmed, HOLD_NOTICE
+    pre_acc = (VendorBankAccount.query.filter_by(vendor_id=vendor_id, is_default=True).first()
+               or VendorBankAccount.query.filter_by(vendor_id=vendor_id).first())
+    if pre_acc is not None and not name_confirmed(pre_acc):
+        held = hold_if_unconfirmed(pre_acc, vendor_id=int(vendor_id))
+        db.session.commit()
+        if held:
+            return jsonify({'message': HOLD_NOTICE, 'code': 'ACCOUNT_NAME_NOT_CONFIRMED'}), 400
+
     # Serialise withdrawals per vendor: hold a row lock on the vendor until the
     # withdrawal and its DEBIT are committed, so two requests can't both spend
     # the same balance.
@@ -482,6 +516,11 @@ def request_withdrawal():
             'message': 'No verified bank account found. '
                        'Please add and verify a bank account in your payout settings first.'
         }), 400
+
+    if not name_confirmed(bank_acc):
+        # Re-checked under the lock, no network: never send with an unconfirmed name.
+        db.session.rollback()
+        return jsonify({'message': HOLD_NOTICE, 'code': 'ACCOUNT_NAME_NOT_CONFIRMED'}), 400
 
     if not has_flw and not bank_acc.recipient_code:
         db.session.rollback()
@@ -813,38 +852,25 @@ def resolve_bank_account():
     if len(account_number) != 10:
         return jsonify({'message': 'Account number must be exactly 10 digits'}), 400
 
+    # Daya first, then Paystack (app/services/payout_account_name.py). The name
+    # shown is the bank's; a bank's own name is never returned as a holder name.
     try:
-        headers = {
-            'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
-            'Content-Type': 'application/json',
-        }
-        resp = requests.get(
-            f'{PAYSTACK_BASE_URL}/bank/resolve',
-            headers=headers,
-            params={'account_number': account_number, 'bank_code': bank_code},
-            timeout=10,
-        )
-        data = resp.json()
+        from app.services.payout_account_name import resolve_holder_name
+        res = resolve_holder_name(bank_code, account_number)
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f'[BANKS] Account resolve error: {type(e).__name__}')
+        res = {'status': 'unavailable', 'account_name': None}
 
-        if not data.get('status'):
-            return jsonify({
-                'message': data.get('message', 'Could not verify account. Check details.'),
-                'account_name': None,
-            }), 400
-
+    if res['status'] == 'resolved':
         return jsonify({
             'status': 'success',
-            'account_name': data['data']['account_name'],
-            'account_number': data['data']['account_number'],
+            'account_name': res['account_name'],
+            'account_number': account_number,
         }), 200
-
-    except requests.exceptions.RequestException as e:
-        # The exception text can contain the provider URL with the account number.
-        logging.warning(f'[BANKS] Account resolve request failed: {type(e).__name__}')
-        return jsonify({'message': 'Verification failed. Please try again.'}), 500
-    except Exception as e:
-        logging.warning(f'[BANKS] Account resolve error: {type(e).__name__}')
-        return jsonify({'message': 'Could not verify account. Please try again.'}), 500
+    if res['status'] == 'rejected':
+        return jsonify({'message': ACCOUNT_NOT_CONFIRMED, 'account_name': None}), 400
+    return jsonify({'message': "We couldn't reach the bank to confirm this account. Please try again.",
+                    'account_name': None}), 503
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +879,7 @@ def resolve_bank_account():
 
 @withdrawal_bp.route('/partner/bank-accounts', methods=['GET'])
 @jwt_required()
+@partner_required
 def get_partner_bank_accounts():
     """Get partner's bank accounts"""
     partner_id = _get_user_id()
@@ -865,6 +892,7 @@ def get_partner_bank_accounts():
 
 @withdrawal_bp.route('/partner/bank-accounts', methods=['POST'])
 @jwt_required()
+@partner_required
 def add_partner_bank_account():
     """Add and verify a new partner bank account"""
     partner_id = _get_user_id()
@@ -957,6 +985,7 @@ def add_partner_bank_account():
 
 @withdrawal_bp.route('/partner/bank-accounts/<int:account_id>/set-default', methods=['PATCH'])
 @jwt_required()
+@partner_required
 def set_default_partner_account(account_id):
     """Set a partner bank account as default"""
     partner_id = _get_user_id()
@@ -980,6 +1009,7 @@ def set_default_partner_account(account_id):
 
 @withdrawal_bp.route('/partner/bank-accounts/<int:account_id>', methods=['DELETE'])
 @jwt_required()
+@partner_required
 def delete_partner_bank_account(account_id):
     """Delete a partner bank account"""
     partner_id = _get_user_id()
@@ -1008,46 +1038,38 @@ def delete_partner_bank_account(account_id):
 
 @withdrawal_bp.route('/partner/balance', methods=['GET'])
 @jwt_required()
+@partner_required
 def get_partner_balance():
-    """Get logistics partner's available balance"""
-    partner_id = _get_user_id()
-    
-    from app.models.escrow import LogisticsAssignment
-    from app.models.withdrawal import PartnerWithdrawal
-    
-    total_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter_by(
-        partner_id=partner_id, status='DELIVERED'
-    ).scalar() or Decimal('0')
-    
-    # Sum of successfully completed or pending withdrawals
-    withdrawn_amount = db.session.query(func.sum(PartnerWithdrawal.amount)).filter(
-        PartnerWithdrawal.partner_id == partner_id,
-        PartnerWithdrawal.status.in_(['PENDING', 'PROCESSING', 'COMPLETED'])
-    ).scalar() or Decimal('0')
-    
-    available = Decimal(str(total_earned)) - Decimal(str(withdrawn_amount))
-    
+    """A logistics partner's money: a delivery fee counts once the order's
+    payment is final (Safe Pay released, or Pay on Delivery cash confirmed)."""
+    from app.services.logistics_flow import partner_earnings
+    money = partner_earnings(g.partner.id)
     return jsonify({
         'status': 'success',
-        'balance': str(total_earned),
-        'pending_withdrawals': str(withdrawn_amount),
-        'available': str(available),
+        'balance': str(money['earned']),
+        'pending_earnings': str(money['pending']),
+        'pending_withdrawals': str(money['withdrawn']),
+        'available': str(money['available']),
         'currency': 'NGN'
     }), 200
 
 
 @withdrawal_bp.route('/partner/withdrawals', methods=['GET'])
 @jwt_required()
+@partner_required
 def get_partner_withdrawals():
     """Get partner's withdrawal history"""
-    partner_id = _get_user_id()
-    page = int(request.args.get('page', 1))
-    per_page = min(int(request.args.get('per_page', 20)), 100)
-    
+    partner_id = g.partner.id
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        per_page = min(max(1, int(request.args.get('per_page', 20))), 100)
+    except (TypeError, ValueError):
+        page, per_page = 1, 20
+
     paginated = PartnerWithdrawal.query.filter_by(partner_id=partner_id).order_by(
         PartnerWithdrawal.requested_at.desc()
     ).paginate(page=page, per_page=per_page, error_out=False)
-    
+
     return jsonify({
         'status': 'success',
         'withdrawals': [w.to_dict() for w in paginated.items],
@@ -1057,97 +1079,112 @@ def get_partner_withdrawals():
     }), 200
 
 
+def partner_withdrawal_reference(withdrawal) -> str:
+    """One fixed transfer reference per withdrawal row: a retried transfer
+    reuses it, so the gateway refuses to send the money twice."""
+    import hashlib
+    digest = hashlib.sha256(f"partner-withdrawal:{withdrawal.id}:{withdrawal.partner_id}".encode()
+                            ).hexdigest()[:10].upper()
+    return f"PWD-{withdrawal.partner_id}-{withdrawal.id}-{digest}"
+
+
 @withdrawal_bp.route('/partner/withdrawals', methods=['POST'])
 @jwt_required()
+@partner_required
 def request_partner_withdrawal():
-    """Partner requests a withdrawal. Triggers a Paystack transfer."""
-    partner_id = _get_user_id()
+    """Approved partner withdraws earned delivery fees to its saved bank."""
+    from app.services.logistics_flow import partner_earnings
+    partner_id = g.partner.id
 
-    # Calculate available balance
-    from app.models.escrow import LogisticsAssignment
-    from app.models.withdrawal import PartnerWithdrawal
-    
-    total_earned = db.session.query(func.sum(LogisticsAssignment.delivery_fee)).filter_by(
-        partner_id=partner_id, status='DELIVERED'
-    ).scalar() or Decimal('0')
-    
-    withdrawn_amount = db.session.query(func.sum(PartnerWithdrawal.amount)).filter(
-        PartnerWithdrawal.partner_id == partner_id,
-        PartnerWithdrawal.status.in_(['PENDING', 'PROCESSING', 'COMPLETED'])
-    ).scalar() or Decimal('0')
-    
-    available = Decimal(str(total_earned)) - Decimal(str(withdrawn_amount))
+    # Serialise withdrawals per partner: hold a row lock on the partner until
+    # the withdrawal row is committed, so two requests can't both spend the
+    # same balance (the second waits and then sees the first one's row).
+    db.session.query(User).filter_by(id=partner_id).with_for_update().first()
 
-    MIN_WITHDRAWAL = Decimal('1000')  # ₦1,000 minimum
+    available = partner_earnings(partner_id)['available']
+
+    MIN_WITHDRAWAL = Decimal(str(min_withdrawal_ngn()))  # same minimum as sellers (MIN_WITHDRAWAL_NGN)
     if available < MIN_WITHDRAWAL:
+        db.session.rollback()
         return jsonify({
             'message': f'Insufficient balance. Minimum withdrawal is ₦{MIN_WITHDRAWAL:,.2f}. '
                        f'Your available balance is ₦{available:,.2f}.'
         }), 400
 
-    # Get default bank account
-    bank_acc = PartnerBankAccount.query.filter_by(
-        partner_id=partner_id, is_default=True
-    ).first()
+    bank_acc = PartnerBankAccount.query.filter_by(partner_id=partner_id, is_default=True).first()
     if not bank_acc:
         bank_acc = PartnerBankAccount.query.filter_by(partner_id=partner_id).first()
-
-    if not bank_acc or not bank_acc.recipient_code:
+    if not bank_acc or not bank_acc.recipient_code or not bank_acc.is_verified:
+        db.session.rollback()
         return jsonify({
-            'message': 'No verified bank account found. '
-                       'Please add and verify a bank account in your payout settings first.'
+            'code': 'NO_PAYOUT_ACCOUNT',
+            'message': 'Add and verify your bank account in Earnings before you withdraw.'
         }), 400
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     requested_amount = data.get('amount')
-    if requested_amount:
+    if requested_amount not in (None, ''):
         try:
-            requested_amount = Decimal(str(requested_amount))
-            if requested_amount <= 0 or requested_amount > available:
-                return jsonify({'message': 'Invalid withdrawal amount.'}), 400
+            requested_amount = Decimal(str(requested_amount)).quantize(Decimal('0.01'))
         except Exception:
+            db.session.rollback()
             return jsonify({'message': 'Invalid amount format.'}), 400
+        if requested_amount < MIN_WITHDRAWAL or requested_amount > available:
+            db.session.rollback()
+            return jsonify({'message': 'Invalid withdrawal amount.'}), 400
     else:
         requested_amount = available  # withdraw all
 
-    import uuid as _uuid
-    reference = f"PWD-{_uuid.uuid4().hex[:12].upper()}"
-
-    from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-    result = paystack_transfer_to_vendor(
-        recipient_code=bank_acc.recipient_code,
-        amount_ngn=float(requested_amount),
-        reference=reference,
-        reason="Siiqo partner withdrawal",
-    )
-
-    if not result.get("success"):
-        return jsonify({
-            'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
-        }), 400
-
-    # Record withdrawal
-    transfer_code = result.get("transfer_code", "")
+    # Record (and reserve) the withdrawal before calling the gateway.
     new_withdrawal = PartnerWithdrawal(
         partner_id=int(partner_id),
         amount=requested_amount,
         fee_amount=Decimal('0'),
         net_amount=requested_amount,
-        status='PENDING',
+        status='PROCESSING',
         bank_account_id=bank_acc.id,
-        transfer_code=transfer_code,
-        transfer_reference=reference,
     )
     db.session.add(new_withdrawal)
+    db.session.flush()
+    reference = partner_withdrawal_reference(new_withdrawal)
+    new_withdrawal.transfer_reference = reference
+    new_withdrawal.withdrawal_number = reference
+    db.session.commit()   # releases the lock; the balance is now reserved
+
+    from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
+    try:
+        result = paystack_transfer_to_vendor(
+            recipient_code=bank_acc.recipient_code,
+            amount_ngn=float(requested_amount),
+            reference=reference,
+            reason="Siiqo partner withdrawal",
+        )
+    except Exception as e:  # noqa: BLE001 - unknown outcome: keep it reserved for review
+        logging.error("[PARTNER WITHDRAWAL] transfer call failed for %s: %s", reference, e)
+        return jsonify({'status': 'processing',
+                        'message': "We're confirming your withdrawal with the bank. "
+                                   "Check back shortly before trying again."}), 202
+
+    if not result.get("success"):
+        new_withdrawal.status = 'FAILED'
+        new_withdrawal.failure_reason = str(result.get('error_message') or 'Transfer failed')[:500]
+        db.session.commit()
+        return jsonify({
+            'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
+        }), 400
+
+    new_withdrawal.status = 'PENDING'
+    new_withdrawal.transfer_code = result.get("transfer_code", "")
+    new_withdrawal.processed_at = _utcnow()
     db.session.commit()
 
     return jsonify({
         'status': 'success',
         'message': 'Withdrawal initiated. Funds will arrive within 24 hours.',
-        'transfer_code': transfer_code,
+        'transfer_code': new_withdrawal.transfer_code,
+        'reference': reference,
         'amount': str(requested_amount),
     }), 200
-
 
 
 # ---------------------------------------------------------------------------
@@ -1209,46 +1246,22 @@ def add_daya_bank_account():
     if len(account_number) != 10 or not account_number.isdigit():
         return jsonify({"message": "Account number must be exactly 10 digits"}), 400
 
-    # Step 1: Verify account via Daya's resolve endpoint
-    account_name = ""
-    try:
-        resolved = daya_service.resolve_bank_account(bank_code, account_number)
-        account_name = resolved.get("account_name", "")
-    except RuntimeError as exc:
-        logging.warning(
-            "[DAYA BANK REG] Could not verify account %s/%s via Daya: %s — saving without name",
-            bank_code, account_number, exc
-        )
-        # Not a hard failure — Daya resolve is best-effort.
-        # Transfer still includes account_name if we have it, which bypasses
-        # Daya's internal resolution on payout anyway.
-
-    # Step 2: Create Paystack transfer recipient (translates CBN code -> Paystack code)
-    recipient_code = None
-    try:
-        from app.services.escrow.paystack_provider import ensure_paystack_transfer_recipient
-        rec_res = ensure_paystack_transfer_recipient(
-            account_number=account_number,
-            bank_code=bank_code,
-            account_name=account_name or bank_name,
-        )
-        if rec_res.get("success"):
-            recipient_code = rec_res.get("recipient_code")
-            if not account_name and rec_res.get("account_name"):
-                account_name = rec_res["account_name"]
-            logging.info("[DAYA BANK REG] Paystack recipient created: %s", recipient_code)
-    except Exception as _rec_err:
-        logging.warning("[DAYA BANK REG] Could not create Paystack recipient: %s", _rec_err)
+    # Steps 1-2: the account holder name only ever comes from a bank lookup
+    # (Daya, then Paystack). A Paystack recipient is created only in that
+    # name. Neither answers -> saved name pending (NULL, unverified); payouts
+    # wait and the hourly check keeps asking the bank.
+    account_name, recipient_code, verified = _confirmed_name_and_recipient(
+        bank_code, account_number, bank_name)
+    if account_name is _REJECTED:
+        return jsonify({"message": ACCOUNT_NOT_CONFIRMED}), 400
 
     # Step 3: Check for duplicate (same account_number OR same recipient_code for this vendor)
+    dup_filter = VendorBankAccount.account_number == account_number
+    if recipient_code:
+        dup_filter = db.or_(dup_filter, VendorBankAccount.recipient_code == recipient_code)
     existing = VendorBankAccount.query.filter(
-        VendorBankAccount.vendor_id == vendor_id,
-        db.or_(
-            VendorBankAccount.account_number == account_number,
-            VendorBankAccount.recipient_code == recipient_code
-        )
-    ).first()
-    
+        VendorBankAccount.vendor_id == vendor_id, dup_filter).first()
+
     if existing:
         # Update existing record with latest details
         if recipient_code:
@@ -1257,10 +1270,7 @@ def add_daya_bank_account():
             existing.bank_code = bank_code
         if bank_name:
             existing.bank_name = bank_name
-        if account_name:
-            existing.account_name = account_name
-        existing.is_verified = bool(account_name)
-        existing.verified_at = _utcnow() if account_name else existing.verified_at
+        _apply_name(existing, account_name, verified)
         
         # Update Paystack subaccount if missing
         if not existing.paystack_subaccount_code:
@@ -1268,7 +1278,7 @@ def add_daya_bank_account():
                 from app.services.escrow.paystack_provider import create_paystack_subaccount
                 from app.models.user import Storefront
                 storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
-                business_name = storefront.store_name if storefront else (account_name or bank_name)
+                business_name = storefront.store_name if storefront else (account_name or "Siiqo seller")
                 sub_result = create_paystack_subaccount(
                     business_name=business_name,
                     bank_code=bank_code,
@@ -1290,7 +1300,7 @@ def add_daya_bank_account():
                 if _flw_configured():
                     from app.models.user import Storefront, User as _U
                     storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
-                    _flw_business_name = storefront.store_name if storefront else (account_name or bank_name)
+                    _flw_business_name = storefront.store_name if storefront else (account_name or "Siiqo seller")
                     _flw_phone = ""
                     if storefront:
                         try:
@@ -1319,7 +1329,9 @@ def add_daya_bank_account():
         # Verification 2-3: a payout account in a different name opens a re-check.
         from app.services.verification.rechecks import check_after_change
         check_after_change(vendor_id)
-        return jsonify({"status": "success", "message": "Bank account updated successfully", "account": existing.to_dict()}), 200
+        return jsonify({"status": "success",
+                        "message": ("Bank account updated successfully" if verified else NAME_PENDING_MESSAGE),
+                        "account": existing.to_dict()}), 200
 
     # Step 4: Save with Daya-native bank code and Paystack recipient_code
     is_first = VendorBankAccount.query.filter_by(vendor_id=vendor_id).count() == 0
@@ -1329,10 +1341,10 @@ def add_daya_bank_account():
         bank_name=bank_name,
         bank_code=bank_code,           # CBN/Daya code — works on Daya transfers
         account_number=account_number,
-        account_name=account_name,
+        account_name=account_name if verified else None,
         recipient_code=recipient_code, # Paystack recipient — works on Paystack transfers
-        is_verified=bool(account_name),
-        verified_at=_utcnow() if account_name else None,
+        is_verified=verified,
+        verified_at=_utcnow() if verified else None,
         is_default=is_first,
     )
     db.session.add(bank_account)
@@ -1344,7 +1356,7 @@ def add_daya_bank_account():
         from app.services.escrow.paystack_provider import create_paystack_subaccount
         from app.models.user import Storefront
         storefront = Storefront.query.filter_by(vendor_id=vendor_id).first()
-        business_name = storefront.store_name if storefront else (account_name or bank_name)
+        business_name = storefront.store_name if storefront else (account_name or "Siiqo seller")
         # Use Paystack's bank code if different from Daya's
         # For standard banks they're the same; for mobile money they differ.
         # We attempt with the Daya code — Paystack will accept most standard codes.
@@ -1375,7 +1387,7 @@ def add_daya_bank_account():
         if _flw_configured():
             from app.models.user import Storefront, User as _U
             # Storefront is already loaded above; safe to reuse
-            _flw_business_name = (storefront.store_name if storefront else (account_name or bank_name))
+            _flw_business_name = (storefront.store_name if storefront else (account_name or "Siiqo seller"))
             _flw_phone = ""
             if storefront:
                 try:
@@ -1416,8 +1428,9 @@ def add_daya_bank_account():
     from app.services.verification.rechecks import check_after_change
     check_after_change(vendor_id)
 
-    logging.info("[DAYA BANK REG] Vendor %s registered Daya bank: %s %s (%s)",
-                 vendor_id, bank_name, account_number[-4:], bank_code)
+    logging.info("[DAYA BANK REG] Vendor %s registered Daya bank: %s %s (%s) name %s",
+                 vendor_id, bank_name, mask_account(account_number), bank_code,
+                 "confirmed" if verified else "pending")
 
     # Auto-retry any pending stalled payouts for this vendor now that bank account is added
     try:
@@ -1445,17 +1458,31 @@ def add_daya_bank_account():
             order_to_pay = db.session.get(Order, notif.order_id)
             if not order_to_pay or not order_to_pay.escrow:
                 continue
+            escrow_to_pay = order_to_pay.escrow
+            # Only released money, and never twice: a PAYOUT debit means paid.
+            if escrow_to_pay.status != 'RELEASED' or Ledger.query.filter_by(
+                    vendor_id=order_to_pay.vendor_id, transaction_type='DEBIT',
+                    reference_id=f"PAYOUT-{escrow_to_pay.transaction_number or order_to_pay.id}").first():
+                continue
 
             logging.info(
                 "[DAYA RETRY] Auto-retrying stalled payout for Order #%s after bank account added by vendor %s",
                 order_to_pay.id, vendor_id,
             )
-            _payout_vendor_via_daya(order_to_pay, order_to_pay.escrow)
+            if _payout_vendor_via_daya(order_to_pay, escrow_to_pay):
+                # Paid out automatically: write the matching DEBIT so the
+                # ledger credit can't also be withdrawn.
+                from app.routes.escrow import _record_payout_debit, _vendor_net_amount
+                _record_payout_debit(order_to_pay, escrow_to_pay,
+                                     _vendor_net_amount(order_to_pay, escrow_to_pay))
+        db.session.commit()
     except Exception as retry_err:
+        db.session.rollback()
         logging.warning("[DAYA RETRY] Error auto-retrying stalled payouts: %s", retry_err)
 
     return jsonify({
         "status": "success",
-        "message": "Bank account registered successfully" + (f" — verified as {account_name}" if account_name else ""),
+        "message": (f"Bank account registered successfully — verified as {account_name}" if verified
+                    else NAME_PENDING_MESSAGE),
         "account": bank_account.to_dict(),
     }), 201

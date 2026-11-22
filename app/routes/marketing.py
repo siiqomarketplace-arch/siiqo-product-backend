@@ -12,12 +12,13 @@
     GET/POST /api/agents/riders            a logistics company's rider codes
     PATCH /api/agents/riders/<code_id>     rename or pause a rider code
     GET  /api/vendor/growth-kit            the seller's sticker and invite codes and results
+    POST /api/public/promo/check           check a first-order code at checkout (login optional)
 
 Admin routes are in app/routes/admin_marketing.py. Logic is in
 app/services/marketing.py.
 """
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import get_jwt_identity, jwt_required
+from flask_jwt_extended import get_jwt_identity, jwt_required, verify_jwt_in_request
 
 from app.extensions import db, limiter
 from app.models.marketing import AgentEarning, AgentProfile, AgentTeam, MarketingCode, SellerAcquisition
@@ -118,7 +119,8 @@ def agent_earnings():
     if profile is None:
         return _not_an_agent()
     page, per_page = svc.page(request.args)
-    q = AgentEarning.query.filter(AgentEarning.agent_user_id == user.id)
+    # Seller referral rewards go to the seller's balance, not the agent ledger.
+    q = AgentEarning.query.filter(AgentEarning.agent_user_id == user.id, AgentEarning.kind != "referral")
     totals = svc.earning_totals(q)
     total = q.count()
     rows = q.order_by(AgentEarning.earned_at.desc(), AgentEarning.id.desc()) \
@@ -265,3 +267,54 @@ def growth_kit():
     except svc.MarketingError as e:
         db.session.rollback()
         return _err(e)
+
+
+# ── buyer offer: check a code at checkout ────────────────────────────────────
+
+@marketing_public_bp.route("/promo/check", methods=["POST"])
+@limiter.limit("30 per minute")
+def check_promo_code():
+    """Body: {code, orders: [{vendor_id, subtotal}], email?, phone?, payment_method?}
+    or {code, payment_link_id, amount?, email?, phone?}. Nothing is reserved
+    here: the code is checked again, and a use taken, when the order is placed."""
+    data = request.get_json(silent=True) or {}
+    user_id = None
+    try:
+        verify_jwt_in_request(optional=True)
+        identity = get_jwt_identity()
+        user_id = int(identity) if identity is not None and str(identity).isdigit() else None
+    except Exception:
+        user_id = None
+    candidates = []
+    if data.get("payment_link_id") not in (None, ""):
+        from app.models.payment_link import PaymentLink
+        try:
+            link = db.session.get(PaymentLink, int(data.get("payment_link_id")))
+        except (TypeError, ValueError):
+            link = None
+        if link is None:
+            return jsonify({"code": "NOT_FOUND", "message": "Payment link not found."}), 404
+        amount = link.amount if link.amount else data.get("amount")
+        try:
+            amount = float(amount or 0)
+        except (TypeError, ValueError):
+            amount = 0
+        candidates.append({"vendor_id": link.vendor_id, "subtotal": amount,
+                           "currency": (data.get("currency") or getattr(link, "currency", None) or "NGN")})
+    else:
+        for row in data.get("orders") or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                candidates.append({"vendor_id": int(row.get("vendor_id")), "subtotal": float(row.get("subtotal") or 0),
+                                   "currency": "NGN"})
+            except (TypeError, ValueError):
+                continue
+    email = data.get("email") if isinstance(data.get("email"), str) else None
+    phone = data.get("phone") if isinstance(data.get("phone"), str) else None
+    try:
+        result = svc.promo_preview(data.get("code"), candidates, payment_method=data.get("payment_method"),
+                                   buyer_user_id=user_id, email=email, phone=phone)
+    except svc.MarketingError as e:
+        return jsonify({"valid": False, **e.to_dict()}), e.status
+    return jsonify({"valid": True, **result}), 200

@@ -588,15 +588,26 @@ PAYSTACK_TO_NIBSS_BANKS = {
 def ensure_paystack_transfer_recipient(
     account_number: str,
     bank_code: str,
-    account_name: str = "Vendor",
+    account_name: str | None = None,
+    name_confirmed: bool = False,
 ) -> dict:
     """
     Creates or retrieves a Paystack transfer recipient (RCP_xxxx),
     translating NIBSS/CBN codes (e.g. 100004 -> 999992 for OPay) automatically.
+
+    The recipient's name is only ever a bank-confirmed account holder name
+    (app/services/payout_account_name.py). Pass name_confirmed=True with a name
+    that came from a bank lookup; otherwise the account is looked up here
+    (Daya, then Paystack). A bank's name, the store name or "Vendor" is never
+    used. With no confirmed name no recipient is created: payouts wait until
+    the name is confirmed. Returns name_confirmed and the name used.
     """
+    from app.services.payout_account_name import is_suspect_name, resolve_holder_name
+
     key = _paystack_key()
     if not key:
-        return {"success": False, "error_message": "Paystack API key not configured."}
+        return {"success": False, "name_confirmed": False, "account_name": None,
+                "error_message": "Paystack API key not configured."}
 
     paystack_bank_code = NIBSS_TO_PAYSTACK_BANKS.get(str(bank_code).strip(), str(bank_code).strip())
     resolved_name = (account_name or "").strip()
@@ -606,23 +617,15 @@ def ensure_paystack_transfer_recipient(
         "Content-Type": "application/json",
     }
 
-    # If name is placeholder or empty, attempt resolve
-    if not resolved_name or resolved_name.lower() in ("vendor", "bank"):
-        try:
-            res_resp = requests.get(
-                f"{PAYSTACK_BASE_URL}/bank/resolve",
-                headers=headers,
-                params={"account_number": account_number, "bank_code": paystack_bank_code},
-                timeout=10,
-            )
-            res_data = res_resp.json()
-            if res_data.get("status") and res_data.get("data", {}).get("account_name"):
-                resolved_name = res_data["data"]["account_name"]
-        except Exception as _e:
-            logging.warning(f"[ENSURE RECIPIENT] Resolve warning: {_e}")
+    if not name_confirmed or not resolved_name or is_suspect_name(resolved_name):
+        res = resolve_holder_name(bank_code, account_number)
+        resolved_name = res["account_name"] or ""
 
     if not resolved_name:
-        resolved_name = "Siiqo Vendor"
+        logging.warning(f"[ENSURE RECIPIENT] Name not confirmed for {mask_account(account_number)}; "
+                        "no recipient created")
+        return {"success": False, "name_confirmed": False, "account_name": None,
+                "error_message": "Account name not confirmed by the bank."}
 
     payload = {
         "type": "nuban",
@@ -647,14 +650,17 @@ def ensure_paystack_transfer_recipient(
                 "success": True,
                 "recipient_code": recipient_code,
                 "account_name": resolved_name,
+                "name_confirmed": True,
             }
         else:
             msg = data.get("message", "Failed to create recipient")
-            logging.error(f"[ENSURE RECIPIENT] Error creating recipient: {data}")
-            return {"success": False, "error_message": msg}
+            logging.error(f"[ENSURE RECIPIENT] Error creating recipient for {mask_account(account_number)}: {msg}")
+            return {"success": False, "error_message": msg, "account_name": resolved_name,
+                    "name_confirmed": True}
     except Exception as exc:
-        logging.error(f"[ENSURE RECIPIENT] Exception: {exc}")
-        return {"success": False, "error_message": str(exc)}
+        logging.error(f"[ENSURE RECIPIENT] Exception: {type(exc).__name__}")
+        return {"success": False, "error_message": str(exc), "account_name": resolved_name,
+                "name_confirmed": True}
 
 
 def create_paystack_subaccount(

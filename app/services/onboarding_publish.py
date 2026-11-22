@@ -167,19 +167,27 @@ def _confirm_with_bank(bank: dict) -> dict:
 
     resolved    -> use the bank's name, mark the account verified;
     rejected    -> 400 BANK_NOT_RESOLVED (wrong number or bank);
-    unavailable -> Paystack down or not configured: keep the name the seller
-                   confirmed on screen, unverified (as /vendor/onboard does).
+    unavailable -> neither Daya nor Paystack answered: saved name pending
+                   (no name, unverified). The typed name is never saved; the
+                   hourly check (app/services/payout_account_name.py) asks
+                   the bank again and payouts wait until it answers.
     """
     from app.services.bank_resolve import resolve_account
     res = resolve_account(bank["bank_code"], bank["account_number"])
+    if not res.resolved and not res.rejected:
+        # Paystack didn't answer: try Daya, then Paystack once more.
+        from app.services.payout_account_name import resolve_holder_name
+        alt = resolve_holder_name(bank["bank_code"], bank["account_number"], bank.get("bank_name"))
+        if alt["status"] == "resolved":
+            return {**bank, "account_name": alt["account_name"][:100], "verified": True}
     if res.rejected:
         raise PublishError(400, "BANK_NOT_RESOLVED",
                            "We couldn't confirm this account with your bank. "
                            "Check the account number and bank.")
     if res.resolved:
         return {**bank, "account_name": res["account_name"][:100], "verified": True}
-    log.warning("onboarding publish: bank resolve unavailable (%s); saving unverified", res["message"])
-    return {**bank, "verified": False}
+    log.warning("onboarding publish: bank resolve unavailable (%s); saving name pending", res["message"])
+    return {**bank, "account_name": None, "verified": False}
 
 
 def _decimal(value) -> Decimal | None:
@@ -275,6 +283,8 @@ def publish(session: OnboardingSession, user: User, body: dict) -> tuple[dict, b
         # Marketing code the seller came through, if not credited at signup.
         from app.services.marketing import credit_signup
         credit_signup(user, body)
+        from app.services.attribution import record_store_created
+        record_store_created(user, body)
         db.session.commit()
     except IntegrityError as exc:
         db.session.rollback()
@@ -355,7 +365,7 @@ def _new_store(user, store_name, slug, bank, *, description=None, city=None, sta
             bank_name=bank["bank_name"],
             bank_code=cbn_code,
             account_number=bank["account_number"],
-            account_name=bank["account_name"],
+            account_name=bank["account_name"] if bank.get("verified") else None,
             is_verified=bool(bank.get("verified")),
             is_default=VendorBankAccount.query.filter_by(vendor_id=user.id).count() == 0,
         )

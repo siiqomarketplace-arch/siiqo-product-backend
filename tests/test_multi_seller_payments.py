@@ -100,7 +100,7 @@ def transfers(monkeypatch):
 
 def _seller(make_vendor, psk_sub=True, flw_sub=True):
     vendor, store = make_vendor()
-    db.session.add(VendorBankAccount(
+    db.session.add(VendorBankAccount(is_verified=True,
         vendor_id=vendor.id, bank_name="Test Bank", bank_code="000", account_number="0000000000",
         account_name="Test Vendor", is_default=True, recipient_code=f"RCP_{vendor.id}",
         paystack_subaccount_code=f"ACCT_{vendor.id}" if psk_sub else None,

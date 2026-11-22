@@ -72,9 +72,27 @@ def _set_up(vendor, store, make_product, products=5, account_number="9876543210"
         make_product(store)
 
 
+@pytest.fixture(autouse=True)
+def legacy_reward_rules(monkeypatch):
+    """These tests cover the reward mechanics (slots, distinct buyers, holds,
+    reversal, flags, portal, board) under a flat rule: N200 for each of 5
+    sales, no minimum. tests/test_campaign_rewards.py covers the default
+    rules (N500 first-sale bonus at N20,000+, N200 for sales 2-10 at N10,000+)."""
+    for key, value in {"AGENT_FIRST_SALE_BONUS_NGN": "200", "AGENT_SALE_REWARD_NGN": "200",
+                       "AGENT_REWARDED_SALES": "5", "AGENT_FIRST_SALE_MIN_NGN": "0",
+                       "AGENT_FOLLOW_ON_MIN_NGN": "0"}.items():
+        monkeypatch.setenv(key, value)
+
+
 def _pay(order):
+    """Paid, then delivery confirmed: the Safe Pay escrow is released."""
+    from app.models.escrow import EscrowTransaction
     order.status = "PAID"
     db.session.commit()
+    if (order.payment_method or "").upper() != "FREE":
+        db.session.add(EscrowTransaction(order_id=order.id, amount=order.total_amount, status="RELEASED",
+                                         released_at=datetime.now(timezone.utc), currency="NGN"))
+        db.session.commit()
     return order
 
 
@@ -96,7 +114,7 @@ def test_resolve_counts_scans_once_per_session_and_refuses_inactive(client):
     assert res.status_code == 200
     body = res.get_json()
     assert body == {"code": "FLY-WUSE1", "kind": "flyer", "label": None, "destination": "/sell",
-                    "campaign": "wuse-flyers", "ref": "FLY-WUSE1",
+                    "campaign": "wuse-flyers", "ref": "FLY-WUSE1", "agent": None,
                     "utm": {"source": "flyer", "medium": "qr", "campaign": "wuse-flyers"}}
     client.get("/api/public/r/FLY-WUSE1?sid=visitor-1")      # same visitor, within 30 min
     client.get("/api/public/r/FLY-WUSE1?sid=visitor-2")
@@ -124,6 +142,35 @@ def test_resolve_counts_scans_once_per_session_and_refuses_inactive(client):
     assert client.get("/api/public/r/FLY-WUSE1").status_code == 410
     db.session.expire_all()
     assert db.session.get(MarketingCode, code.id).scan_count == 3   # inactive scans are not counted
+
+
+def test_resolve_agent_code_gives_first_name_and_team_only(client, agent):
+    """The /r welcome shows who is helping: first name and team, never phone or surname."""
+    user, profile, code = agent(full_name="Amaka Grace Obi", team="Wuse Market", phone="08031234567")
+    body = client.get(f"/api/public/r/{code.code}").get_json()
+    assert body["kind"] == "agent"
+    assert body["agent"] == {"role": "agent", "first_name": "Amaka", "area": "Wuse Market"}
+    text = str(body)
+    assert "Obi" not in text and "Grace" not in text and "0803" not in text and "0123456789" not in text
+
+    # A paused agent's code shows no name (and isn't live for crediting anyway).
+    profile.status = "PAUSED"
+    db.session.commit()
+    assert svc.public_agent_for_code(code) is None
+
+    # A logistics company's rider code: the rider's first name and the company.
+    profile.status = "APPROVED"
+    profile.company_name = "Swift Riders Ltd"
+    db.session.commit()
+    rider = _code("agent", "/sell", label="Musa Bello", owner_user_id=user.id)
+    rider.contact_phone = "08012340000"
+    db.session.commit()
+    body = client.get(f"/api/public/r/{rider.code}").get_json()
+    assert body["agent"] == {"role": "rider", "first_name": "Musa", "area": "Swift Riders Ltd"}
+    assert "Bello" not in str(body) and "0801" not in str(body)
+
+    # Non-agent codes carry no person.
+    assert client.get(f"/api/public/r/{_code('flyer', '/sell').code}").get_json()["agent"] is None
 
 
 def test_destination_must_be_a_siiqo_path(client, make_user, auth_headers):
@@ -278,7 +325,10 @@ def test_no_reward_for_signup_or_setup_then_200_for_each_of_5_sales(make_user, m
     assert [e.order_id for e in sales] == [o.id for o in orders[:5]]
     assert all(e.status == "HELD" and float(e.amount_ngn) == 200 and e.agent_user_id == agent_user.id
                for e in sales)
-    assert svc._aware(sales[0].payable_at) - svc._aware(sales[0].earned_at) == timedelta(days=7)
+    # The hold runs from the release (delivery confirmed), not from payment.
+    from app.models.escrow import EscrowTransaction
+    released = EscrowTransaction.query.filter_by(order_id=orders[0].id).one().released_at
+    assert svc._aware(sales[0].payable_at) - svc._aware(released) == timedelta(days=7)
 
     # Idempotent: more orders and recomputes add nothing and move nothing.
     stamped = (acq.setup_at, acq.pay_link_at, acq.first_paid_order_at)
@@ -426,8 +476,8 @@ def test_agent_apply_approve_pause_and_privacy(client, make_user, make_vendor, m
     assert again.status_code == 409 and again.get_json()["code"] == "ALREADY_APPLIED"
     me = client.get("/api/agents/me", headers=headers).get_json()
     assert me["profile"]["status"] == "PENDING" and me["profile"]["link"] is None
-    assert me["rates"] == {"per_sale": 200, "rewarded_sales": 5, "max_per_seller": 1000, "hold_days": 7,
-                           "min_products": 5}
+    assert me["rates"] == {"first_sale_bonus": 200, "first_sale_min": 0, "per_sale": 200, "follow_on_min": 0,
+                           "rewarded_sales": 5, "max_per_seller": 1000, "hold_days": 7, "min_products": 5}
 
     profile = AgentProfile.query.filter_by(user_id=user.id).first()
     assert client.post(f"/api/admin/agents/{profile.id}/approve", headers=auth_headers(make_user())).status_code == 403

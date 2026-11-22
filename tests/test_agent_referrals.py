@@ -11,7 +11,7 @@ from app.models.marketing import SellerAcquisition
 from app.models.partnerships import Referral
 from app.models.user import User
 from app.services import marketing as svc
-from tests.test_marketing_system import _acq, _pay, agent  # noqa: F401  (fixture)
+from tests.test_marketing_system import _acq, _pay, agent, legacy_reward_rules  # noqa: F401  (fixtures)
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +111,7 @@ def test_agent_told_for_each_rewarded_sale(make_user, make_vendor, make_order, a
     notes = (Notification.query.filter_by(user_id=agent_user.id, title="Sale reward earned")
              .order_by(Notification.id).all())
     assert [n.message for n in notes] == [
-        f"₦200 earned: sale 1 of 5 from {store.store_name}.",
+        f"₦200 earned: first-sale bonus from {store.store_name}.",
         f"₦200 earned: sale 2 of 5 from {store.store_name}.",
     ]
     assert SellerAcquisition.query.filter_by(seller_user_id=vendor.id).count() == 1

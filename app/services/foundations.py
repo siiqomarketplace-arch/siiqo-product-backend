@@ -145,6 +145,22 @@ def _first_paid(order, is_new):
     return bool(hist.added) and hist.added[0] is not None and not any(d is not None for d in hist.deleted)
 
 
+class mark_seller_status_edit:
+    """Context manager for a seller changing their own order's status: inside
+    it, the flush hook never treats the new status as payment (paid_at)."""
+
+    def __init__(self, order):
+        self.order = order
+
+    def __enter__(self):
+        self.order._seller_status_edit = True
+        return self.order
+
+    def __exit__(self, *exc):
+        self.order._seller_status_edit = False
+        return False
+
+
 # ── hooks ──────────────────────────────────────────────────────────────────
 
 def _before_flush(session, flush_context, instances):
@@ -163,7 +179,13 @@ def _before_flush(session, flush_context, instances):
                 change = _status_change(obj)
                 if change:
                     new = (change[1] or "").upper()
-                    if new in ("PAID", "SHIPPED", "DELIVERED", "COMPLETED") and obj.paid_at is None:
+                    # paid_at comes from a confirmed payment only: an escrow
+                    # reaching a paid state (below), or a server path that sets
+                    # PAID/COMPLETED itself (POD cash confirmed, free order).
+                    # Shipping is not payment, and a seller's own status edit
+                    # never counts (see mark_seller_status_edit).
+                    if (new in ("PAID", "COMPLETED") and obj.paid_at is None
+                            and not getattr(obj, "_seller_status_edit", False)):
                         obj.paid_at = now
                     if new in ("DELIVERED", "COMPLETED") and obj.delivered_at is None:
                         obj.delivered_at = now
@@ -191,6 +213,10 @@ def _before_flush(session, flush_context, instances):
                         order.paid_at = obj.paid_at
                 if change and change[1] == EscrowStatus.RELEASED and order.released_at is None:
                     order.released_at = now
+                # The Safe Pay clock (services/trust.py release_deadline) starts
+                # once, when the payment is first marked delivered.
+                if change and change[1] == EscrowStatus.DELIVERED and order.delivered_at is None:
+                    order.delivered_at = now
     except Exception as e:  # never block the write that triggered this
         logger.warning(f"[FOUNDATIONS] before_flush skipped: {e}")
 
@@ -534,4 +560,8 @@ def register():
     # including funnel.paid) are recomputed in the same transaction.
     from app.services.marketing import register_hooks as _register_marketing_hooks
     _register_marketing_hooks()
+    # Delivery jobs: assigned when paid, cancelled on refund (runs after the
+    # hook above, which stamps order.paid_at).
+    from app.services.logistics_flow import register_hooks as _register_logistics_hooks
+    _register_logistics_hooks()
     _REGISTERED = True

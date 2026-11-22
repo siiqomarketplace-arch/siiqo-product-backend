@@ -46,7 +46,7 @@ def _post(client, event):
                        headers={"Content-Type": "application/json", "x-paystack-signature": sig})
 
 
-def _charge(email, reference, plan_name="PRO_MONTHLY", amount=199900):
+def _charge(email, reference, plan_name="PRO_MONTHLY", amount=300000):
     return {"event": "charge.success", "data": {
         "reference": reference, "status": "success", "amount": amount,
         "customer": {"email": email}, "metadata": {"plan_name": plan_name}}}
@@ -62,7 +62,7 @@ def _sub(vendor):
 
 def test_new_prices_in_plan_list(client):
     plans = {p["name"]: p for p in client.get("/api/payments/plans").get_json()["plans"]}
-    assert plans["PRO_MONTHLY"]["price_ngn"] == 1999
+    assert plans["PRO_MONTHLY"]["price_ngn"] == 3000
     assert plans["PRO_ANNUAL"]["price_ngn"] == 19990
     assert "Accept Pay on Delivery" in plans["PRO_MONTHLY"]["features"]
 
@@ -161,7 +161,7 @@ def _failed_case(vendor, status):
 def test_third_mismatch_refunds_and_ends_plan(make_vendor, paystack_calls):
     from app.models.verification import CaseStatus
     vendor, _ = make_vendor()
-    billing.apply_subscription_payment(vendor, "PRO_MONTHLY", reference="PAY-1", amount_ngn=1999)
+    billing.apply_subscription_payment(vendor, "PRO_MONTHLY", reference="PAY-1", amount_ngn=3000)
     for _ in range(2):
         _failed_case(vendor, CaseStatus.FAILED)
         assert billing.handle_identity_mismatch(vendor.id) is False

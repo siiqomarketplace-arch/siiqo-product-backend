@@ -48,7 +48,7 @@ def test_active_partners_hide_email_bank_and_keys(client, make_user):
     listed = [p for p in partners if p["id"] == partner.id]
     assert len(listed) == 1
     assert set(listed[0]) == {"id", "name", "business_name", "service_type", "partner_role",
-                              "state", "status", "store_settings"}
+                              "state", "status", "store_settings", "coverage"}
     # Fields the seller listing and buyer checkout rely on
     assert listed[0]["business_name"] == "Partner Ltd"
     assert listed[0]["store_settings"]["flat_rate"] == 2000

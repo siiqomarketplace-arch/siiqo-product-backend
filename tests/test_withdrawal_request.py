@@ -16,7 +16,7 @@ from app.services.escrow import paystack_provider
 def vendor_owed(make_vendor, monkeypatch):
     monkeypatch.setenv("ACTIVE_ESCROW_PROVIDER", "paystack")
     vendor, _ = make_vendor()
-    db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
+    db.session.add(VendorBankAccount(is_verified=True, vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
                                      account_number="0000000000", account_name="Test Vendor",
                                      recipient_code="RCP_test", is_default=True))
     _credit_vendor_ledger(vendor.id, 5000, "FAILED-PAYOUT-1", "Payout that did not go through")
@@ -102,7 +102,7 @@ def vendor_with(make_vendor, monkeypatch):
 
     def _make(balance):
         vendor, _ = make_vendor()
-        db.session.add(VendorBankAccount(vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
+        db.session.add(VendorBankAccount(is_verified=True, vendor_id=vendor.id, bank_name="Test Bank", bank_code="000",
                                          account_number="0000000000", account_name="Test Vendor",
                                          recipient_code=f"RCP_{vendor.id}", is_default=True))
         _credit_vendor_ledger(vendor.id, balance, f"SALE-{vendor.id}", "One digital sale")

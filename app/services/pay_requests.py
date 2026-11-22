@@ -291,6 +291,8 @@ def accept(req: PayRequest, user, body: dict | None = None) -> dict:
         created_store = True
         from app.services.marketing import credit_signup
         credit_signup(user, body)
+        from app.services.attribution import record_store_created
+        record_store_created(user, body, storefront)
 
     title = (req.item or f"Order from {storefront.store_name}")[:100]
     link = PaymentLink(

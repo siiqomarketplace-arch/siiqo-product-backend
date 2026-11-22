@@ -498,7 +498,9 @@ def onboard_vendor():
         country=data.get('country', 'Nigeria'),
         bank_code=data.get('bank_code') or data.get('bank_name'),
         account_number=data.get('account_number'),
-        account_name=data.get('account_name'),
+        # Never the typed name: only what a bank lookup returns (or none yet).
+        account_name=_bank_confirmed_name(data.get('bank_code') or data.get('bank_name'),
+                                          data.get('account_number')),
         phone=data.get('phone'),
         website=data.get('website'),
         cac_reg=data.get('cac_reg'),
@@ -536,6 +538,8 @@ def onboard_vendor():
     # Marketing code the seller came through, if not credited at signup.
     from app.services.marketing import credit_signup
     credit_signup(user, data)
+    from app.services.attribution import record_store_created
+    record_store_created(user, data, storefront)
     db.session.commit()
 
     # ── Paystack subaccount (for Split Payments on digital/service checkouts) ──
@@ -582,6 +586,19 @@ def onboard_vendor():
     }), 201
 
 
+def _bank_confirmed_name(bank_code, account_number):
+    """The account holder name from a bank lookup (Daya, then Paystack), or
+    None. A name sent by the client is never stored."""
+    if not bank_code or not account_number:
+        return None
+    try:
+        from app.services.payout_account_name import resolve_holder_name
+        res = resolve_holder_name(str(bank_code), str(account_number))
+    except Exception:  # noqa: BLE001
+        return None
+    return res["account_name"][:100] if res["status"] == "resolved" else None
+
+
 # ---------------------------------------------------------------------------
 # PATCH /vendor/update-settings
 # ---------------------------------------------------------------------------
@@ -608,7 +625,8 @@ def update_settings():
         'state': 'state',
         'bank_code': 'bank_code',
         'account_number': 'account_number',
-        'account_name': 'account_name',
+        # 'account_name' is never taken from the client: it is the name a bank
+        # lookup returns (app/services/payout_account_name.py), set below.
         'theme_color': 'theme_color',
         'phone': 'phone',
         'website': 'website',
@@ -622,10 +640,14 @@ def update_settings():
         'tiktok_pixel_id':    'tiktok_pixel_id',
         'ga4_measurement_id': 'ga4_measurement_id',
     }
+    old_bank = (sf.bank_code, sf.account_number)
     for form_key, model_attr in field_map.items():
         if form_key in data:
             setattr(sf, model_attr, data[form_key])
-            
+    if (sf.bank_code, sf.account_number) != old_bank:
+        # New bank details: the name is the bank's answer, or none (pending).
+        sf.account_name = _bank_confirmed_name(sf.bank_code, sf.account_number)
+
     # Also update user personal info if provided
     if 'phone' in data:
         user.phone = data['phone']
@@ -1423,6 +1445,8 @@ def get_orders():
     orders_data = [{
         "id": o.id,
         "total_amount": str(o.total_amount),
+        # First Order offer: the buyer paid this much less; Siiqo pays it to the seller on delivery.
+        "promo_discount_ngn": float(o.promo_discount_ngn) if getattr(o, 'promo_discount_ngn', None) else None,
         "status": o.status,
         "created_at": o.created_at.isoformat() if o.created_at else None,
         "payment_method": o.payment_method or "ESCROW",
@@ -1491,15 +1515,31 @@ def update_order_status(order_id):
     if new_status not in ALLOWED_STATUSES:
         return jsonify({"message": f"Invalid status. Allowed: {', '.join(ALLOWED_STATUSES)}"}), 400
 
-    if order.payment_method == 'ESCROW' and new_status == 'COMPLETED':
-        return jsonify({"message": "You cannot manually complete an Escrow order. The buyer must confirm delivery to release funds."}), 400
-
     # While a dispute is open the order status is frozen (a status change could
     # otherwise re-open a payout path). Respond on the dispute instead.
     from app.services.disputes import payout_blocked
     if payout_blocked(order, order.escrow):
         return jsonify({"message": "This order has an open dispute. Respond to the dispute instead of changing the status.",
                         "code": "DISPUTE_OPEN"}), 409
+
+    from app.models.escrow import EscrowTransaction, EscrowStatus
+    escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
+    is_daya = (order.payment_method or '').upper() in ('CRYPTO', 'DAYA', 'DAYA_BANK_TRANSFER', 'USDT', 'USDC')
+
+    # Payment is confirmed by the payment provider, never by a status edit.
+    # Any order with a Safe Pay escrow (whatever its payment method) or paid
+    # by bank transfer/crypto (Daya) can't be marked PAID or COMPLETED here.
+    if new_status != order.status and (escrow is not None or is_daya):
+        if new_status == 'COMPLETED':
+            return jsonify({"message": "You cannot manually complete this order. The buyer must confirm delivery to release funds.",
+                            "code": "BUYER_MUST_CONFIRM"}), 400
+        if new_status == 'PAID':
+            return jsonify({"message": "Payment is confirmed automatically when the buyer pays. You can't mark this order as paid.",
+                            "code": "PAYMENT_CONFIRMED_BY_PROVIDER"}), 400
+    if (new_status in ('SHIPPED', 'DELIVERED') and escrow is not None
+            and escrow.status == EscrowStatus.PENDING_PAYMENT):
+        return jsonify({"message": "The buyer hasn't paid for this order yet. Ship it once payment is confirmed.",
+                        "code": "PAYMENT_NOT_CONFIRMED"}), 409
 
     # Stock Restoration
     if new_status == 'CANCELLED' and order.status != 'CANCELLED':
@@ -1508,11 +1548,8 @@ def update_order_status(order_id):
                 item.product.stock_quantity = (item.product.stock_quantity or 0) + item.quantity
         
         # Also sync EscrowTransaction status if applicable
-        from app.models.escrow import EscrowTransaction, EscrowStatus
-        if order.payment_method == 'ESCROW':
-            escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
-            if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
-                escrow.status = EscrowStatus.CANCELLED
+        if escrow and escrow.status == EscrowStatus.PENDING_PAYMENT:
+            escrow.status = EscrowStatus.CANCELLED
 
     order.status = new_status
 
@@ -1521,16 +1558,14 @@ def update_order_status(order_id):
     if tracking_number:
         order.tracking_number = tracking_number
 
-    # Keep EscrowTransaction.status in sync with the order shipping status.
-    # This is required so that auto-release timer and delivery reminders work correctly —
-    # both tasks query EscrowTransaction.status == DELIVERED, not Order.status.
-    from app.models.escrow import EscrowTransaction, EscrowStatus
-    if order.payment_method == 'ESCROW' and new_status in ('SHIPPED', 'DELIVERED'):
-        escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
-        if escrow and escrow.status == EscrowStatus.IN_ESCROW and new_status == 'SHIPPED':
-            escrow.status = EscrowStatus.SHIPPED
-        elif escrow and escrow.status in (EscrowStatus.IN_ESCROW, EscrowStatus.SHIPPED) and new_status == 'DELIVERED':
-            escrow.status = EscrowStatus.DELIVERED
+    # Keep EscrowTransaction.status in sync with the order shipping status, for
+    # every order that has an escrow (Safe Pay, Daya bank transfer/crypto).
+    # The auto-release timer and delivery reminders both query
+    # EscrowTransaction.status == DELIVERED, not Order.status.
+    if escrow and new_status == 'SHIPPED' and escrow.status == EscrowStatus.IN_ESCROW:
+        escrow.status = EscrowStatus.SHIPPED
+    elif escrow and new_status == 'DELIVERED' and escrow.status in (EscrowStatus.IN_ESCROW, EscrowStatus.SHIPPED):
+        escrow.status = EscrowStatus.DELIVERED
 
     # Notify buyer of the status change
     from app.models.communication import Notification
@@ -1552,8 +1587,11 @@ def update_order_status(order_id):
             order_id=order_id,
         ))
 
+    from app.services.foundations import mark_seller_status_edit
     try:
-        db.session.commit()
+        # A seller's status edit is never treated as payment (paid_at).
+        with mark_seller_status_edit(order):
+            db.session.commit()
     except Exception as e:
         db.session.rollback()
         import logging, traceback
@@ -1561,11 +1599,10 @@ def update_order_status(order_id):
         return jsonify({"message": "Failed to update order status", "error": "Internal database error."}), 500
 
     # Safe Pay: tell the buyer (guests too) the exact deadline to confirm or report a problem.
-    if order.payment_method == 'ESCROW' and new_status == 'DELIVERED':
+    if escrow is not None and new_status == 'DELIVERED':
         try:
             from app.services.trust import release_deadline
             from app.tasks.escrow_tasks import email_buyer_confirm_by
-            escrow = EscrowTransaction.query.filter_by(order_id=order.id).first()
             deadline = release_deadline(escrow)
             if deadline is not None:
                 email_buyer_confirm_by(order, deadline)

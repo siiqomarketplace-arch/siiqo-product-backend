@@ -35,11 +35,11 @@ class Order(db.Model):
     __tablename__ = 'orders'
     
     id = db.Column(db.Integer, primary_key=True)
-    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Nullable for guest checkout
-    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    
+    buyer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)  # Nullable for guest checkout
+    vendor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+
     total_amount = db.Column(db.Numeric(10, 2), nullable=False)
-    status = db.Column(db.String(50), default='PENDING', nullable=False) # PENDING, PAID, SHIPPED, DELIVERED, CANCELLED
+    status = db.Column(db.String(50), default='PENDING', nullable=False, index=True) # PENDING, PAID, SHIPPED, DELIVERED, CANCELLED
     
     # Payment method
     payment_method = db.Column(db.String(20), default='ESCROW', nullable=False) # ESCROW, POD, CRYPTO
@@ -84,6 +84,10 @@ class Order(db.Model):
     campaign = db.Column(db.String(100), nullable=True)
     # The marketing code the buyer came through (attribution.ref, upper-case).
     ref_code = db.Column(db.String(24), nullable=True, index=True)
+    # "First Order N500 Off" (BuyerPromoCode): the code used and the naira
+    # taken off total_amount. Siiqo pays it to the seller on delivery.
+    promo_code = db.Column(db.String(24), nullable=True)
+    promo_discount_ngn = db.Column(db.Numeric(10, 2), nullable=True)
 
     # When the unpaid-order reminder went out (one per order), and how many
     # "please ship" reminders the seller has had (0, 1 or 2).
@@ -97,13 +101,22 @@ class Order(db.Model):
     escrow = db.relationship('EscrowTransaction', back_populates='order', uselist=False)
     payment_link = db.relationship('PaymentLink', backref='orders')
 
+    def is_paid(self) -> bool:
+        """True once the buyer's payment is confirmed (or the order is free).
+        Never inferred from a seller-set status. Older rows without paid_at
+        count as paid when their escrow holds or has released the money."""
+        if self.paid_at is not None or (self.payment_method or '').upper() == 'FREE':
+            return True
+        escrow = self.escrow
+        return escrow is not None and escrow.status in ('IN_ESCROW', 'SHIPPED', 'DELIVERED', 'RELEASED')
+
 class OrderItem(db.Model):
     __tablename__ = 'order_items'
     
     id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False, index=True)
     product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=True)
-    
+
     price_at_purchase = db.Column(db.Numeric(10, 2), nullable=False)
     quantity = db.Column(db.Integer, nullable=False)
     

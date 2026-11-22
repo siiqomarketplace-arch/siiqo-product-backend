@@ -59,7 +59,7 @@ def test_coming_soon_for_non_allowlisted_seller(client, make_vendor, auth_header
     started = _start(client, h)
 
     assert status["coming_soon"] is True and status["available"] is False
-    assert status["price_ngn_per_month"] == 1999
+    assert status["price_ngn_per_month"] == 3000
     assert started.status_code == 403 and started.get_json()["code"] == "COMING_SOON"
 
 
