@@ -363,11 +363,20 @@ def test_refund_cancels_job(client, make_partner, make_vendor, make_product):
 def test_pod_order_assigned_at_checkout_and_needs_handover_code(client, make_partner, make_vendor,
                                                                 make_product, auth_headers, emails,
                                                                 monkeypatch):
+    """Checkout no longer offers delivery partners with Pay on Delivery; a
+    POD partner job made before that (legacy row) still needs the code."""
     monkeypatch.setattr("app.services.entitlements.has_feature", lambda vid, f: True)
     partner = make_partner()
     vendor, store, p = _store(make_vendor, make_product)
     res = _checkout(client, p, f"siiqo_partner_{partner.id}", payment_method="POD")
+    assert res.status_code == 400 and res.get_json()["code"] == "POD_PARTNER_NOT_ALLOWED"
+    res = _checkout(client, p, "self_pickup", payment_method="POD")
     assert res.status_code == 200, res.get_json()
+    order = Order.query.one()
+    order.logistics_provider_id, order.logistics_fee = f"siiqo_partner_{partner.id}", 2200
+    db.session.add(LogisticsAssignment(order_id=order.id, partner_id=partner.id, status="ASSIGNED",
+                                       delivery_fee=2000))
+    db.session.commit()
     a = LogisticsAssignment.query.one()
     assert a.status == "ASSIGNED"
     h = auth_headers(partner)
@@ -477,20 +486,27 @@ def test_withdrawal_needs_bank_uses_fixed_reference_and_cannot_double_spend(
     assert r.status_code == 400 and len(calls) == 1
 
 
-def test_pod_fee_earned_after_cash_confirmed(client, make_partner, make_vendor, make_product, auth_headers,
-                                            emails, monkeypatch):
+def test_legacy_pod_partner_job_never_creates_siiqo_paid_earnings(client, make_partner, make_vendor,
+                                                                   make_product, auth_headers, emails,
+                                                                   monkeypatch):
+    """Pay on Delivery: the buyer paid the seller in cash, so Siiqo never held
+    the delivery fee. Older POD partner jobs are not Siiqo-paid earnings,
+    even once the seller confirms the cash (changed deliberately)."""
     monkeypatch.setattr("app.services.entitlements.has_feature", lambda vid, f: True)
     partner = make_partner()
     vendor, store, p = _store(make_vendor, make_product)
-    _checkout(client, p, f"siiqo_partner_{partner.id}", payment_method="POD")
-    a = LogisticsAssignment.query.one()
-    a.status = "DELIVERED"
+    assert _checkout(client, p, "self_pickup", payment_method="POD").status_code == 200
+    order = Order.query.one()
+    db.session.add(LogisticsAssignment(order_id=order.id, partner_id=partner.id, status="DELIVERED",
+                                       delivery_fee=2000))
     db.session.commit()
+    a = LogisticsAssignment.query.one()
     h = auth_headers(partner)
-    assert Decimal(client.get("/api/withdrawal/partner/balance", headers=h).get_json()["available"]) == 0
+    bal = client.get("/api/withdrawal/partner/balance", headers=h).get_json()
+    assert Decimal(bal["available"]) == 0 and Decimal(bal["pending_earnings"]) == 0
     PODPayment.query.filter_by(order_id=a.order_id).one().confirmed_by_vendor = True
     db.session.commit()
-    assert Decimal(client.get("/api/withdrawal/partner/balance", headers=h).get_json()["available"]) == 2000
+    assert Decimal(client.get("/api/withdrawal/partner/balance", headers=h).get_json()["available"]) == 0
 
 
 def test_partner_edits_coverage(client, make_partner, auth_headers):

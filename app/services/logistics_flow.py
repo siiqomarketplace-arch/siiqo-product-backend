@@ -486,18 +486,29 @@ def move(assignment, new_status, user, data=None):
 
 # ── earnings ───────────────────────────────────────────────────────────────
 
+def _is_pod(order):
+    return (getattr(order, "payment_method", None) or "").upper() == "POD"
+
+
 def _earned(assignment):
-    """A delivery fee is earned once the buyer's money is final: its Safe Pay
-    escrow RELEASED, or Pay on Delivery cash confirmed by the seller."""
+    """A delivery fee is earned (paid by Siiqo) once the job is DELIVERED and
+    the buyer's Safe Pay money is final:
+      * escrow RELEASED; or
+      * escrow REFUNDED after delivery: under the delivery refund rule the
+        buyer gets the item back and the partner keeps the delivery fee
+        (app/services/delivery_money.py). A refund before delivery cancels
+        the job instead, so it never reaches here.
+    Pay on Delivery jobs never create Siiqo-paid earnings: the buyer paid the
+    seller in cash and Siiqo never held the delivery fee. Checkout no longer
+    lets POD orders use a delivery partner; older POD jobs are listed on the
+    admin Delivery money screen."""
     order = assignment.order
-    if assignment.status != DELIVERED or order is None:
-        return False
-    if (order.status or "").upper() in ("CANCELLED", "REFUNDED", "DISPUTED"):
+    if assignment.status != DELIVERED or order is None or _is_pod(order):
         return False
     escrow = order.escrow
-    if escrow is not None:
-        return escrow.status == "RELEASED"
-    return (order.payment_method or "").upper() == "POD" and _pod_cash_confirmed(order)
+    if escrow is None:
+        return False
+    return escrow.status in ("RELEASED", "REFUNDED")
 
 
 def partner_earnings(partner_id):
@@ -516,8 +527,9 @@ def partner_earnings(partner_id):
         if _earned(a):
             earned += fee
             completed += 1
-        elif order is not None and (order.status or "").upper() not in ("CANCELLED", "REFUNDED") and not (
-                order.escrow is not None and order.escrow.status in ("REFUNDED", "CANCELLED")):
+        elif (order is not None and not _is_pod(order)
+              and (order.status or "").upper() not in ("CANCELLED", "REFUNDED")
+              and not (order.escrow is not None and order.escrow.status in ("REFUNDED", "CANCELLED"))):
             pending += fee          # on the way, or delivered and waiting for the money to be final
     withdrawn = db.session.query(func.sum(PartnerWithdrawal.amount)).filter(
         PartnerWithdrawal.partner_id == int(partner_id),

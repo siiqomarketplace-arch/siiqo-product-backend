@@ -725,21 +725,41 @@ def decide(case_id: int, admin, outcome: str, *, seller_fault, note: str | None 
     case.decided_at = now
     case.resolved_at = now
     case.currency = currency
-    case.refund_amount = plan["refund"]
     case.seller_amount = plan["seller_net"]
     case.fee_kept = plan["fee_kept"]
 
-    if plan["refund"] > 0:
+    # Delivery fee refund rule (app/services/delivery_money.py): not delivered
+    # -> the buyer also gets the delivery fee back; delivered -> it goes to the
+    # partner (or to the seller for their own delivery). The delivery fee is
+    # naira and outside the escrow amount the split above divides.
+    delivery = None
+    delivery_refund = Decimal("0.00")
+    if outcome != DisputeOutcome.RELEASE_TO_SELLER:
+        from app.services.delivery_money import apply_refund_rule
+        delivery = apply_refund_rule(order, escrow, plan["refund"])
+        delivery_refund = _dec(delivery["buyer_delivery_refund"])
+    if currency == "NGN":
+        case.refund_amount = plan["refund"] + delivery_refund
+    else:
+        case.refund_amount = plan["refund"]
+
+    if case.refund_amount > 0:
         case.refund_status = "manual_due"
-        case.refund_instructions = refund_instructions(order, escrow, plan["refund"], currency)
+        case.refund_instructions = refund_instructions(order, escrow, case.refund_amount, currency)
+        if delivery_refund > 0:
+            case.refund_instructions += (
+                f" Includes the NGN {delivery_refund:,.2f} delivery fee: the order was not delivered."
+                if currency == "NGN" else
+                f" Also refund the NGN {delivery_refund:,.2f} delivery fee: the order was not delivered.")
     else:
         case.refund_status = "not_applicable"
 
     _audit(admin, "DISPUTE_DECIDED", case, {
         "reference": case.reference, "order_id": order.id, "outcome": outcome, "seller_fault": seller_fault,
-        "refund_amount": str(plan["refund"]), "seller_amount": str(plan["seller_net"]),
+        "refund_amount": str(case.refund_amount), "item_refund": str(plan["refund"]),
+        "seller_amount": str(plan["seller_net"]),
         "fee_kept": str(plan["fee_kept"]), "currency": currency, "note": case.decision_note,
-        "seller_settled_at_checkout": settled,
+        "seller_settled_at_checkout": settled, "delivery_rule": delivery,
     }, ip)
     _record_evidence(case)
 
@@ -760,7 +780,7 @@ def decide(case_id: int, admin, outcome: str, *, seller_fault, note: str | None 
             case.seller_payout_note = (f"The seller was paid {money(_dec(escrow.amount) - _dec(escrow.fee_amount or 0))} "
                                        "at checkout by the gateway split. Recover it from the seller.")
         _notify(case.buyer_id, "Dispute decided",
-                f"Dispute {case.reference}: {money(plan['refund'])} will be returned to you. "
+                f"Dispute {case.reference}: {money(case.refund_amount)} will be returned to you. "
                 "We'll tell you when it has been sent.", order.id)
         _notify(case.vendor_id, "Dispute decided",
                 f"Dispute {case.reference}: the payment for Order #{order.id} will be returned to the buyer.", order.id)
@@ -787,10 +807,10 @@ def decide(case_id: int, admin, outcome: str, *, seller_fault, note: str | None 
         escrow.released_at = now
         order.status = "COMPLETED"
         _notify(case.buyer_id, "Dispute decided",
-                f"Dispute {case.reference}: {money(plan['refund'])} will be returned to you. "
+                f"Dispute {case.reference}: {money(case.refund_amount)} will be returned to you. "
                 "We'll tell you when it has been sent.", order.id)
         _notify(case.vendor_id, "Dispute decided",
-                f"Dispute {case.reference}: {money(plan['refund'])} goes back to the buyer and "
+                f"Dispute {case.reference}: {money(case.refund_amount)} goes back to the buyer and "
                 f"{money(plan['seller_net'])} is your share.", order.id)
     db.session.commit()
     log.warning("[DISPUTE] %s decided %s by admin %s (seller_fault=%s)", case.reference, outcome, admin.id, seller_fault)
@@ -910,6 +930,11 @@ def admin_view(case: DisputeCase, *, with_evidence: bool = True) -> dict:
             "escrow_status": escrow.status,
             "payment_method": order.payment_method,
         }
+        # Delivery fee (naira, outside the escrow amount) and the refund rule.
+        from app.services.delivery_money import refund_split
+        money["delivery"] = refund_split(order, escrow)
+        money["delivery"]["recorded_buyer_refund_total"] = _money(getattr(escrow, "buyer_refund_amount", None))
+        money["delivery"]["recorded_delivery_fee_to"] = getattr(escrow, "delivery_fee_to", None)
     data.update({
         "evidence": [e.to_dict() for e in case.evidence],
         "summary": case.summary if case.summary_status == "ready" else None,

@@ -64,6 +64,13 @@ class EscrowTransaction(db.Model):
     # found by transaction_number (app/services/payment_refs.py).
     payment_ref = db.Column(db.String(120), nullable=True, index=True)
 
+    # Refunds (app/services/delivery_money.py refund rule): what the buyer is
+    # owed in total, the delivery fee part of it (naira), and where the
+    # delivery fee went: 'buyer' (not delivered), 'partner' or 'seller'.
+    buyer_refund_amount = db.Column(db.Numeric(12, 2), nullable=True)
+    delivery_refund_ngn = db.Column(db.Numeric(10, 2), nullable=True)
+    delivery_fee_to = db.Column(db.String(20), nullable=True)
+
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

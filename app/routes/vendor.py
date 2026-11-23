@@ -1423,6 +1423,7 @@ def get_orders():
     from app.models.order import OrderItem
     query = Order.query.filter_by(vendor_id=user.id).order_by(Order.created_at.desc()).options(
         joinedload(Order.buyer),
+        joinedload(Order.escrow),
         joinedload(Order.items).joinedload(OrderItem.product)
     )
 
@@ -1442,9 +1443,16 @@ def get_orders():
     # This live sync was causing crashes and is redundant.
     # ─────────────────────────────────────────────────────────────────────────
 
+    # What the seller is paid: Item − Siiqo 3% + your delivery = total
+    # (app/services/delivery_money.py; Siiqo's 3% is never on delivery).
+    from app.services.delivery_money import delivery_by, payout_breakdown
+
     orders_data = [{
         "id": o.id,
         "total_amount": str(o.total_amount),
+        "delivery_fee": str(o.logistics_fee or 0),
+        "delivery_by": delivery_by(o),
+        "payout_breakdown": payout_breakdown(o, o.escrow),
         # First Order offer: the buyer paid this much less; Siiqo pays it to the seller on delivery.
         "promo_discount_ngn": float(o.promo_discount_ngn) if getattr(o, 'promo_discount_ngn', None) else None,
         "status": o.status,

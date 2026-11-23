@@ -1092,99 +1092,13 @@ def partner_withdrawal_reference(withdrawal) -> str:
 @jwt_required()
 @partner_required
 def request_partner_withdrawal():
-    """Approved partner withdraws earned delivery fees to its saved bank."""
-    from app.services.logistics_flow import partner_earnings
-    partner_id = g.partner.id
-
-    # Serialise withdrawals per partner: hold a row lock on the partner until
-    # the withdrawal row is committed, so two requests can't both spend the
-    # same balance (the second waits and then sees the first one's row).
-    db.session.query(User).filter_by(id=partner_id).with_for_update().first()
-
-    available = partner_earnings(partner_id)['available']
-
-    MIN_WITHDRAWAL = Decimal(str(min_withdrawal_ngn()))  # same minimum as sellers (MIN_WITHDRAWAL_NGN)
-    if available < MIN_WITHDRAWAL:
-        db.session.rollback()
-        return jsonify({
-            'message': f'Insufficient balance. Minimum withdrawal is ₦{MIN_WITHDRAWAL:,.2f}. '
-                       f'Your available balance is ₦{available:,.2f}.'
-        }), 400
-
-    bank_acc = PartnerBankAccount.query.filter_by(partner_id=partner_id, is_default=True).first()
-    if not bank_acc:
-        bank_acc = PartnerBankAccount.query.filter_by(partner_id=partner_id).first()
-    if not bank_acc or not bank_acc.recipient_code or not bank_acc.is_verified:
-        db.session.rollback()
-        return jsonify({
-            'code': 'NO_PAYOUT_ACCOUNT',
-            'message': 'Add and verify your bank account in Earnings before you withdraw.'
-        }), 400
-
+    """Approved partner withdraws earned delivery fees to its saved bank:
+    Daya NGN transfer first, Paystack only if Daya isn't configured or
+    definitely refused it (app/services/partner_payouts.py)."""
+    from app.services.partner_payouts import send_partner_withdrawal
     data = request.get_json(silent=True) or {}
-    requested_amount = data.get('amount')
-    if requested_amount not in (None, ''):
-        try:
-            requested_amount = Decimal(str(requested_amount)).quantize(Decimal('0.01'))
-        except Exception:
-            db.session.rollback()
-            return jsonify({'message': 'Invalid amount format.'}), 400
-        if requested_amount < MIN_WITHDRAWAL or requested_amount > available:
-            db.session.rollback()
-            return jsonify({'message': 'Invalid withdrawal amount.'}), 400
-    else:
-        requested_amount = available  # withdraw all
-
-    # Record (and reserve) the withdrawal before calling the gateway.
-    new_withdrawal = PartnerWithdrawal(
-        partner_id=int(partner_id),
-        amount=requested_amount,
-        fee_amount=Decimal('0'),
-        net_amount=requested_amount,
-        status='PROCESSING',
-        bank_account_id=bank_acc.id,
-    )
-    db.session.add(new_withdrawal)
-    db.session.flush()
-    reference = partner_withdrawal_reference(new_withdrawal)
-    new_withdrawal.transfer_reference = reference
-    new_withdrawal.withdrawal_number = reference
-    db.session.commit()   # releases the lock; the balance is now reserved
-
-    from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
-    try:
-        result = paystack_transfer_to_vendor(
-            recipient_code=bank_acc.recipient_code,
-            amount_ngn=float(requested_amount),
-            reference=reference,
-            reason="Siiqo partner withdrawal",
-        )
-    except Exception as e:  # noqa: BLE001 - unknown outcome: keep it reserved for review
-        logging.error("[PARTNER WITHDRAWAL] transfer call failed for %s: %s", reference, e)
-        return jsonify({'status': 'processing',
-                        'message': "We're confirming your withdrawal with the bank. "
-                                   "Check back shortly before trying again."}), 202
-
-    if not result.get("success"):
-        new_withdrawal.status = 'FAILED'
-        new_withdrawal.failure_reason = str(result.get('error_message') or 'Transfer failed')[:500]
-        db.session.commit()
-        return jsonify({
-            'message': f"Withdrawal failed: {result.get('error_message', 'Unknown error.')}"
-        }), 400
-
-    new_withdrawal.status = 'PENDING'
-    new_withdrawal.transfer_code = result.get("transfer_code", "")
-    new_withdrawal.processed_at = _utcnow()
-    db.session.commit()
-
-    return jsonify({
-        'status': 'success',
-        'message': 'Withdrawal initiated. Funds will arrive within 24 hours.',
-        'transfer_code': new_withdrawal.transfer_code,
-        'reference': reference,
-        'amount': str(requested_amount),
-    }), 200
+    status, body = send_partner_withdrawal(g.partner, data.get('amount'), source='manual')
+    return jsonify(body), status
 
 
 # ---------------------------------------------------------------------------

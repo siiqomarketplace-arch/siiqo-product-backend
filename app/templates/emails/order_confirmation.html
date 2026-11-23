@@ -68,6 +68,16 @@
                         {% endfor %}
                     </tbody>
                     <tfoot>
+                        {% if delivery_fee is defined and delivery_fee and delivery_fee > 0 %}
+                        <tr style="border-top: 2px solid #e2e8f0;">
+                            <td colspan="2" style="padding: 8px 0; font-size: 14px; color: #475569;">Item</td>
+                            <td style="padding: 8px 0; font-size: 14px; color: #1e293b; text-align: right;">₦{{ "{:,.0f}".format(items_total) }}</td>
+                        </tr>
+                        <tr>
+                            <td colspan="2" style="padding: 8px 0; font-size: 14px; color: #475569;">Delivery{% if delivery_by %} ({{ delivery_by }}){% endif %}</td>
+                            <td style="padding: 8px 0; font-size: 14px; color: #1e293b; text-align: right;">₦{{ "{:,.0f}".format(delivery_fee) }}</td>
+                        </tr>
+                        {% endif %}
                         <tr style="border-top: 2px solid #e2e8f0;">
                             <td colspan="2" style="padding: 12px 0; font-size: 15px; font-weight: 700; color: #0f172a;">Total</td>
                             <td style="padding: 12px 0; font-size: 16px; font-weight: 900; color: #E0921C; text-align: right;">₦{{ "{:,.0f}".format(total_amount) }}</td>

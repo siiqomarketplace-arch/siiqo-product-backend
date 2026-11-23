@@ -516,7 +516,7 @@ def checkout():
                             sel.get('selectedOption') or {},
                             vendor_user.storefront if vendor_user else None,
                             data.get('delivery_city'), data.get('delivery_state'),
-                            data.get('delivery_lga'))
+                            data.get('delivery_lga'), payment_method=payment_method)
                     except DeliveryError as e:
                         db.session.rollback()
                         return jsonify({"code": e.code, "message": e.message}), e.status
@@ -752,7 +752,12 @@ def checkout():
                     order_id=new_order.id,
                     payment_method=payment_method,
                     order_items=order_items_list,
-                    total_amount=total,
+                    # Item · Delivery · Total: on Pay on Delivery the buyer pays
+                    # the seller both (no Siiqo fee on delivery).
+                    items_total=total,
+                    delivery_fee=float(logistics_fee or 0),
+                    delivery_by=("seller" if logistics_provider_id == "vendor_self" else None),
+                    total_amount=total + float(logistics_fee or 0),
                 )
             except Exception as e:
                 logging.warning(f"[EMAIL WARN] Failed to send order confirmation to buyer: {e}")

@@ -143,13 +143,30 @@ def vendor_self_fee(sf, delivery_city, delivery_state) -> float:
     return float(fee)
 
 
-def price_option(option: dict, sf, delivery_city, delivery_state, delivery_lga=None):
+POD_PARTNER_MESSAGE = "Delivery partners need Safe Pay. Choose Safe Pay or the seller's own delivery."
+
+
+def allowed_with_payment(option_id, payment_method) -> bool:
+    """Pay on Delivery: the buyer pays the seller in cash, so Siiqo never holds
+    a delivery fee to pay a partner with. Only the seller's own delivery,
+    pickup or no option are allowed with POD."""
+    if (payment_method or "").upper() != "POD":
+        return True
+    opt = (str(option_id).strip() if option_id is not None else "")
+    return opt in ("", VENDOR_SELF_ID) or opt in PICKUP_IDS
+
+
+def price_option(option: dict, sf, delivery_city, delivery_state, delivery_lga=None, payment_method=None):
     """(fee, option id, provider quote or None) for one vendor's chosen
     delivery option, priced by the server. The fee the browser sends is never
-    used. Raises DeliveryError when the option isn't available."""
+    used. Raises DeliveryError when the option isn't available (including a
+    delivery partner with Pay on Delivery)."""
     option = option if isinstance(option, dict) else {}
     opt_id = option.get("id")
     opt_id = str(opt_id).strip() if opt_id is not None else None
+
+    if not allowed_with_payment(opt_id, payment_method):
+        raise DeliveryError("POD_PARTNER_NOT_ALLOWED", POD_PARTNER_MESSAGE)
 
     if opt_id == VENDOR_SELF_ID:
         return vendor_self_fee(sf, delivery_city, delivery_state), opt_id, None

@@ -188,6 +188,17 @@ def create_app(config_name: str | None = None) -> Flask:
                 # payment (app/services/payment_refs.py). NULL = older row.
                 "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS payment_ref VARCHAR(120)",
                 "CREATE INDEX IF NOT EXISTS ix_escrow_transactions_payment_ref ON escrow_transactions (payment_ref)",
+                # Delivery money (app/services/delivery_money.py): refund amounts
+                # under the delivery fee refund rule. partner_payout_runs itself
+                # is made by db.create_all() above.
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS buyer_refund_amount NUMERIC(12, 2)",
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS delivery_refund_ngn NUMERIC(10, 2)",
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS delivery_fee_to VARCHAR(20)",
+                # Partner withdrawals: rail used (daya/paystack), manual or weekly auto, run week.
+                "ALTER TABLE partner_withdrawals ADD COLUMN IF NOT EXISTS channel VARCHAR(20)",
+                "ALTER TABLE partner_withdrawals ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'manual'",
+                "ALTER TABLE partner_withdrawals ADD COLUMN IF NOT EXISTS run_key VARCHAR(20)",
+                "CREATE INDEX IF NOT EXISTS ix_partner_withdrawals_run_key ON partner_withdrawals (run_key)",
                 "ALTER TABLE passport_api_clients ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
                 "CREATE INDEX IF NOT EXISTS ix_passport_api_clients_owner_user_id ON passport_api_clients (owner_user_id)",
                 "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_secret_enc VARCHAR(255)",
@@ -773,6 +784,10 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.admin_payout_accounts import payout_accounts_admin_bp
     app.register_blueprint(payout_accounts_admin_bp, url_prefix='/api/admin/payout-accounts')
 
+    # Admin: delivery money (fees collected, owed/paid to partners and sellers)
+    from app.routes.admin_delivery_money import delivery_money_admin_bp
+    app.register_blueprint(delivery_money_admin_bp, url_prefix='/api/admin/delivery-money')
+
     # Phase 0B: record order history, fees, trust evidence, funnel events and
     # seller identifiers automatically on every database write.
     from app.services.foundations import register as _register_foundations
@@ -1057,6 +1072,22 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as account_name_err:
                 logger.warning(f"Payout account name task registration skipped: {account_name_err}")
+
+            # Weekly delivery partner payouts: Fridays 08:00 UTC (09:00 Lagos,
+            # no daylight saving). Sends nothing unless PARTNER_AUTO_PAYOUT_ENABLED
+            # is on; one run per week (app/services/partner_payouts.py).
+            try:
+                from app.services.partner_payouts import scheduled_weekly_partner_payouts
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, scheduled_weekly_partner_payouts),
+                    trigger=CronTrigger(day_of_week='fri', hour=8, minute=0),
+                    id='partner_weekly_payouts',
+                    name='Weekly delivery partner payouts (PARTNER_AUTO_PAYOUT_ENABLED)',
+                    replace_existing=True,
+                    max_instances=1,
+                )
+            except Exception as partner_payout_err:
+                logger.warning(f"Partner weekly payout task registration skipped: {partner_payout_err}")
 
             # Admin email broadcasts: carry on any job left part-sent (restart,
             # crashed thread). Jobs and per-recipient status live in the database.

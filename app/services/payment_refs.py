@@ -25,12 +25,16 @@ def multi_split_enabled() -> bool:
 def seller_net_by_vendor(orders) -> dict:
     """{vendor_id: Decimal net} where each order's net is exactly what the
     release path would pay by transfer: order total minus Siiqo's fee
-    (escrow.amount - escrow.fee_amount). Delivery fees stay with Siiqo."""
+    (escrow.amount - escrow.fee_amount) plus the seller's own delivery fee
+    (whole, no 3%; app/services/delivery_money.py). A delivery partner's fee
+    stays with Siiqo, which pays the partner."""
+    from app.services.delivery_money import seller_delivery_fee
     from app.services.fees import platform_fee
     out = {}
     for o in orders:
         total = Decimal(str(o.total_amount or 0))
-        out[o.vendor_id] = out.get(o.vendor_id, Decimal("0")) + (total - platform_fee(total))
+        out[o.vendor_id] = (out.get(o.vendor_id, Decimal("0")) + (total - platform_fee(total))
+                            + seller_delivery_fee(o))
     return out
 
 

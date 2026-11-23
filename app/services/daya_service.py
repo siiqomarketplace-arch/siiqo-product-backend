@@ -11,6 +11,8 @@ from decimal import Decimal, InvalidOperation
 
 import requests
 
+from app.utils.log_mask import mask_account
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,8 +40,25 @@ def _headers(idempotency_key: str | None = None) -> dict:
     return h
 
 
+class DayaHTTPError(RuntimeError):
+    """Daya answered with an HTTP error status (a RuntimeError, as before).
+    ``status_code`` lets callers tell a definite refusal (most 4xx: nothing
+    was sent) from an unknown outcome (timeouts, 5xx, 409 duplicate)."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+# 4xx answers that do not prove the transfer was refused: 408 timeout,
+# 409 duplicate idempotency key (an earlier call may have gone through),
+# 425/429 retry later.
+_UNCERTAIN_4XX = {408, 409, 425, 429}
+
+
 def _request(method: str, path: str, **kwargs) -> dict:
-    """Central HTTP helper. Raises RuntimeError on failure."""
+    """Central HTTP helper. Raises RuntimeError on failure (DayaHTTPError for
+    an HTTP error status)."""
     url = f"{_base_url()}{path}"
     try:
         resp = requests.request(method, url, timeout=15, **kwargs)
@@ -59,7 +78,7 @@ def _request(method: str, path: str, **kwargs) -> dict:
         except Exception:
             msg = resp.text[:200]
         logger.error("[DAYA] %s %s -> %s: %s", method, path, resp.status_code, msg)
-        raise RuntimeError(f"Daya error ({resp.status_code}): {msg}")
+        raise DayaHTTPError(f"Daya error ({resp.status_code}): {msg}", resp.status_code)
 
     return resp.json()
 
@@ -368,7 +387,8 @@ def transfer_ngn_to_vendor(
     operators (OPay, PalmPay, etc.).
     """
     if not _key():
-        return {"success": False, "error_message": "DAYA_API_KEY not configured"}
+        return {"success": False, "error_message": "DAYA_API_KEY not configured",
+                "outcome": "not_configured"}
 
     # Translate Paystack code → Daya CBN code before sending
     daya_bank_code = _translate_bank_code(bank_code)
@@ -397,13 +417,18 @@ def transfer_ngn_to_vendor(
             },
         )
         logger.info("[DAYA TRANSFER] NGN%s -> %s/%s (original_code=%s) ref=%s id=%s status=%s",
-                    amount_ngn, daya_bank_code, account_number, bank_code,
+                    amount_ngn, daya_bank_code, mask_account(account_number), bank_code,
                     reference, data.get("id"), data.get("status"))
         return {"success": True, "transfer_id": data.get("id"),
-                "status": data.get("status"), "error_message": None}
+                "status": data.get("status"), "error_message": None, "outcome": "sent"}
     except RuntimeError as exc:
         logger.error("[DAYA TRANSFER] Failed ref=%s: %s", reference, exc)
-        return {"success": False, "error_message": str(exc)}
+        # "refused": Daya answered 4xx, nothing was sent. "unknown": timeout,
+        # connection error, 5xx or duplicate -- the money may have left.
+        status = getattr(exc, "status_code", None)
+        refused = status is not None and 400 <= status < 500 and status not in _UNCERTAIN_4XX
+        return {"success": False, "error_message": str(exc),
+                "outcome": "refused" if refused else "unknown"}
 
 
 # ---------------------------------------------------------------------------

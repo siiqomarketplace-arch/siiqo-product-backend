@@ -221,6 +221,11 @@ class PartnerWithdrawal(db.Model):
     transfer_reference = db.Column(db.String(100), nullable=True)
     failure_reason = db.Column(db.Text, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
+    # Which rail sent it ('daya' or 'paystack'), who asked ('manual' or 'auto'
+    # weekly payout) and the weekly run it belongs to (app/services/partner_payouts.py).
+    channel = db.Column(db.String(20), nullable=True)
+    source = db.Column(db.String(20), nullable=True, default='manual')
+    run_key = db.Column(db.String(20), nullable=True, index=True)
 
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -248,8 +253,41 @@ class PartnerWithdrawal(db.Model):
             'bank_account': self.bank_account.to_dict() if self.bank_account else None,
             'transfer_code': self.transfer_code,
             'failure_reason': self.failure_reason,
+            'channel': self.channel,
+            'source': self.source or 'manual',
             'requested_at': self.requested_at.isoformat() if self.requested_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class PartnerPayoutRun(db.Model):
+    """One automatic weekly partner payout run (Friday, Lagos time). run_key
+    is the ISO week ('2026-W48'): unique, so a week is paid at most once."""
+    __tablename__ = 'partner_payout_runs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    run_key = db.Column(db.String(20), unique=True, nullable=False, index=True)
+    status = db.Column(db.String(20), nullable=False, default='RUNNING')   # RUNNING, DONE
+    started_at = db.Column(db.DateTime(timezone=True), default=utcnow)
+    finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    paid_count = db.Column(db.Integer, default=0)
+    paid_total = db.Column(db.Numeric(12, 2), default=0)
+    skipped_count = db.Column(db.Integer, default=0)
+    failed_count = db.Column(db.Integer, default=0)
+    results = db.Column(db.JSON, nullable=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'run_key': self.run_key,
+            'status': self.status,
+            'started_at': self.started_at.isoformat() if self.started_at else None,
+            'finished_at': self.finished_at.isoformat() if self.finished_at else None,
+            'paid_count': self.paid_count or 0,
+            'paid_total': str(self.paid_total or 0),
+            'skipped_count': self.skipped_count or 0,
+            'failed_count': self.failed_count or 0,
+            'results': self.results or [],
         }
 
 

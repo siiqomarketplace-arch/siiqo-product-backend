@@ -111,9 +111,9 @@ def _debit_vendor_ledger(vendor_id: int, amount: float, reference_id: str, descr
     ))
 
 
-def _vendor_net_amount(order, escrow) -> float:
-    """Vendor's net share (amount - fee) as used for the ledger and payouts.
-    In naira for a foreign-currency order whose payment-time rate is known
+def _vendor_item_net_amount(order, escrow) -> float:
+    """Item part of the seller's share: escrow amount - Siiqo's 3%. In naira
+    for a foreign-currency order whose payment-time rate is known
     (app/services/fx.py); otherwise the escrow's face value, as before."""
     from app.services import fx
     converted = fx.naira_net(order, escrow)
@@ -124,6 +124,16 @@ def _vendor_net_amount(order, escrow) -> float:
     if converted is not None:
         return float(converted)
     return float(escrow.amount) - float(escrow.fee_amount or 0)
+
+
+def _vendor_net_amount(order, escrow) -> float:
+    """Seller's payout for this order, as used for the ledger and every payout
+    rail: item amount - Siiqo's 3% + the seller's own delivery fee (whole, no
+    3%; app/services/delivery_money.py). The delivery fee is already naira.
+    After release it counts only when credited (``delivery_fee:<order_id>``),
+    so orders released before this rule are never paid it retroactively."""
+    from app.services.delivery_money import seller_delivery_share
+    return round(_vendor_item_net_amount(order, escrow) + float(seller_delivery_share(order, escrow)), 2)
 
 
 def _payout_amount_or_hold(order, escrow):
@@ -1362,16 +1372,24 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         return False
 
     net_amount = _vendor_net_amount(order, escrow)
+    from app.services.delivery_money import credit_seller_delivery, payout_breakdown, seller_delivery_share
+    delivery_share = float(seller_delivery_share(order, escrow))
+    breakdown = payout_breakdown(order, escrow)
     escrow.status = EscrowStatus.RELEASED
     escrow.released_at = _utcnow()
     order.status = 'COMPLETED'
 
+    # Two credits: the item share (existing reference) and, for the seller's
+    # own delivery, the whole delivery fee under its fixed reference
+    # delivery_fee:<order_id> (no 3% on it; idempotent).
     _credit_vendor_ledger(
         vendor_id=order.vendor_id,
-        amount=net_amount,
+        amount=round(net_amount - delivery_share, 2),
         reference_id=escrow.transaction_number or f"ORD-{order.id}",
         description=f"Payout for Order #{order.id} ({source})",
     )
+    if delivery_share > 0:
+        credit_seller_delivery(order, f"Your delivery fee for Order #{order.id} ({source})")
 
     # Determine payout channel: Daya (crypto/NGN bank-transfer onramp) vs Paystack vs Flutterwave
     from app.services.fx import is_daya_paid, is_flutterwave_paid
@@ -1415,7 +1433,8 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         db.session.add(Notification(
             user_id=order.vendor_id,
             title="Payment Released",
-            message=f"Payment of ₦{net_amount:,.2f} for Order #{order.id} has been released to your account.",
+            message=(f"Payment of ₦{net_amount:,.2f} for Order #{order.id} has been released to your account."
+                     + (f" {breakdown['text']}." if delivery_share > 0 else "")),
             type="ESCROW",
             order_id=order.id,
         ))
@@ -1445,7 +1464,8 @@ def execute_order_escrow_release(order, escrow, source="admin"):
                 notice_text=(
                     f"Great news! The buyer has confirmed delivery for Order #{order.id}.<br><br>"
                     f"<strong>₦{net_amount:,.2f}</strong> has been released to your account.<br><br>"
-                    f"<a href='https://siiqo.com/vendor/orders'>View your orders →</a>"
+                    + (f"{_html.escape(breakdown['text'])}<br><br>" if delivery_share > 0 else "")
+                    + f"<a href='https://siiqo.com/vendor/orders'>View your orders →</a>"
                 ),
             )
         except Exception as e:
@@ -1917,6 +1937,7 @@ def get_order_details_by_token():
 
         # What the website needs to resume an unpaid order, and the review link.
         from app.tasks.escrow_tasks import unpaid_cancel_at
+        from app.services.delivery_money import delivery_by as _delivery_by
         escrow_status = escrow_row.status if escrow_row else None
         cancel_at = unpaid_cancel_at(order, escrow_row)
         is_order_buyer = False
@@ -1931,6 +1952,9 @@ def get_order_details_by_token():
             "payment_method": order.payment_method,
             "escrow_status": escrow_status,
             "total_payable": round(float(order.total_amount or 0) + float(order.logistics_fee or 0), 2),
+            # Item · Delivery (partner/seller) · Total. Siiqo's 3% is never on delivery.
+            "delivery_fee": round(float(order.logistics_fee or 0), 2),
+            "delivery_by": _delivery_by(order),
             "cancel_at": cancel_at.isoformat() if cancel_at else None,
             "is_guest_order": order.buyer_id is None,
             "review_url": order_review_url,

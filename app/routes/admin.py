@@ -1979,6 +1979,14 @@ def admin_refund_buyer(order_id):
     # Internal refund — no external API call (Payscrow removed)
     logging.info(f"[ADMIN REFUND] Processing refund for Order #{order_id} (payment_method: {escrow.order.payment_method if escrow.order else 'N/A'})")
 
+    # Delivery fee refund rule (app/services/delivery_money.py): not delivered
+    # -> item + delivery back to the buyer; delivered -> item only, the
+    # delivery fee goes to the partner (or the seller for their own delivery).
+    # Decided before the status change below cancels an undelivered job.
+    from app.services.delivery_money import apply_refund_rule
+    refund_rule = apply_refund_rule(escrow.order, escrow, escrow.amount) if escrow.order else None
+    refund_total = float(escrow.buyer_refund_amount if refund_rule else escrow.amount)
+
     escrow.status = EscrowStatus.REFUNDED
     order = escrow.order
     if order:
@@ -1993,7 +2001,7 @@ def admin_refund_buyer(order_id):
         db.session.add(Notification(
             user_id=order.buyer_id,
             title="Refund Processed",
-            message=f"Your dispute for Order #{order_id} was resolved in your favour. A refund of ₦{float(escrow.amount):,.2f} has been initiated.",
+            message=f"Your dispute for Order #{order_id} was resolved in your favour. A refund of ₦{refund_total:,.2f} has been initiated.",
             type="ESCROW",
             order_id=order_id,
         ))
@@ -2017,6 +2025,8 @@ def admin_refund_buyer(order_id):
         details={
             'order_id': order_id,
             'amount': float(escrow.amount),
+            'buyer_refund_total': refund_total,
+            'delivery_rule': refund_rule,
             'buyer_id': order.buyer_id if order else None,
             'vendor_id': order.vendor_id if order else None,
             'payscrow_ref': escrow.payscrow_ref,
@@ -2034,7 +2044,8 @@ def admin_refund_buyer(order_id):
     except Exception as e:
         logging.error(f"[TRUST ERROR] Failed to recalculate trust on admin refund: {e}")
 
-    return jsonify({"message": "Refund processed successfully.", "status": "success"}), 200
+    return jsonify({"message": "Refund processed successfully.", "status": "success",
+                    "buyer_refund_total": f"{refund_total:.2f}", "delivery_rule": refund_rule}), 200
 
 
 @admin_bp.route('/escrow/verify/<int:order_id>', methods=['POST'])

@@ -165,7 +165,10 @@ def delivery_quote():
                                                if days else "Seller will confirm timing")})
     except DeliveryError:
         pass
-    if state:
+    # Pay on Delivery: only the seller's own delivery or pickup (delivery
+    # partners need Safe Pay; app/services/delivery.py allowed_with_payment).
+    pod = (request.args.get('payment_method') or '').strip().upper() == 'POD'
+    if state and not pod:
         options.extend(q.public() for q in quote_options(sf, state, city, lga))
 
     ds = sf.delivery_settings if isinstance(sf.delivery_settings, dict) else None
@@ -176,7 +179,11 @@ def delivery_quote():
                         "name": f"Pick up in {area} (free)" if area else "Pick up from the seller (free)",
                         "type": "pickup", "fee": 0.0, "currency": "NGN",
                         "estimated_delivery": "When ready"})
-    return jsonify({"status": "success", "vendor_id": vendor_id, "options": options}), 200
+    body = {"status": "success", "vendor_id": vendor_id, "options": options}
+    if pod:
+        from app.services.delivery import POD_PARTNER_MESSAGE
+        body["pod_note"] = POD_PARTNER_MESSAGE
+    return jsonify(body), 200
 
 
 # ---------------------------------------------------------------------------
