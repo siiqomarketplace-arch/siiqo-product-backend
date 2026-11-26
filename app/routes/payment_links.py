@@ -606,10 +606,9 @@ def pay_payment_link(link_id):
         new_order.payment_method = 'FLUTTERWAVE'
         flw_txn_ref = f"FLW-PL-{new_order.id}-{uuid.uuid4().hex[:8].upper()}"
 
-        # Check vendor Flutterwave subaccount
-        bank_acc = VendorBankAccount.query.filter_by(vendor_id=link.vendor_id, is_default=True).first() or \
-                   VendorBankAccount.query.filter_by(vendor_id=link.vendor_id).first()
-        flw_subaccount_id = bank_acc.flw_subaccount_id if bank_acc else None
+        # No Flutterwave subaccount split (app/services/split_settlement.py):
+        # the payment settles to Siiqo and Siiqo transfers the seller's share.
+        flw_subaccount_id = None
 
         flw_res = _flw.initiate_payment(
             order_id=str(new_order.id),
@@ -633,8 +632,7 @@ def pay_payment_link(link_id):
         # Create escrow transaction record
         # NOTE: payscrow_transaction_id and payscrow_ref are legacy DB column names,
         # now used to store generic provider references (FLW, Paystack, or Daya)
-        # Record SPLIT: prefix if Flutterwave subaccount was attached to prevent duplicate payout transfer
-        escrow_payscrow_ref = f"SPLIT:{flw_txn_ref}" if flw_subaccount_id else flw_txn_ref
+        escrow_payscrow_ref = flw_txn_ref
         new_escrow = EscrowTransaction(
             order_id=new_order.id,
             transaction_number=flw_txn_ref,
@@ -699,8 +697,10 @@ def pay_payment_link(link_id):
             payment_link=result['payment_link'],
             payscrow_transaction_id=result['provider_transaction_id'],
             payscrow_ref=result['provider_reference'],
-            # True only when Paystack really split this payment to the seller.
-            split_settled=bool(result.get("used_split")),
+            # Only the REQUEST is recorded; payment confirmation decides from
+            # Paystack's verified transaction (app/services/split_settlement.py).
+            split_requested=((result.get("split_subaccounts") or {}).get(link.vendor_id)
+                             if result.get("used_split") else None),
         )
         db.session.add(new_escrow)
         db.session.commit()

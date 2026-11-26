@@ -41,6 +41,7 @@ from . import assistant  # noqa: F401  (Phase 4: store concierge and seller copi
 from . import verification_requirement  # noqa: F401  (Phase 4: mandatory verification holds)
 from . import location  # noqa: F401  (Shop location by NIPOST postcode)
 from . import growth  # noqa: F401  (signup source, activation, batched broadcasts)
+from . import payouts  # noqa: F401  (payout transfers with final status, manual payouts)
 
 __all__ = [
     'User', 'Storefront', 'UserRole', 'PasswordResetAttempt',

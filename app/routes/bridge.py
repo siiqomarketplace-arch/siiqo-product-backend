@@ -514,6 +514,8 @@ def buyer_order_history():
                         from app.routes.escrow import (_deliver_digital_products, _deliver_service_products,
                                                        _deliver_event_tickets, record_card_rail)
                         record_card_rail(o, 'PAYSTACK')
+                        from app.services.split_settlement import record_at_confirmation
+                        record_at_confirmation(o, escrow_check, 'paystack', verify.get('raw'))
                         if not _deliver_digital_products(o, escrow_check):
                             if not _deliver_service_products(o, escrow_check):
                                 _deliver_event_tickets(o, escrow_check)
@@ -1075,6 +1077,18 @@ def paystack_webhook():
     event = request.get_json() or {}
     event_type = event.get('event', '')
 
+    # Payout transfer outcome (https://paystack.com/docs/transfers/single-transfers/):
+    # final status of a transfer Siiqo sent; failed/reversed gives the money
+    # back to the balance once (app/services/payout_tracking.py). Never re-sent.
+    if event_type in ('transfer.success', 'transfer.failed', 'transfer.reversed'):
+        from app.services import payout_tracking
+        tdata = event.get('data') or {}
+        res = payout_tracking.apply_outcome(
+            'paystack', reference=tdata.get('reference'), transfer_id=tdata.get('transfer_code'),
+            raw_status=event_type.split('.', 1)[1], reason=tdata.get('reason') or tdata.get('message'))
+        logging.info(f"[PAYSTACK WEBHOOK] {event_type} ref={tdata.get('reference')} found={res.get('found')}")
+        return jsonify({"status": "ok"}), 200
+
     # Handle successful charge (new subscription OR marketplace order)
     if event_type in ('charge.success', 'subscription.create'):
         data = event.get('data', {})
@@ -1119,6 +1133,10 @@ def paystack_webhook():
                         pl_escrow.paid_at = pl_escrow.paid_at or _utcnow()
                         pl_escrow.payscrow_transaction_id = reference
                         pl_order.status = 'PAID'
+                        # Split proof from Paystack's signed transaction data
+                        # (app/services/split_settlement.py); undecided -> checked at release.
+                        from app.services.split_settlement import record_at_confirmation
+                        record_at_confirmation(pl_order, pl_escrow, 'paystack', data)
                         db.session.flush()
 
                         link = db.session.get(PaymentLink, pl_order.payment_link_id) if pl_order.payment_link_id else None
@@ -1260,6 +1278,8 @@ def paystack_webhook():
                     order.status = 'PAID'
                     from app.routes.escrow import record_card_rail
                     record_card_rail(order, 'PAYSTACK')
+                    from app.services.split_settlement import record_at_confirmation
+                    record_at_confirmation(order, escrow, 'paystack', data)
 
                     # Flush so updates are visible to delivery helpers
                     db.session.flush()

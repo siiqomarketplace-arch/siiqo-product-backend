@@ -57,6 +57,12 @@ class EscrowTransaction(db.Model):
     # subaccount (single-seller payment); False when it did not; NULL for rows
     # made before this was recorded (see app/services/split_settlement.py).
     split_settled = db.Column(db.Boolean, nullable=True)
+    # The subaccount (Paystack ACCT_...) a split was REQUESTED for at checkout.
+    # A request is never proof: split_settled becomes True only when the
+    # gateway's verified transaction shows the split, recorded at payment
+    # confirmation with a short description of that proof in split_proof.
+    split_requested = db.Column(db.String(80), nullable=True)
+    split_proof = db.Column(db.String(255), nullable=True)
     # The card gateway's payment reference (Paystack reference / Flutterwave
     # tx_ref). One payment can cover several orders (a cart with several
     # sellers): every escrow of that payment carries the same payment_ref while

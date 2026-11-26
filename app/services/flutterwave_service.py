@@ -58,6 +58,27 @@ def is_configured() -> bool:
 # FEE CALCULATION
 # ---------------------------------------------------------------------------
 
+def fee_added_by() -> str:
+    """Who adds Flutterwave's processing fee to what the buyer pays, so the
+    buyer pays it exactly ONCE (Order 639: Siiqo added NGN 35.50 AND
+    Flutterwave added its own NGN 50.71 "paid by customer").
+
+    Flutterwave's API docs document no /v3/payments parameter for who bears
+    the fee (https://developer.flutterwave.com/api/payments/create-payment ;
+    only a fee lookup, https://developer.flutterwave.com/api/transactions/get-transaction-fee),
+    so it is the dashboard setting. FLW_FEE_ADDED_BY must match it:
+
+      "flutterwave" (default; the dashboard makes customers pay the fee, as
+                    seen on 26 Nov 2026): Siiqo charges the listed price and
+                    adds nothing; Flutterwave shows and adds its fee on its
+                    own payment page.
+      "siiqo"       (only after the dashboard is switched so the merchant pays
+                    the fee): Siiqo adds its fee estimate to the amount and
+                    Flutterwave takes its fee out of what Siiqo receives."""
+    v = (os.environ.get("FLW_FEE_ADDED_BY") or "flutterwave").strip().lower()
+    return "siiqo" if v == "siiqo" else "flutterwave"
+
+
 def calculate_buyer_total(listed_price_ngn: float, is_international: bool = False) -> dict:
     """
     Calculate what the buyer actually pays so the vendor and Siiqo receive
@@ -77,6 +98,16 @@ def calculate_buyer_total(listed_price_ngn: float, is_international: bool = Fals
         buyer_total     — what the buyer is charged
         is_international
     """
+    if fee_added_by() == "flutterwave":
+        # Flutterwave adds its own fee on its payment page: Siiqo adds nothing.
+        return {
+            "listed_price": round(listed_price_ngn, 2),
+            "flw_fee": 0.0,
+            "buyer_total": round(listed_price_ngn, 2),
+            "is_international": is_international,
+            "fee_added_by": "flutterwave",
+        }
+
     rate = FLW_INTL_RATE if is_international else FLW_LOCAL_RATE
 
     # Gross amount buyer must pay so Flutterwave takes its cut and
@@ -99,6 +130,7 @@ def calculate_buyer_total(listed_price_ngn: float, is_international: bool = Fals
         "flw_fee": flw_fee_rounded,
         "buyer_total": buyer_total,
         "is_international": is_international,
+        "fee_added_by": "siiqo",
     }
 
 
@@ -186,27 +218,18 @@ def initiate_payment(
             "description": narration,
             "logo": "https://siiqo.com/images/siiqo.png",
         },
-        # bearer=account means buyer pays the Flutterwave fee (it is already
-        # built into buyer_total); Flutterwave deducts from the collected amount
-        # before splitting. Do NOT use bearer=subaccount here.
+        # Who pays Flutterwave's fee: see fee_added_by().
         "payment_options": "card,banktransfer,ussd,mobilemoneyghana",
     }
 
-    # Attach split payment only when vendor has a subaccount
-    if subaccounts:
-        # Several sellers (routes/payments.py _flw_multi_subaccounts):
-        # per-seller flat commission + split ratio, as documented at
-        # https://developer.flutterwave.com/docs/split-payments
-        payload["subaccounts"] = subaccounts
-    elif flw_subaccount_id:
-        payload["subaccounts"] = [
-            {
-                "id": flw_subaccount_id,
-                # Siiqo takes a flat fee; vendor gets the remainder
-                "transaction_charge_type": "flat",
-                "transaction_charge": siiqo_fee_rounded,
-            }
-        ]
+    # No subaccount split is ever sent (Order 639). Flutterwave's verify
+    # response has no per-payment proof of a split
+    # (https://developer.flutterwave.com/api/transactions/verify-transaction),
+    # and a bank-transfer payment with a subaccount attached settled entirely
+    # to Siiqo. All Flutterwave money settles to Siiqo; Siiqo transfers the
+    # seller's share at release (app/routes/escrow.py).
+    if flw_subaccount_id or subaccounts:
+        logger.warning("[FLW INITIATE] Subaccount split ignored for ref=%s: Siiqo pays sellers by transfer", tx_ref)
 
     headers = {
         "Authorization": f"Bearer {key}",
@@ -214,8 +237,8 @@ def initiate_payment(
     }
 
     logger.info(
-        "[FLW INITIATE] order=%s ref=%s buyer_total=₦%.2f flw_fee=₦%.2f siiqo_fee=₦%.2f subaccount=%s",
-        order_id, tx_ref, buyer_total, flw_fee, siiqo_fee_rounded, flw_subaccount_id or "none",
+        "[FLW INITIATE] order=%s ref=%s buyer_total=₦%.2f flw_fee=₦%.2f (added by %s) siiqo_fee=₦%.2f",
+        order_id, tx_ref, buyer_total, flw_fee, fee_info.get("fee_added_by"), siiqo_fee_rounded,
     )
 
     try:
@@ -247,6 +270,7 @@ def initiate_payment(
         "tx_ref": tx_ref,
         "buyer_total": buyer_total,
         "flw_fee": flw_fee,
+        "fee_added_by": fee_info.get("fee_added_by"),
         "error_message": None,
     }
 
@@ -321,6 +345,10 @@ def normalize_flw_bank_code(code: str) -> str:
     return c
 
 
+# Siiqo's commission on a Flutterwave subaccount, as a decimal (3%).
+SIIQO_FLW_SUBACCOUNT_SPLIT = 0.03
+
+
 def create_subaccount(
     business_name: str,
     bank_code: str,
@@ -328,15 +356,19 @@ def create_subaccount(
     business_mobile: str,
     business_email: str = "",
     split_type: str = "percentage",
-    split_value: float = 0.97,
+    split_value: float | None = None,
 ) -> dict:
     """
     Create a Flutterwave collection subaccount for a vendor.
 
-    We set split_value to 0.97 (97%) as the default — the subaccount receives
-    97% of each transaction. Siiqo's 3% is overridden per-transaction using
-    `transaction_charge` in the payment payload, so this default is a safe
-    fallback and is not used in practice when we pass explicit transaction_charge.
+    split_value is the commission the MAIN account (Siiqo) gets: Flutterwave's
+    create-subaccount reference says split_value is "The amount you want to
+    get as a commission on each transaction" and percentages are decimals
+    (https://developer.flutterwave.com/api/collection-subaccounts/create-a-sub-account).
+    The dashboard confirmed it: 0.97 showed "Your share 97% / Subaccount's
+    share 3%". So the default is SIIQO_FLW_SUBACCOUNT_SPLIT (0.03 = Siiqo's
+    3%, app/services/fees.py). Siiqo no longer attaches subaccounts at
+    checkout; this default is a safety net if one is ever used.
 
     Args:
         business_name     — vendor's store / business name
@@ -345,7 +377,7 @@ def create_subaccount(
         business_mobile   — vendor's phone number (required by Flutterwave)
         business_email    — vendor's email (optional)
         split_type        — 'percentage' or 'flat' (default: percentage)
-        split_value       — 0.97 = 97% to vendor (default)
+        split_value       — Siiqo's commission (default 0.03 = 3%)
 
     Returns:
         success: bool
@@ -355,6 +387,9 @@ def create_subaccount(
     key = _secret_key()
     if not key:
         return {"success": False, "error_message": "Flutterwave not configured."}
+
+    if split_value is None:
+        split_value = SIIQO_FLW_SUBACCOUNT_SPLIT
 
     # Ensure phone is not empty — Flutterwave requires it
     if not business_mobile:
@@ -584,3 +619,92 @@ def get_transfer_status(transfer_id: str | int) -> dict:
         "data": data.get("data", {}),
     }
 
+
+
+# ---------------------------------------------------------------------------
+# SUBACCOUNT SPLIT REPAIR (existing subaccounts created with 0.97)
+# ---------------------------------------------------------------------------
+
+def list_subaccounts(page: int = 1) -> dict:
+    """GET /v3/subaccounts?page=N
+    (https://developer.flutterwave.com/api/collection-subaccounts/list-all-subaccounts).
+    Returns {success, items: [{id, subaccount_id, split_type, split_value}], has_more}."""
+    key = _secret_key()
+    if not key:
+        return {"success": False, "error_message": "Flutterwave not configured."}
+    try:
+        resp = requests.get(f"{FLW_BASE_URL}/subaccounts", params={"page": page},
+                            headers={"Authorization": f"Bearer {key}"}, timeout=15)
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error_message": str(exc)}
+    if data.get("status") != "success":
+        return {"success": False, "error_message": data.get("message", "Could not list subaccounts.")}
+    items = [{"id": d.get("id"), "subaccount_id": d.get("subaccount_id"),
+              "split_type": d.get("split_type"), "split_value": d.get("split_value")}
+             for d in (data.get("data") or []) if isinstance(d, dict)]
+    info = (data.get("meta") or {}).get("page_info") or {}
+    try:
+        has_more = int(info.get("current_page") or page) < int(info.get("total_pages") or page)
+    except (TypeError, ValueError):
+        has_more = False
+    return {"success": True, "items": items, "has_more": has_more}
+
+
+def update_subaccount_split(numeric_id, split_type: str = "percentage",
+                            split_value: float = SIIQO_FLW_SUBACCOUNT_SPLIT) -> dict:
+    """PUT /v3/subaccounts/{id} with split_type/split_value
+    (https://developer.flutterwave.com/api/collection-subaccounts/update-a-subaccount).
+    `numeric_id` is the subaccount's numeric id, not its RS_ code."""
+    key = _secret_key()
+    if not key:
+        return {"success": False, "error_message": "Flutterwave not configured."}
+    try:
+        resp = requests.put(f"{FLW_BASE_URL}/subaccounts/{numeric_id}",
+                            json={"split_type": split_type, "split_value": split_value},
+                            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                            timeout=15)
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error_message": str(exc)}
+    if data.get("status") != "success":
+        return {"success": False, "error_message": data.get("message", "Update refused.")}
+    return {"success": True, "error_message": None}
+
+
+def fix_subaccount_splits(subaccount_ids=None, max_pages: int = 50) -> dict:
+    """Set Siiqo's commission to 3% on every Flutterwave subaccount (or only
+    the RS_ codes in `subaccount_ids`) whose split is not already
+    percentage/0.03. Idempotent: subaccounts already right are skipped.
+    Returns counts and the RS_ codes that failed."""
+    fixed, skipped, failed, seen = [], 0, [], 0
+    page = 1
+    while page <= max_pages:
+        res = list_subaccounts(page)
+        if not res.get("success"):
+            return {"success": False, "error_message": res.get("error_message"), "seen": seen,
+                    "fixed": fixed, "skipped": skipped, "failed": failed}
+        for item in res["items"]:
+            rs = item.get("subaccount_id")
+            if subaccount_ids is not None and rs not in subaccount_ids:
+                continue
+            seen += 1
+            try:
+                current = float(item.get("split_value"))
+            except (TypeError, ValueError):
+                current = None
+            if (item.get("split_type") or "").lower() == "percentage" and current is not None \
+                    and abs(current - SIIQO_FLW_SUBACCOUNT_SPLIT) < 1e-9:
+                skipped += 1
+                continue
+            up = update_subaccount_split(item.get("id"))
+            if up.get("success"):
+                fixed.append(rs)
+            else:
+                failed.append({"subaccount_id": rs, "error": str(up.get("error_message"))[:200]})
+        if not res.get("has_more"):
+            break
+        page += 1
+    logger.info("[FLW SUBACCOUNT] Split repair: %d fixed, %d already right, %d failed",
+                len(fixed), skipped, len(failed))
+    return {"success": not failed, "seen": seen, "fixed": fixed, "skipped": skipped, "failed": failed}

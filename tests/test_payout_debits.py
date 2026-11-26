@@ -40,11 +40,25 @@ def _bank(vendor):
     db.session.commit()
 
 
-def test_split_payout_leaves_nothing_to_withdraw(make_vendor, make_product, make_order):
+def test_split_marker_is_not_proof_seller_is_paid_by_transfer(make_vendor, make_product, make_order, monkeypatch):
+    """Order 639: a "SPLIT:" marker alone never counts as paid. Siiqo sends
+    the transfer; the debit then matches it."""
+    vendor, order, escrow = _digital_order(make_vendor, make_product, make_order, payscrow_ref="SPLIT:RS_1")
+    _bank(vendor)
+    sent = []
+    monkeypatch.setattr(flutterwave_service, "transfer_to_vendor",
+                        lambda **k: sent.append(k) or {"success": True, "transfer_id": "9", "status": "NEW"})
+    _deliver_digital_products(order, escrow)
+    db.session.commit()
+    assert len(sent) == 1 and sent[0]["amount_ngn"] == 9700.0
+    assert _get_ledger_balance(vendor.id) == Decimal("0")
+
+
+def test_split_marker_without_bank_keeps_money_withdrawable(make_vendor, make_product, make_order):
     vendor, order, escrow = _digital_order(make_vendor, make_product, make_order, payscrow_ref="SPLIT:RS_1")
     _deliver_digital_products(order, escrow)
     db.session.commit()
-    assert _get_ledger_balance(vendor.id) == Decimal("0")
+    assert _get_ledger_balance(vendor.id) == Decimal("9700")
 
 
 def test_successful_transfer_leaves_nothing_to_withdraw(make_vendor, make_product, make_order, monkeypatch):

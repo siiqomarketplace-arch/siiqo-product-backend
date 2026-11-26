@@ -15,7 +15,7 @@
 import hashlib
 import hmac
 import logging
-from app.utils.log_mask import mask_email
+from app.utils.log_mask import mask_account, mask_email
 import os
 import re
 import uuid
@@ -636,6 +636,18 @@ def daya_webhook():
 
     event_type = event_data.get("event", "")
     deposit    = event_data.get("data", {})
+
+    # Payout transfer outcome (https://docs.daya.co/api-reference/webhooks/events):
+    # transfer.completed / transfer.failed / transfer.reversed are final.
+    if event_type in ("transfer.completed", "transfer.failed", "transfer.reversed"):
+        from app.services import payout_tracking
+        t = deposit if isinstance(deposit, dict) else {}
+        status = {"transfer.completed": "COMPLETED", "transfer.failed": "FAILED",
+                  "transfer.reversed": "REVERSED"}[event_type]
+        res = payout_tracking.apply_outcome("daya", reference=t.get("reference"), transfer_id=t.get("id"),
+                                            raw_status=status, reason=t.get("failure_reason") or t.get("reason"))
+        logger.info("[DAYA WEBHOOK] %s for transfer %s (found=%s)", event_type, t.get("id"), res.get("found"))
+        return jsonify({"received": True}), 200
     logger.info("[DAYA WEBHOOK] event=%s deposit_id=%s status=%s",
                 event_type, deposit.get("id"), deposit.get("status"))
 
@@ -1317,8 +1329,17 @@ def _payout_vendor_via_daya(order, escrow):
         logger.info(
             "[DAYA PAYOUT] Order %s -- NGN payout initiated: NGN%.2f → %s/%s ref=%s",
             order.id, net_amount_ngn, bank_code,
-            account_number, payout_ref
+            mask_account(account_number), payout_ref
         )
+        try:
+            from app.routes.escrow import payout_debit_reference
+            from app.services.payout_tracking import record_transfer
+            record_transfer(kind="order", user_id=order.vendor_id, gateway="daya", reference=payout_ref,
+                            amount=net_amount_ngn, gateway_transfer_id=result.get("transfer_id"),
+                            order_id=order.id, debit_reference=payout_debit_reference(order, escrow),
+                            gateway_status=result.get("status"))
+        except Exception as _track_err:  # noqa: BLE001
+            logger.error("[DAYA PAYOUT] Could not record transfer %s: %s", payout_ref, _track_err)
         db.session.add(Notification(
             user_id=order.vendor_id,
             title="Payment On Its Way",
@@ -1511,43 +1532,13 @@ def flutterwave_initiate():
     if not buyer_email or "@" not in buyer_email:
         return jsonify({"message": "A valid email address is required to initiate payment."}), 400
 
-    # Look up vendor subaccount for single-vendor carts
-    vendor_ids = list({o.vendor_id for o in orders})
+    # No Flutterwave subaccount split, for one seller or several
+    # (app/services/split_settlement.py): Flutterwave's verified payment shows
+    # no proof of a split, and Order 639 (bank transfer, subaccount attached)
+    # settled entirely to Siiqo. All of it settles to Siiqo; Siiqo transfers
+    # each seller's share at release, as for multi-seller carts.
     flw_subaccount_id = None
-    if len(vendor_ids) == 1:
-        v_id = vendor_ids[0]
-        bank_acc = VendorBankAccount.query.filter_by(vendor_id=v_id, is_default=True).first() or \
-                   VendorBankAccount.query.filter_by(vendor_id=v_id).first()
-        if bank_acc and bank_acc.flw_subaccount_id:
-            flw_subaccount_id = bank_acc.flw_subaccount_id
-        elif bank_acc and bank_acc.account_number and bank_acc.bank_code and _flw.is_configured():
-            # Auto-provision Flutterwave subaccount if vendor already has bank details
-            try:
-                from app.models.user import Storefront, User as _U
-                sf = Storefront.query.filter_by(vendor_id=v_id).first()
-                vendor_u = db.session.get(_U, v_id)
-                v_phone = (vendor_u.phone if vendor_u else "") or "08012345678"
-                b_name = sf.store_name if sf else (vendor_u.full_name if vendor_u else f"Vendor {v_id}")
-                created_sub = _flw.create_subaccount(
-                    business_name=b_name,
-                    bank_code=bank_acc.bank_code,
-                    account_number=bank_acc.account_number,
-                    business_mobile=v_phone,
-                    business_email=sf.contact_email if (sf and sf.contact_email) else "",
-                )
-                if created_sub.get("success"):
-                    flw_subaccount_id = created_sub["subaccount_id"]
-                    bank_acc.flw_subaccount_id = flw_subaccount_id
-                    db.session.commit()
-            except Exception as _sub_err:
-                logger.warning("[FLW INITIATE] On-the-fly subaccount creation skipped: %s", _sub_err)
-
-    # Several sellers: split across their subaccounts at checkout only when
-    # MULTI_SPLIT_ENABLED and every seller already has one. Otherwise no
-    # split, and Siiqo pays each seller at release.
     multi_subaccounts = None
-    if len(vendor_ids) > 1:
-        multi_subaccounts = _flw_multi_subaccounts(orders)
 
     site_url = os.environ.get("SITE_URL", "https://siiqo.com").rstrip("/")
     primary_id = primary_order.id
@@ -1605,15 +1596,8 @@ def flutterwave_initiate():
     if not flw_result.get("success"):
         return jsonify({"message": flw_result.get("error_message") or "Could not initialize Flutterwave payment."}), 400
 
-    # Tag, per escrow, whether a split paid its seller at checkout
-    # (app/services/split_settlement.py reads the "SPLIT:" marker).
-    sub_by_vendor = {s["vendor_id"]: s["payload"]["id"] for s in (multi_subaccounts or [])}
-
+    # Every Flutterwave payment is direct to Siiqo (no split).
     def _split_tag(vendor_id):
-        if flw_subaccount_id:
-            return f"SPLIT:{flw_subaccount_id}:{tx_ref}"
-        if vendor_id in sub_by_vendor:
-            return f"SPLIT:{sub_by_vendor[vendor_id]}:{tx_ref}"
         return f"DIRECT:{tx_ref}"
 
     # Create or update EscrowTransaction for each order: its own unique
@@ -1655,6 +1639,9 @@ def flutterwave_initiate():
         "amount": flw_result["buyer_total"],
         "listedAmount": total_listed_ngn,
         "flwFee": flw_result["flw_fee"],
+        # "flutterwave": Flutterwave adds its fee on its own payment page;
+        # "siiqo": flwFee above is already in amount (flutterwave_service.fee_added_by).
+        "feeAddedBy": flw_result.get("fee_added_by"),
         "orderId": order_ids_str,
     }), 200
 
@@ -1691,6 +1678,13 @@ def flutterwave_webhook():
     # 1. Nested: {"event": "charge.completed", "data": {"id": 123, "tx_ref": "..."}}
     # 2. Flat: {"id": 123, "txRef": "...", "status": "successful"}  <- sandbox uses this
     data = event_data.get("data", event_data)  # Use root if "data" key doesn't exist
+
+    # Transfer outcome (https://developer.flutterwave.com/docs/webhooks):
+    # "transfer.completed" with data.status SUCCESSFUL or FAILED.
+    event_name = str(event_data.get("event") or "").lower()
+    event_kind = str(event_data.get("event.type") or "").lower()
+    if event_name.startswith("transfer.") or event_kind == "transfer":
+        return _flutterwave_transfer_event(data)
     
     # Handle both key formats: "tx_ref" and "txRef"
     tx_id = data.get("id")
@@ -1727,6 +1721,26 @@ def flutterwave_webhook():
         logger.error("[FLW WEBHOOK] ✗ Payment confirmation FAILED for ref=%s: %s", tx_ref, confirm_err, exc_info=True)
         return jsonify({"status": "error", "message": str(confirm_err)}), 500
 
+    return jsonify({"status": "success"}), 200
+
+
+def _flutterwave_transfer_event(data: dict):
+    """A payout transfer finished. SUCCESSFUL is recorded; FAILED is first
+    confirmed with Flutterwave's API (the webhook is protected only by a shared
+    secret) and then the money goes back to the balance, once
+    (app/services/payout_tracking.py). Never re-sent."""
+    from app.services import payout_tracking
+    reference = data.get("reference")
+    transfer_id = data.get("id")
+    status = data.get("status")
+    norm = payout_tracking.normalise_status("flutterwave", status)
+    if norm in payout_tracking.FINAL_BAD and not payout_tracking.confirm_flutterwave_failure(transfer_id):
+        logger.warning("[FLW WEBHOOK] Transfer %s reported %s but Flutterwave's API did not confirm it; "
+                       "left for the scheduled check", reference, status)
+        return jsonify({"status": "unconfirmed"}), 200
+    res = payout_tracking.apply_outcome("flutterwave", reference=reference, transfer_id=transfer_id,
+                                        raw_status=status, reason=data.get("complete_message"))
+    logger.info("[FLW WEBHOOK] Transfer %s -> %s (found=%s)", reference, status, res.get("found"))
     return jsonify({"status": "success"}), 200
 
 
@@ -1910,6 +1924,9 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
             escrow.status = EscrowStatus.IN_ESCROW
             escrow.paid_at = escrow.paid_at or _utcnow()  # first payment time; never overwritten
             escrow.payscrow_transaction_id = str(tx_id)
+            # No split on a Flutterwave payment: Siiqo pays the seller.
+            from app.services.split_settlement import record_at_confirmation
+            record_at_confirmation(order, escrow, "flutterwave")
             db.session.flush()
 
             # Naira rate at payment time for orders priced in another currency
@@ -1956,10 +1973,11 @@ def _handle_flutterwave_payment_confirmed(tx_ref: str, tx_id: str, verification:
                     payout_dispatched = _payout_unless_split(order, escrow, "flutterwave", "FLW CONFIRM")
 
                     if payout_dispatched:
+                        from app.routes.escrow import payout_debit_reference
                         _debit_vendor_ledger(
                             vendor_id=order.vendor_id,
                             amount=net_amount,
-                            reference_id=f"PAYOUT-{escrow.transaction_number or order.id}",
+                            reference_id=payout_debit_reference(order, escrow),
                             description=f"Automated gateway payout settlement for Order #{order.id}",
                         )
                     db.session.add(Notification(

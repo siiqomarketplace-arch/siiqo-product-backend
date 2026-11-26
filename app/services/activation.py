@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +30,7 @@ from app.extensions import db
 from app.services.attribution import (CAMPAIGN_CHANNEL, CHANNEL_LABELS, CHANNELS, campaign_start_date,
                                       channel_for_code)
 
+log = logging.getLogger(__name__)
 LAGOS = timezone(timedelta(hours=1))
 ACTIVATION_DAYS = 30
 CLOSED_ORDER_STATUSES = ("CANCELLED", "REFUNDED")
@@ -332,6 +334,22 @@ def payout_failures(since=None, now=None, limit=200):
                       "vendor_id": order.vendor_id, "amount_ngn": float(esc.amount or 0),
                       "at": _aware(esc.released_at),
                       "reason": f"Released, no payout after {payout_stuck_hours()}h (money is in the seller's balance)"})
+
+    # Payout transfers that failed / were reversed / are stuck pending, and
+    # released orders whose payout is not proven, sent, held or recorded
+    # (app/services/payout_tracking.py, app/services/payout_reconciliation.py).
+    try:
+        from app.services.payout_tracking import needs_a_look
+        items.extend(needs_a_look(since=since, now=now, limit=limit))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ACTIVATION] payout transfer check skipped: %s", exc)
+    try:
+        from app.services.payout_reconciliation import payout_gaps
+        listed = {i["order_id"] for i in items if i.get("order_id")}
+        items.extend(g for g in payout_gaps(now=now, limit=limit) if g["order_id"] not in listed
+                     and (g["at"] is None or g["at"] >= since))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ACTIVATION] payout gap check skipped: %s", exc)
 
     items.sort(key=lambda x: x["at"] or now, reverse=True)
     return items[:limit]

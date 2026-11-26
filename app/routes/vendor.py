@@ -1446,6 +1446,14 @@ def get_orders():
     # What the seller is paid: Item − Siiqo 3% + your delivery = total
     # (app/services/delivery_money.py; Siiqo's 3% is never on delivery).
     from app.services.delivery_money import delivery_by, payout_breakdown
+    # Plain payout status for released orders, in a fixed number of queries
+    # (app/services/payout_reconciliation.py).
+    try:
+        from app.services.payout_reconciliation import payout_states
+        _payouts = payout_states(orders)
+    except Exception as _pe:  # noqa: BLE001
+        logging.warning(f"[VENDOR ORDERS] payout status unavailable: {_pe}")
+        _payouts = {}
 
     orders_data = [{
         "id": o.id,
@@ -1453,6 +1461,8 @@ def get_orders():
         "delivery_fee": str(o.logistics_fee or 0),
         "delivery_by": delivery_by(o),
         "payout_breakdown": payout_breakdown(o, o.escrow),
+        "payout_status": ({"state": _payouts[o.id]["state"], "label": _payouts[o.id]["seller_label"]}
+                          if o.id in _payouts and _payouts[o.id]["state"] != "not_released" else None),
         # First Order offer: the buyer paid this much less; Siiqo pays it to the seller on delivery.
         "promo_discount_ngn": float(o.promo_discount_ngn) if getattr(o, 'promo_discount_ngn', None) else None,
         "status": o.status,

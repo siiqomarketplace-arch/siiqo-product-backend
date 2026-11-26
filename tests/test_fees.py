@@ -52,7 +52,7 @@ def _paystack_split_fee(monkeypatch, store, order):
     store.paystack_subaccount_code = "ACCT_test"
     db.session.commit()
     pp.PaystackProvider().initiate_transaction([order], existing_txn_number="PL-1-TEST")
-    return sent.get("transaction_charge")
+    return sent.get("transaction_charge"), sent.get("amount")
 
 
 @pytest.mark.parametrize("pro_verified", [False, True])
@@ -61,6 +61,10 @@ def test_paystack_split_is_three_percent_for_every_seller(monkeypatch, make_vend
     store.is_pro_verified = pro_verified
     order = make_order(vendor, total=10000)
 
-    charge = _paystack_split_fee(monkeypatch, store, order)
+    charge, amount = _paystack_split_fee(monkeypatch, store, order)
 
-    assert charge == 30000  # ₦300 in kobo, whether or not the seller is Pro-verified
+    # The subaccount gets the seller's share: ₦10,000 - 3% = ₦9,700, Pro or not.
+    # The main account keeps Siiqo's ₦300 plus the Paystack fee the buyer paid
+    # on top (bearer=account: Paystack takes its fee from the main account's part).
+    assert amount - charge == 970000
+    assert charge - 30000 == amount - 1000000

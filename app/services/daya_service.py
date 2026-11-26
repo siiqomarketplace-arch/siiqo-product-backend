@@ -431,6 +431,21 @@ def transfer_ngn_to_vendor(
                 "outcome": "refused" if refused else "unknown"}
 
 
+def get_transfer(transfer_id: str) -> dict:
+    """GET /v1/transfers/{id} (https://docs.daya.co/api-reference/transfers/get-transfer).
+    Returns {success, status, error_message}; status is Daya's word
+    (PROCESSING, SETTLED, FAILED, ...)."""
+    if not _key():
+        return {"success": False, "error_message": "DAYA_API_KEY not configured"}
+    try:
+        data = _request("GET", f"/v1/transfers/{transfer_id}", headers=_headers())
+    except RuntimeError as exc:
+        return {"success": False, "error_message": str(exc)}
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    return {"success": True, "status": body.get("status"), "reference": body.get("reference"),
+            "error_message": None}
+
+
 # ---------------------------------------------------------------------------
 # Merchant balance transfer (collection -> withdrawal)
 # ---------------------------------------------------------------------------

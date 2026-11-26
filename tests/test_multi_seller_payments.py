@@ -129,11 +129,17 @@ def _escrows(orders):
         .order_by(EscrowTransaction.order_id).all()
 
 
-def _paystack_webhook(client, ref, orders):
-    event = {"event": "charge.success", "data": {
-        "reference": ref, "status": "success", "amount": 100,
-        "customer": {"email": "buyer@example.com"},
-        "metadata": {"order_ids": [str(o.id) for o in orders], "source": "marketplace_checkout"}}}
+def _paystack_webhook(client, ref, orders, split_shares=None):
+    """charge.success. ``split_shares`` {subaccount_code: kobo} adds Paystack's
+    multi-split record (data.split.shares.subaccounts) to the transaction."""
+    data = {"reference": ref, "status": "success", "amount": 100,
+            "customer": {"email": "buyer@example.com"},
+            "metadata": {"order_ids": [str(o.id) for o in orders], "source": "marketplace_checkout"},
+            "subaccount": {}, "fees_split": None,
+            "split": ({"split_code": "SPL_test1", "shares": {"subaccounts": [
+                {"subaccount_code": c, "amount": a} for c, a in split_shares.items()]}}
+                if split_shares else {})}
+    event = {"event": "charge.success", "data": data}
     body = json.dumps(event).encode()
     sig = hmac.new(PSK.encode(), body, hashlib.sha512).hexdigest()
     return client.post("/api/payments/webhook", data=body,
@@ -163,7 +169,9 @@ def test_paystack_one_payment_many_sellers(client, make_vendor, make_user, make_
     escrows = _escrows(orders)
     assert len({e.transaction_number for e in escrows}) == n
     assert all(e.payment_ref == ref for e in escrows)
-    assert all(e.split_settled is split_on for e in escrows)
+    # Only the request is recorded at initiation; never "settled".
+    assert all(e.split_settled is None for e in escrows)
+    assert all((e.split_requested == f"ACCT_{e.order.vendor_id}") is split_on for e in escrows)
 
     init = [p for u, p in paystack_http["calls"] if u.endswith("/transaction/initialize")][0]
     if split_on:
@@ -178,10 +186,12 @@ def test_paystack_one_payment_many_sellers(client, make_vendor, make_user, make_
         assert not any(u.endswith("/split") for u, _ in paystack_http["calls"])
         assert "split_code" not in init and "subaccount" not in init
 
-    assert _paystack_webhook(client, ref, orders).status_code == 200
+    shares = {f"ACCT_{o.vendor_id}": int(float(o.total_amount) * 0.97 * 100) for o in orders} if split_on else None
+    assert _paystack_webhook(client, ref, orders, split_shares=shares).status_code == 200
     db.session.expire_all()
     escrows = _escrows(orders)
     assert all(e.status == EscrowStatus.RELEASED for e in escrows)
+    assert all((e.split_settled is True and bool(e.split_proof)) is split_on for e in escrows)
     assert len(transfers) == (0 if split_on else n)
     credits = _credits(orders)
     assert credits == n
@@ -189,7 +199,7 @@ def test_paystack_one_payment_many_sellers(client, make_vendor, make_user, make_
         assert _get_ledger_balance(o.vendor_id) == Decimal("0")  # paid once, by split or transfer
 
     # A repeated webhook does nothing.
-    assert _paystack_webhook(client, ref, orders).status_code == 200
+    assert _paystack_webhook(client, ref, orders, split_shares=shares).status_code == 200
     db.session.expire_all()
     assert len(transfers) == (0 if split_on else n)
     assert _credits(orders) == credits
@@ -233,7 +243,24 @@ def test_paystack_retry_of_unsplit_payment_never_adds_split(
     monkeypatch.setenv("MULTI_SPLIT_ENABLED", "true")  # switched on between attempts
     client.post("/api/escrow/initiate", headers=auth_headers(buyer), json={"orderId": ids})
     assert not any(u.endswith("/split") for u, _ in paystack_http["calls"])
+    assert all(e.split_requested is None for e in _escrows(orders))
+
+
+def test_paystack_split_requested_but_not_shown_is_paid_by_transfer(
+        client, make_vendor, make_user, make_product, make_order, auth_headers, paystack_http, transfers,
+        monkeypatch):
+    """A multi-split was attached, but Paystack's transaction shows no split:
+    unproven, so Siiqo transfers each seller's share (once)."""
+    monkeypatch.setenv("MULTI_SPLIT_ENABLED", "true")
+    buyer, orders = _cart(make_vendor, make_user, make_product, make_order, 2, "PAYSTACK")
+    ref = client.post("/api/escrow/initiate", headers=auth_headers(buyer),
+                      json={"orderId": ",".join(str(o.id) for o in orders)}).get_json()["transactionNumber"]
+    assert _paystack_webhook(client, ref, orders).status_code == 200
+    db.session.expire_all()
     assert all(e.split_settled is False for e in _escrows(orders))
+    assert len(transfers) == 2
+    for o in orders:
+        assert _get_ledger_balance(o.vendor_id) == Decimal("0")
 
 
 # ── Paystack multi-split unit cases ─────────────────────────────────────────
@@ -307,29 +334,24 @@ def test_flutterwave_one_payment_many_sellers(client, make_vendor, make_user, ma
     assert res.status_code == 200, res.get_json()
     body = res.get_json()
     ref = body["transactionNumber"]
-    assert set(body) == {"success", "paymentLink", "transactionNumber", "amount", "listedAmount", "flwFee", "orderId"}
+    assert set(body) == {"success", "paymentLink", "transactionNumber", "amount", "listedAmount", "flwFee",
+                         "feeAddedBy", "orderId"}
 
     escrows = _escrows(orders)
     assert len({e.transaction_number for e in escrows}) == n
     assert all(e.payment_ref == ref for e in escrows)
     payload = flw_http["payloads"][0]
-    if split_on:
-        subs = payload["subaccounts"]
-        assert {s["id"] for s in subs} == {f"RS_{o.vendor_id}" for o in orders}
-        assert all(s["transaction_charge_type"] == "flat" for s in subs)
-        assert sum(s["transaction_charge"] for s in subs) == pytest.approx(sum(float(o.total_amount) * 0.03 for o in orders))
-        # ratios follow each seller's net (10k, 20k, 30k orders -> 1:2:3)
-        assert [s["transaction_split_ratio"] for s in subs] == list(range(1, n + 1))
-        assert all(e.payscrow_ref == f"SPLIT:RS_{e.order.vendor_id}:{ref}" for e in escrows)
-    else:
-        assert "subaccounts" not in payload
-        assert all(e.payscrow_ref == f"DIRECT:{ref}" for e in escrows)
+    # Flutterwave splits are never sent (no per-payment proof exists), even
+    # with MULTI_SPLIT_ENABLED: Siiqo transfers every seller's share.
+    assert "subaccounts" not in payload
+    assert all(e.payscrow_ref == f"DIRECT:{ref}" for e in escrows)
 
     total = float(body["amount"])
     assert _flw_webhook(client, monkeypatch, ref, total).status_code == 200
     db.session.expire_all()
     assert all(e.status == EscrowStatus.RELEASED for e in _escrows(orders))
-    assert len(transfers) == (0 if split_on else n)
+    assert all(e.split_settled is False for e in _escrows(orders))
+    assert len(transfers) == n
     credits = _credits(orders)
     assert credits == n
     for o in orders:
@@ -337,7 +359,7 @@ def test_flutterwave_one_payment_many_sellers(client, make_vendor, make_user, ma
 
     assert _flw_webhook(client, monkeypatch, ref, total).status_code == 200
     db.session.expire_all()
-    assert len(transfers) == (0 if split_on else n)
+    assert len(transfers) == n
     assert _credits(orders) == credits
 
 
@@ -360,8 +382,8 @@ def test_flutterwave_split_refused_falls_back(client, make_vendor, make_user, ma
     res = client.post("/api/payments/flutterwave/initiate", headers=auth_headers(buyer),
                       json={"orderId": ",".join(str(o.id) for o in orders), "buyerEmail": "buyer@example.com"})
     assert res.status_code == 200
-    assert "subaccounts" not in flw_http["payloads"][-1]
-    assert all(not split_settlement.flutterwave_split_settled(e) for e in _escrows(orders))
+    assert all("subaccounts" not in p for p in flw_http["payloads"])
+    assert all(not split_settlement.vendor_paid_by_split(e.order, e, "flutterwave") for e in _escrows(orders))
 
 
 def test_flutterwave_status_needs_the_whole_payment_amount(client, make_vendor, make_user, make_product,

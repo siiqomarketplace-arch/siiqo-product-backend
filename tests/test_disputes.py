@@ -560,6 +560,9 @@ def test_partial_and_split_pay_seller_once(client, paid, auth_headers, make_admi
 def test_split_when_seller_was_paid_at_checkout(client, paid, auth_headers, make_admin):
     p = paid()
     p.store.paystack_subaccount_code = "ACCT_test"
+    # Paid at checkout only when the gateway's verified payment proved the split.
+    p.escrow.split_settled = True
+    p.escrow.split_proof = "paystack verify: split to ACCT_test"
     db.session.commit()
     case = to_review(db.session.get(DisputeCase, raise_dispute(client, auth_headers, p).get_json()["dispute"]["id"]))
     res = _decide(client, make_admin(), case.id, outcome="split", seller_fault=False, buyer_share_percent=50)

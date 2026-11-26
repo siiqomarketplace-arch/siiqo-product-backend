@@ -231,6 +231,16 @@ def send_partner_withdrawal(partner, amount=None, *, source: str = "manual", run
 
     w.status = 'PENDING'
     w.processed_at = _utcnow()
+    # Followed to its final status (app/services/payout_tracking.py): a failed
+    # or reversed transfer marks the withdrawal FAILED, which puts the amount
+    # back in the partner's earnings. Never re-sent automatically.
+    try:
+        from app.services.payout_tracking import record_transfer
+        record_transfer(kind="partner_withdrawal", user_id=partner_id, gateway=w.channel or "paystack",
+                        reference=reference, amount=requested, gateway_transfer_id=w.transfer_code or None,
+                        partner_withdrawal_id=w.id)
+    except Exception as track_err:  # noqa: BLE001
+        log.error("[PARTNER PAYOUT] Could not record transfer %s: %s", reference, track_err)
     db.session.commit()
     return 200, {
         'status': 'success',

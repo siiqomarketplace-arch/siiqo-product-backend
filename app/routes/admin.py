@@ -1685,6 +1685,16 @@ def admin_get_orders():
     }), 200
 
 
+def _admin_payout_state(order, escrow):
+    try:
+        from app.services.payout_reconciliation import payout_state
+        st = payout_state(order, escrow)
+        return {k: st.get(k) for k in ("state", "label", "reference", "transfer_status", "reason")}
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"[ADMIN ORDER] payout status for Order #{order.id} unavailable: {exc}")
+        return None
+
+
 @admin_bp.route('/orders/<int:order_id>', methods=['GET'])
 @jwt_required()
 def admin_get_order_detail(order_id):
@@ -1755,6 +1765,8 @@ def admin_get_order_detail(order_id):
                 "dispute_id": escrow.dispute_id if escrow else None,
                 "dispute_reason": escrow.dispute_reason if escrow else None,
             } if escrow else None,
+            # What really happened to the seller's payout (app/services/payout_reconciliation.py).
+            "payout": _admin_payout_state(order, escrow),
             "daya_payment": daya_payment.to_dict() if daya_payment else None,
         }
     }), 200

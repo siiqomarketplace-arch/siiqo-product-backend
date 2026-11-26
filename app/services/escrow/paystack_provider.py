@@ -208,12 +208,18 @@ class PaystackProvider(BaseEscrowProvider):
         # Attach split payment params if a vendor subaccount was found
         if vendor_subaccount_code:
             payload["subaccount"] = vendor_subaccount_code
-            payload["transaction_charge"] = siiqo_fee_kobo
-            # bearer = "account" — the inflated buyer_total already includes
-            # Paystack's processing fee, so the main account (Siiqo) absorbs
-            # nothing extra. Paystack deducts its fee from buyer_total, then
-            # pays transaction_charge (Siiqo fee) to Siiqo's main account and
-            # the remainder to the vendor's subaccount.
+            # transaction_charge is the flat amount that goes to the MAIN
+            # account; the subaccount gets the rest, and with bearer=account
+            # Paystack's fee comes out of the main account's part
+            # (https://paystack.com/docs/payments/split-payments/). So the main
+            # account keeps everything that is not the seller's: Siiqo's 3%,
+            # the Paystack fee the buyer paid on top, and any delivery-partner
+            # fee. The subaccount then receives exactly the seller's share,
+            # which is what the payment-confirmation proof checks
+            # (app/services/split_settlement.py).
+            from app.services.payment_refs import seller_net_by_vendor
+            seller_net_kobo = int((seller_net_by_vendor(orders)[vendor_ids[0]] * 100).to_integral_value())
+            payload["transaction_charge"] = max(amount_kobo - seller_net_kobo, siiqo_fee_kobo)
             payload["bearer"] = "account"
             logging.info(
                 f"[PAYSTACK] Split payment — subaccount={vendor_subaccount_code}, "
@@ -298,6 +304,11 @@ class PaystackProvider(BaseEscrowProvider):
             # Flag so the webhook handler knows Paystack will settle vendor directly
             "used_split": bool(vendor_subaccount_code or split_code),
             "split_code": split_code,
+            # {vendor_id: subaccount code} a split was REQUESTED for (not proof).
+            "split_subaccounts": (
+                {vendor_ids[0]: vendor_subaccount_code} if vendor_subaccount_code
+                else ({v: vendor_paystack_subaccount(v) for v in vendor_ids} if split_code else {})
+            ),
             "error_message": None,
         }
 
@@ -337,6 +348,9 @@ class PaystackProvider(BaseEscrowProvider):
             "email": txn.get("customer", {}).get("email"),
             "reference": txn.get("reference"),
             "metadata": txn.get("metadata", {}),
+            # The whole verified transaction: split proof reads "subaccount",
+            # "fees_split" and "split" from it (app/services/split_settlement.py).
+            "raw": txn,
         }
 
     # ------------------------------------------------------------------
@@ -522,6 +536,7 @@ def paystack_transfer_to_vendor(
     return {
         "success": True,
         "transfer_code": transfer_code,
+        "status": data["data"].get("status"),
         "message": data.get("message", "Transfer initiated."),
         "error_message": None,
     }
@@ -722,3 +737,31 @@ def create_paystack_subaccount(
         "error_message": None,
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Transfer status (final outcome of a payout transfer)
+# ---------------------------------------------------------------------------
+
+def paystack_verify_transfer(reference: str) -> dict:
+    """GET /transfer/verify/:reference
+    (https://paystack.com/docs/api/transfer/#verify). Returns
+    {success, status, transfer_code, error_message}; status is Paystack's own
+    word (e.g. pending, otp, received, success, failed, reversed)."""
+    key = _paystack_key()
+    if not key:
+        return {"success": False, "error_message": "Paystack key not configured."}
+    try:
+        resp = requests.get(
+            f"{PAYSTACK_BASE_URL}/transfer/verify/{reference}",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error_message": str(exc)}
+    if not data.get("status") or not isinstance(data.get("data"), dict):
+        return {"success": False, "error_message": data.get("message", "Transfer lookup failed.")}
+    d = data["data"]
+    return {"success": True, "status": d.get("status"), "transfer_code": d.get("transfer_code"),
+            "reason": d.get("reason"), "error_message": None}

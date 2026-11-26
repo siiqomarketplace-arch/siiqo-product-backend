@@ -163,6 +163,7 @@ def test_split_settled_paystack_order_is_not_paid_twice(own_delivery, monkeypatc
     p = own_delivery(payment_method="PAYSTACK")
     p.escrow.transaction_number = f"PSK-{p.order.id}"
     p.escrow.split_settled = True
+    p.escrow.split_proof = "paystack verify: 1120000 kobo to ACCT_x"  # proven at confirmation
     db.session.commit()
     import app.services.escrow.paystack_provider as psp
     monkeypatch.setattr(psp, "paystack_transfer_to_vendor", lambda **k: pytest.fail("no transfer on a split"))

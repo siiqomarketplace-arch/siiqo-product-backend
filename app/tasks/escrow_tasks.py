@@ -87,7 +87,7 @@ def auto_release_escrow():
 
             # ── Delegate entirely to the unified release pipeline ─────────────
             # execute_order_escrow_release handles:
-            #   • Flutterwave transfer payout (with SPLIT: guard)
+            #   • Flutterwave transfer payout (a split counts only with gateway proof)
             #   • Paystack transfer payout (with subaccount split guard)
             #   • Daya payout
             #   • Vendor ledger credit (idempotent)

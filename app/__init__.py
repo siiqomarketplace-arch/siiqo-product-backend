@@ -184,6 +184,12 @@ def create_app(config_name: str | None = None) -> Flask:
                 # True only when Paystack really split this payment to the seller
                 # at checkout (app/services/split_settlement.py). NULL = older row.
                 "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS split_settled BOOLEAN",
+                # Payout safety: the subaccount a split was requested for, and the
+                # gateway's proof of the split (recorded at payment confirmation).
+                # payout_transfers / manual_payouts are made by db.create_all() above.
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS split_requested VARCHAR(80)",
+                "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS split_proof VARCHAR(255)",
+                "CREATE INDEX IF NOT EXISTS ix_payout_transfers_status_created_at ON payout_transfers (status, created_at)",
                 # Gateway payment reference shared by every order of one card
                 # payment (app/services/payment_refs.py). NULL = older row.
                 "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS payment_ref VARCHAR(120)",
@@ -1088,6 +1094,32 @@ def create_app(config_name: str | None = None) -> Flask:
                 )
             except Exception as partner_payout_err:
                 logger.warning(f"Partner weekly payout task registration skipped: {partner_payout_err}")
+
+            # Payout safety: follow every payout transfer to its final status
+            # (every 30 min, transfers pending > PAYOUT_TRANSFER_CHECK_AFTER_HOURS)
+            # and check daily that every released order was really paid
+            # (app/services/payout_tracking.py, app/services/payout_reconciliation.py).
+            try:
+                from app.services.payout_tracking import run_transfer_check
+                from app.services.payout_reconciliation import run_daily_reconciliation
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_transfer_check),
+                    trigger=IntervalTrigger(minutes=30),
+                    id='payout_transfer_check',
+                    name='Payouts: confirm final status of pending transfers',
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                scheduler.add_job(
+                    func=lambda: _run_in_context(app, run_daily_reconciliation),
+                    trigger=CronTrigger(hour=6, minute=15),
+                    id='payout_daily_reconciliation',
+                    name='Payouts: every released order is split, transfer, held or manual',
+                    replace_existing=True,
+                    max_instances=1,
+                )
+            except Exception as payout_check_err:
+                logger.warning(f"Payout check task registration skipped: {payout_check_err}")
 
             # Admin email broadcasts: carry on any job left part-sent (restart,
             # crashed thread). Jobs and per-recipient status live in the database.

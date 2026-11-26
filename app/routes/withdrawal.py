@@ -566,6 +566,7 @@ def request_withdrawal():
 
     # Primary transfer channel: Flutterwave if configured, else Paystack
     transfer_code, error_message = "", None
+    sent_by, sent_status = None, None
     try:
         result = None
         if has_flw:
@@ -578,6 +579,7 @@ def request_withdrawal():
             )
             if flw_res.get("success"):
                 transfer_code = flw_res.get("transfer_id", "")
+                sent_by, sent_status = "flutterwave", flw_res.get("status")
             elif has_paystack and bank_acc.recipient_code:
                 # Flutterwave rejected it; fall back to Paystack
                 from app.services.escrow.paystack_provider import paystack_transfer_to_vendor
@@ -603,6 +605,7 @@ def request_withdrawal():
                 error_message = result.get('error_message', 'Unknown error.')
         if result and result.get("success"):
             transfer_code = result.get("transfer_code", "")
+            sent_by, sent_status = "paystack", result.get("status")
     except Exception as exc:
         # We can't tell whether the money left. Keep the DEBIT and leave the
         # withdrawal PENDING for an admin to check against the gateway.
@@ -634,6 +637,15 @@ def request_withdrawal():
     withdrawal.status = 'SENT'
     withdrawal.transfer_code = transfer_code
     withdrawal.processed_at = _utcnow()
+    # Followed to its final status; a failed/reversed transfer gives the
+    # money back to the balance once (app/services/payout_tracking.py).
+    try:
+        from app.services.payout_tracking import record_transfer
+        record_transfer(kind="withdrawal", user_id=int(vendor_id), gateway=sent_by or "paystack",
+                        reference=reference, amount=requested_amount, gateway_transfer_id=transfer_code,
+                        withdrawal_id=withdrawal.id, debit_reference=reference, gateway_status=sent_status)
+    except Exception as _track_err:  # noqa: BLE001
+        logging.error(f"[WITHDRAWAL] Could not record transfer {reference}: {_track_err}")
     db.session.commit()
 
     return jsonify({

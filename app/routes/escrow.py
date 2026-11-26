@@ -202,27 +202,51 @@ def payout_transfer_reference(prefix: str, order, recipient_key: str) -> str:
     return f"{prefix}-{order.id}-{digest}"
 
 
+def payout_debit_reference(order, escrow) -> str:
+    return f"PAYOUT-{escrow.transaction_number or order.id}"
+
+
+def _track_order_transfer(order, escrow, gateway, reference, amount, transfer_id=None, status=None):
+    """Store an accepted order payout transfer so its final status is followed
+    (app/services/payout_tracking.py). Never raises: the money already left."""
+    try:
+        from app.services.payout_tracking import record_transfer
+        record_transfer(kind="order", user_id=order.vendor_id, gateway=gateway, reference=reference,
+                        amount=amount, gateway_transfer_id=transfer_id, order_id=order.id,
+                        debit_reference=payout_debit_reference(order, escrow), gateway_status=status)
+    except Exception as exc:  # noqa: BLE001
+        logging.error(f"[PAYOUT TRACK] Could not record {gateway} transfer {reference} for Order #{order.id}: {exc}")
+
+
 def _record_payout_debit(order, escrow, net_amount: float):
     """An automatic payout (transfer or gateway split) has paid the vendor:
     write the matching DEBIT so the ledger credit cannot be withdrawn again."""
     _debit_vendor_ledger(
         vendor_id=order.vendor_id,
         amount=net_amount,
-        reference_id=f"PAYOUT-{escrow.transaction_number or order.id}",
+        reference_id=payout_debit_reference(order, escrow),
         description=f"Automated gateway payout settlement for Order #{order.id}",
     )
 
 
 def _payout_unless_split(order, escrow, gateway: str, tag: str) -> bool:
-    """Pay the seller's share unless the gateway already did at checkout.
-    True = the seller has been paid (split, or transfer sent); False = the
+    """Pay the seller's share unless the gateway PROVABLY already did at
+    checkout. True = the seller has been paid (proven split, or a transfer the
+    gateway accepted and that is now tracked to its final status); False = the
     money stays in their Siiqo balance to withdraw. "Already paid" is decided
-    only by app/services/split_settlement.py, never by the seller merely
-    having a subaccount."""
-    from app.services.split_settlement import vendor_paid_by_split
-    if vendor_paid_by_split(order, escrow, gateway):
-        logging.info(f"[{tag}] Order #{order.id}: {gateway} split already paid the seller. No transfer.")
+    only by app/services/split_settlement.py from the gateway's verified
+    payment, never by a "SPLIT:" marker or the seller having a subaccount.
+    Never both a split and a transfer."""
+    from app.services.split_settlement import split_decision
+    decision = split_decision(order, escrow, gateway)
+    if decision == "split":
+        logging.info(f"[{tag}] Order #{order.id}: {gateway} split proven ({escrow.split_proof}). No transfer.")
         return True
+    if decision == "unknown":
+        # A Paystack split may have paid them and Paystack couldn't be asked:
+        # sending a transfer could pay twice. Keep it in their balance.
+        logging.error(f"[{tag}] Order #{order.id}: split could not be checked; payout kept in balance")
+        return False
     if gateway == "paystack":
         return bool(_paystack_payout_vendor(order, escrow))
     if gateway == "flutterwave":
@@ -709,9 +733,11 @@ def record_card_rail(order, rail: str) -> None:
         order.payment_method = rail
 
 
-def _activate_paystack_escrow(escrow, ref) -> bool:
+def _activate_paystack_escrow(escrow, ref, txn=None) -> bool:
     """Mark one escrow paid after Paystack confirmed its payment, and deliver.
-    Idempotent: only an escrow still PENDING_PAYMENT is touched."""
+    Idempotent: only an escrow still PENDING_PAYMENT is touched. ``txn`` is
+    the verified Paystack transaction: it decides whether a requested split
+    really paid the seller (app/services/split_settlement.py)."""
     escrow = lock_escrow(escrow)  # a webhook and a status poll may race here
     if escrow is None or escrow.status != EscrowStatus.PENDING_PAYMENT:
         return False
@@ -723,6 +749,8 @@ def _activate_paystack_escrow(escrow, ref) -> bool:
         return True
     order.status = 'PAID'
     record_card_rail(order, 'PAYSTACK')
+    from app.services.split_settlement import record_at_confirmation
+    record_at_confirmation(order, escrow, "paystack", txn)
     db.session.flush()
     from app.services.fx import capture_for_order
     capture_for_order(order, escrow, stage="payment")
@@ -752,14 +780,14 @@ def _activate_paystack_escrow(escrow, ref) -> bool:
     return True
 
 
-def _activate_paystack_payment(ref, fallback=None) -> int:
+def _activate_paystack_payment(ref, fallback=None, txn=None) -> int:
     """Paystack confirmed payment ``ref``: activate EVERY order it covered
     (app/services/payment_refs.py). Returns how many were activated now."""
     from app.services.payment_refs import escrows_for_payment
     escrows = escrows_for_payment(ref)
     if not escrows and fallback is not None:
         escrows = [fallback]
-    return sum(1 for e in escrows if _activate_paystack_escrow(e, ref))
+    return sum(1 for e in escrows if _activate_paystack_escrow(e, ref, txn=txn))
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +863,7 @@ def initiate_escrow():
     # (the seller would be paid by the gateway AND by Siiqo's transfer).
     prior_split = None
     if existing_txn_number:
-        prior_split = all(e.split_settled is True for e in escrow_txns)
+        prior_split = all(bool(e.split_requested) or e.split_settled is True for e in escrow_txns)
 
     # Delegate logic to Escrow Service Provider (Unified Payment)
     provider = get_escrow_provider(orders)
@@ -848,15 +876,17 @@ def initiate_escrow():
         return jsonify({"message": result.get("error_message") or "Escrow init failed"}), 400
 
     txn_map = {e.order_id: e for e in escrow_txns}
-    # Record for EVERY order in this payment whether a split really paid its
-    # seller at checkout (single-seller split, or the multi-seller split when
-    # MULTI_SPLIT_ENABLED). Used at release (app/services/split_settlement.py).
-    split_settled = bool(result.get("used_split"))
-    if prior_split is True and not split_settled:
-        # Same payment as before, which was split. Keep it marked split
-        # rather than risk paying the seller twice; logged for support.
+    # Only what was REQUESTED is recorded here: the subaccount a split was
+    # asked for. Whether the split really paid the seller is decided at
+    # payment confirmation from Paystack's verified transaction
+    # (app/services/split_settlement.py record_at_confirmation).
+    requested = {int(k): v for k, v in (result.get("split_subaccounts") or {}).items() if v} \
+        if result.get("used_split") else {}
+    if prior_split is True and not requested:
+        # Same payment reference as a split attempt: keep what was asked so
+        # confirmation checks Paystack for it (never assumed either way).
         logging.error(f"[ESCROW INIT] Retry of split payment {existing_txn_number} came back without a split")
-        split_settled = True
+        requested = {e.order.vendor_id: e.split_requested or "requested" for e in escrow_txns if e.order}
 
     payment_ref = result['transaction_number']
     for order in orders:
@@ -877,7 +907,8 @@ def initiate_escrow():
                 payment_link=result['payment_link'],
                 payscrow_transaction_id=result['provider_transaction_id'],
                 payscrow_ref=result['provider_reference'],
-                split_settled=split_settled,
+                split_requested=(requested.get(order.vendor_id) or None),
+                split_settled=None,
             )
             db.session.add(escrow_txn)
         else:
@@ -886,7 +917,9 @@ def initiate_escrow():
             escrow_txn.payment_link = result['payment_link']
             escrow_txn.payscrow_transaction_id = result['provider_transaction_id']
             escrow_txn.payscrow_ref = result['provider_reference']
-            escrow_txn.split_settled = split_settled
+            escrow_txn.split_requested = requested.get(order.vendor_id) or None
+            escrow_txn.split_settled = None
+            escrow_txn.split_proof = None
 
     db.session.commit()
 
@@ -1016,7 +1049,7 @@ def escrow_status():
                 verification = PaystackProvider().verify_transaction(ref)
                 if verification.get("success"):
                     # One payment can cover several orders: activate them all.
-                    _activate_paystack_payment(ref, fallback=escrow)
+                    _activate_paystack_payment(ref, fallback=escrow, txn=verification.get("raw"))
                     db.session.commit()
                     db.session.refresh(escrow)
                     logging.info(f"[ESCROW STATUS] Proactively verified & activated payment {ref}")
@@ -1160,6 +1193,10 @@ def _paystack_payout_vendor(order, escrow):
                 )
                 _notify_payout_failed(order, net_amount)
                 return False
+            _track_order_transfer(order, escrow, "paystack",
+                                  payout_transfer_reference("PAYOUT", order, bank_acc.recipient_code),
+                                  net_amount, transfer_result.get("transfer_code"),
+                                  transfer_result.get("status"))
             return True
         if bank_acc.account_number and bank_acc.bank_code:
             # Bank details exist but Paystack would not set up the recipient:
@@ -1317,6 +1354,8 @@ def _flutterwave_payout_vendor(order, escrow):
         )
         if flw_tx.get("success"):
             logging.info(f"[FLW PAYOUT] ✓ Flutterwave transfer dispatched for Order #{order.id}: ref={payout_ref}")
+            _track_order_transfer(order, escrow, "flutterwave", payout_ref, net_amount,
+                                  flw_tx.get("transfer_id"), flw_tx.get("status"))
             return True
         else:
             logging.warning(f"[FLW PAYOUT] Flutterwave transfer failed for Order #{order.id}: {flw_tx.get('error_message')}")
@@ -1415,7 +1454,7 @@ def execute_order_escrow_release(order, escrow, source="admin"):
         _debit_vendor_ledger(
             vendor_id=order.vendor_id,
             amount=net_amount,
-            reference_id=f"PAYOUT-{escrow.transaction_number or order.id}",
+            reference_id=payout_debit_reference(order, escrow),
             description=f"Automated gateway payout settlement for Order #{order.id}",
         )
 
