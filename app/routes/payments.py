@@ -1100,6 +1100,7 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                         to_email=buyer_email,
                         subject=f"Payment Confirmed - Order #{order_id}",
                         template_name="system_notice",
+                        notice_title="Payment confirmed",
                         first_name=buyer_name,
                         notice_text=(
                             f"Your {'bank transfer' if is_naira else 'crypto'} payment for Order #{order_id} "

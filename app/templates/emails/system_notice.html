@@ -30,7 +30,7 @@
             {% include "emails/_brand_header.html" %}
         </div>
         <div class="content">
-            <h2>Important Notice</h2>
+            <h2>{{ notice_title or "Important Notice" }}</h2>
             <p>Hi {{ first_name }},</p>
             
             <div class="highlight-box">

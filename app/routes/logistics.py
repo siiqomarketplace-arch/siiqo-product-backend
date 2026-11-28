@@ -175,6 +175,13 @@ def delivery_quote():
     pickup = (ds or {}).get("pickup") or {}
     if ds is None or pickup.get("enabled"):
         area = (pickup.get("area") or ", ".join(x for x in (sf.city, sf.state) if x) or "").strip()
+        # "FCT, Nigeria, FCT, Nigeria" -> "FCT, Nigeria": say each place once.
+        _seen, _parts = set(), []
+        for _p in (x.strip() for x in area.split(",")):
+            if _p and _p.lower() not in _seen:
+                _seen.add(_p.lower())
+                _parts.append(_p)
+        area = ", ".join(_parts)
         options.append({"id": "self_pickup", "provider_type": "pickup", "provider_id": None,
                         "name": f"Pick up in {area} (free)" if area else "Pick up from the seller (free)",
                         "type": "pickup", "fee": 0.0, "currency": "NGN",

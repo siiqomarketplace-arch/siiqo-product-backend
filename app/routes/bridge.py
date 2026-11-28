@@ -542,7 +542,7 @@ def buyer_order_history():
             "image": (item.product.images[0] if item.product and item.product.images else None),
             "product_type": (item.product.product_type if item.product else "physical") or "physical",
             "file_url": (item.product.file_url if item.product and o_paid else None),
-            "booking_link": (item.product.booking_link if item.product else None),
+            "booking_link": (item.product.booking_link if item.product and o_paid else None),
         } for item in (o.items or [])]
 
         is_all_digital = bool(items) and all(item.get("product_type") == "digital" for item in items)

@@ -532,3 +532,13 @@ def test_unpaid_job_hidden_from_partner_until_paid(client, make_partner, make_ve
     _pay(order)
     rows = client.get("/api/partners/dashboard/assignments", headers=h).get_json()["data"]
     assert len(rows) == 1 and rows[0]["status"] == "ASSIGNED" and rows[0]["buyer_name"] == "Ada Buyer"
+
+
+def test_pickup_name_says_each_place_once(client, make_vendor, make_product):
+    """A pickup area saved as "FCT, Nigeria, FCT, Nigeria" is shown once."""
+    vendor, store, _ = _store(make_vendor, make_product)
+    store.delivery_settings = {"pickup": {"enabled": True, "area": "FCT, Nigeria, FCT, Nigeria"}}
+    db.session.commit()
+    opts = client.get(f"/api/logistics/quote?vendor_id={vendor.id}&state=Nasarawa").get_json()["options"]
+    pickup = [o for o in opts if o["id"] == "self_pickup"][0]
+    assert pickup["name"] == "Pick up in FCT, Nigeria (free)"
