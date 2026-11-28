@@ -358,3 +358,25 @@ def test_admin_retry_payout_refuses_foreign_order_without_rate(client, make_vend
     assert res.status_code == 409
     assert res.get_json()["code"] == "FX_RATE_REQUIRED"
     assert transfers == []
+
+
+def test_daya_physical_buyer_email_links_to_a_real_order_page(
+        make_vendor, make_product, make_order, transfers, quote, monkeypatch):
+    """The "Track your order" link must open the order page (it went to /orders/<id>, a 404)."""
+    import app.utils.email as email
+    sent = []
+    monkeypatch.setattr(email, "send_siiqo_email", lambda *a, **k: sent.append(k) or True)
+    vendor, order, escrow = _order(make_vendor, make_product, make_order, "NGN",
+                                   payment_method="DAYA_BANK_TRANSFER", status=EscrowStatus.PENDING_PAYMENT,
+                                   product_type="physical", prefix="ESC")
+    order.buyer_email = "guest@example.com"
+    dp = DayaPayment(order_id=order.id, payment_type="ngn_onramp", amount_ngn=100,
+                     status="COMPLETED", daya_deposit_id="dep_track")
+    db.session.add(dp)
+    db.session.commit()
+    payments_routes._handle_crypto_payment_confirmed(order.id, dp)
+    buyer_mail = [k for k in sent if k.get("to_email") == "guest@example.com"]
+    assert buyer_mail, "buyer was not emailed"
+    text = buyer_mail[0]["notice_text"]
+    assert f"https://siiqo.com/order-confirm/{order.id}?token=" in text
+    assert f"siiqo.com/orders/{order.id}" not in text

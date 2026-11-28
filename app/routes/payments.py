@@ -1095,6 +1095,7 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
             if buyer_email:
                 buyer_name = (buyer.first_name if buyer else None) or getattr(order, 'buyer_name', None) or "Customer"
                 try:
+                    from app.routes.escrow import generate_order_token
                     send_siiqo_email(
                         to_email=buyer_email,
                         subject=f"Payment Confirmed - Order #{order_id}",
@@ -1104,7 +1105,8 @@ def _handle_crypto_payment_confirmed(order_id: int, dp: DayaPayment):
                             f"Your {'bank transfer' if is_naira else 'crypto'} payment for Order #{order_id} "
                             f"has been confirmed.<br><br>"
                             f"Your order is now being prepared for delivery. You'll be notified when it ships.<br><br>"
-                            f"<a href='https://siiqo.com/orders/{order_id}'>Track your order →</a>"
+                            f"<a href='https://siiqo.com/order-confirm/{order_id}?token={generate_order_token(order_id)}'>"
+                            f"Track your order →</a>"
                         ),
                     )
                 except Exception as e:
