@@ -430,3 +430,30 @@ def test_list_is_paginated_and_bounded(client, make_vendor, make_order, superadm
     assert body["total"] == 30 and body["pages"] == 3 and body["page"] == 2 and len(body["orders"]) == 10
     assert len(queries) <= 15, len(queries)    # fixed, not one-per-row
     assert elapsed < 5
+
+
+def test_manual_payout_by_order_number_works_for_an_unlisted_released_order(client, make_vendor, make_order,
+                                                                           superadmin):
+    """The admin "by order number" form: any released order, even one the check doesn't list."""
+    vendor, _ = _seller(make_vendor)
+    order = make_order(vendor, total=2500, payment_method="FLUTTERWAVE")
+    db.session.add(EscrowTransaction(order_id=order.id, transaction_number=None, status=EscrowStatus.RELEASED,
+                                     amount=2500, fee_amount=75,
+                                     released_at=datetime.now(timezone.utc) - timedelta(days=5)))
+    db.session.commit()
+    assert order.id not in {r["order_id"] for r in client.get(
+        "/api/admin/payouts/split-mismatch", headers=superadmin).get_json()["orders"]}
+    payload = {"amount": "2425", "gateway": "flutterwave", "reference": "TRF-BYNUMBER", "paid_on": "2026-11-26"}
+    res = client.post(f"/api/admin/payouts/split-mismatch/{order.id}/manual-payout", headers=superadmin,
+                      json=payload)
+    assert res.status_code == 200 and res.get_json()["manual_payout"]["reference"] == "TRF-BYNUMBER"
+    assert _get_ledger_balance(vendor.id) == Decimal("0")
+    # Unknown or unreleased orders are refused with a plain message.
+    assert client.post("/api/admin/payouts/split-mismatch/999999/manual-payout", headers=superadmin,
+                       json=payload).status_code == 400
+    held = make_order(vendor, total=1000, payment_method="FLUTTERWAVE")
+    db.session.add(EscrowTransaction(order_id=held.id, status=EscrowStatus.IN_ESCROW, amount=1000, fee_amount=30))
+    db.session.commit()
+    res = client.post(f"/api/admin/payouts/split-mismatch/{held.id}/manual-payout", headers=superadmin,
+                      json=dict(payload, reference="TRF-HELD"))
+    assert res.status_code == 400 and "not been released" in res.get_json()["message"]
