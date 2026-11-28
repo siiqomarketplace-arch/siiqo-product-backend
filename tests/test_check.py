@@ -136,3 +136,14 @@ def test_at_most_five_results(client, make_vendor):
         vendor, _ = make_vendor()
         _ident(vendor.id, "phone", "2348099999999")
     assert len(_check(client, "08099999999")["results"]) == 5
+
+
+def test_at_store_name_as_shown_on_the_passport_is_found(client, make_vendor):
+    """The Passport shows @<store-slug>; pasting it (dash and all) finds the seller."""
+    vendor, store = make_vendor()
+    store.store_slug = "timeless-vibes-test"
+    db.session.commit()
+    for q in ("@timeless-vibes-test", "@Timeless-Vibes-Test", "timeless-vibes-test"):
+        body = client.post("/api/check", json={"q": q}).get_json()
+        assert body["found"] is True, q
+    assert client.post("/api/check", json={"q": "@no-such-store-xyz"}).get_json()["found"] is False

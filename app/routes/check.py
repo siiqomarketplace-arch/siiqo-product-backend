@@ -87,9 +87,15 @@ def classify(raw):
     if phone:
         return "phone", [("phone", ("eq", phone))], {}
 
+    # The Trust Passport shows a store as @<store-slug> (which may have a
+    # dash), so an @handle is also looked up as a Siiqo store.
+    at_slug = lowered[1:] if lowered.startswith("@") else ""
+    store_extra = {"store_slug": at_slug} if at_slug and _SLUG_RE.match(at_slug) else {}
     if _HANDLE_RE.match(lowered):
         handle = foundations._norm_handle(lowered)
-        return "handle", [("handle", ("endswith", f":{handle}"))], {}
+        return "handle", [("handle", ("endswith", f":{handle}"))], store_extra
+    if store_extra:
+        return "handle", [], store_extra
 
     if _looks_like_url(lowered):
         host, path = _host_and_path(lowered)
@@ -212,7 +218,7 @@ def check_seller():
         return jsonify({"query_type": "unknown", "found": False, "results": [],
                         "message": "That's too long to check. Paste just the link, number or handle."}), 400
     query_type, lookups, extras = classify(q)
-    results = _results(_matches(lookups, extras)) if lookups else []
+    results = _results(_matches(lookups, extras)) if (lookups or extras) else []
     if not results:
         unclaimed = _directory_result(query_type, lookups, q)
         if unclaimed is not None:

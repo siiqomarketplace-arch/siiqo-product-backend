@@ -182,7 +182,7 @@ class Storefront(db.Model):
     # Status flags
     is_verified = db.Column(db.Boolean, default=False)   # admin approved
     is_published = db.Column(db.Boolean, default=False)  # vendor published
-    is_pro_verified = db.Column(db.Boolean, default=False)  # Pro Verified badge subscription (₦2,500/yr)
+    is_pro_verified = db.Column(db.Boolean, default=False)  # Verified Pro badge (plan: ₦3,000/month or ₦19,990/year)
     pro_verified_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # Set when Siiqo closes the store (admin close, or the owner's account was
     # deleted). A closed store is unpublished and the seller can't republish it.
